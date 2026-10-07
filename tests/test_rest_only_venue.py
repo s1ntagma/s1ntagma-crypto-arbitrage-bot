@@ -1,5 +1,4 @@
 """REST-only venues (no WebSocket, e.g. Revolut X): no stream tasks, REST calls count as liveness."""
-import pytest
 
 from latbot.clock import SimClock
 from latbot.config import ExchangeConfig, ExchangeCredentials, Settings
