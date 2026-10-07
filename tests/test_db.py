@@ -304,3 +304,28 @@ def test_thread_safety_smoke(db: Database) -> None:
     assert not errors
     assert all(db.kv_get(f"k{n}") == 49 for n in range(8))
     assert len(db.list_trades(limit=1000)) == 40
+
+
+def test_order_without_exchange_id_does_not_collide(db: Database) -> None:
+    """REJECTED / timed-out orders have no exchange id yet; they are keyed by
+    client id so the audit trail of each failed or unknown order survives."""
+    rejected = Order(id="", client_id="c-1", exchange="bybit", symbol="BTC/USDT", side=Side.BUY, type=OrderType.LIMIT,
+                     amount=1.0, price=100.0, status=OrderStatus.REJECTED, error="InvalidOrder: below min notional")
+    unknown = Order(id="", client_id="c-2", exchange="bybit", symbol="BTC/USDT", side=Side.BUY, type=OrderType.LIMIT,
+                    amount=1.0, price=100.0, status=OrderStatus.SENT,
+                    error="timeout: status unknown, reconcile with fetch_order(client_id=c-2)")
+    db.save_order(rejected, "tr_a")
+    db.save_order(unknown, "tr_b")
+    assert len(db.list_orders()) == 2
+    rows_a = db.list_orders("tr_a")
+    assert len(rows_a) == 1 and rows_a[0]["client_id"] == "c-1" and rows_a[0]["status"] == "REJECTED"
+    assert "below min notional" in rows_a[0]["error"]
+    # the unknown order is reconciled later: same client id, now with an exchange id -> same row, updated
+    unknown.id = "ex-77"
+    unknown.status = OrderStatus.FILLED
+    unknown.error = None
+    db.save_order(unknown, "tr_b")
+    assert len(db.list_orders()) == 2
+    rows_b = db.list_orders("tr_b")
+    assert len(rows_b) == 1 and rows_b[0]["id"] == "ex-77" and rows_b[0]["status"] == "FILLED"
+    assert db.list_orders("tr_a")[0]["status"] == "REJECTED"

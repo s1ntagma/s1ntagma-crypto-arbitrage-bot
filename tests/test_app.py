@@ -600,8 +600,11 @@ def test_bat_files_are_ascii_crlf(name: str) -> None:
 
 def test_start_bat_loops_and_stop_bat_raises_the_flag() -> None:
     start = (REPO / "start.bat").read_text(encoding="ascii")
-    assert "python -u run.py" in start and ":loop" in start and "timeout /t 5" in start
-    assert 'if "%RC%"=="0" goto done' in start and 'if "%RC%"=="3" goto done' in start
+    assert "set PY=" in start and "%PY% -u run.py" in start  # a detected Python 3.11+, unbuffered
+    assert ":loop" in start and "timeout /t 5" in start and "goto loop" in start
+    assert 'if "%RC%"=="0" goto done' in start
+    rc3 = re.search(r'if "%RC%"=="3" \((.*?)\)', start, re.S)
+    assert rc3 is not None and "goto done" in rc3.group(1)  # another instance running: never loop
     stop = (REPO / "stop.bat").read_text(encoding="ascii")
     assert "logs\\stop.flag" in stop and "logs\\bot.pid" in stop
     restart = (REPO / "restart.bat").read_text(encoding="ascii")
@@ -686,3 +689,88 @@ async def test_run_app_shutdown_closes_a_trade_in_flight(tmp_path: Path) -> None
         assert row is not None and row["state"] == "CLOSED"
     finally:
         db.close()
+
+
+# --------------------------------------------------------------------------- #
+# 10. execution-only adapters (LIVE / Bybit demo) do not open market streams of their own
+# --------------------------------------------------------------------------- #
+class StartRecorder(FakeAdapter):
+    """FakeAdapter that accepts ``ws_assets`` like CcxtAdapter and records it."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.start_calls: list[tuple[list[str], int | None]] = []
+        self.market_source: Any = None
+
+    async def start(self, symbols: Any, ws_assets: int | None = None) -> None:
+        self.start_calls.append((list(symbols), ws_assets))
+        if ws_assets == 0:
+            return  # execution-only: markets resolved, nothing streamed
+        await super().start(symbols)
+
+
+def build_with_creds(tmp_path: Path, secrets: Secrets, **over: Any) -> tuple[AppContext, dict[str, list[StartRecorder]]]:
+    bus, clock = EventBus(), SimClock()
+    made: dict[str, list[StartRecorder]] = {}
+
+    def factory(cfg: ExchangeConfig, creds: Any) -> StartRecorder:
+        adapter = StartRecorder(cfg, bus, clock, symbols={"BTC": SYMBOLS.get(cfg.name, "BTC/USDT")})
+        made.setdefault(cfg.name, []).append(adapter)
+        return adapter
+
+    ctx = build_context(make_settings(tmp_path, **over), secrets, bus=bus, clock=clock, adapter_factory=factory,
+                        config_path=tmp_path / "config.json", stop_flag=tmp_path / "stop.flag")
+    ctx.stop_flag_poll_s = 0.05
+    return ctx, made
+
+
+def exchange_creds(name: str) -> Any:
+    from latbot.config import ExchangeCredentials
+
+    return ExchangeCredentials(name=name, api_key="key-" + "k" * 12, api_secret="sec-" + "s" * 12)
+
+
+async def test_live_adapter_starts_execution_only_and_shares_the_market_adapter(tmp_path: Path) -> None:
+    from latbot.app import _adapters_to_start
+
+    ctx, made = build_with_creds(tmp_path, Secrets(exchanges={"kraken": exchange_creds("kraken")}))
+    market, live = made["kraken"]
+    assert ctx.adapters["kraken"] is market and ctx.exec_adapters[Mode.LIVE]["kraken"] is live
+    assert live.market_source is market
+    plan = _adapters_to_start(ctx)
+    assert plan == [(ctx.adapters["binance"], None), (ctx.adapters["kucoin"], None), (market, None), (live, 0)]
+    rc = await asyncio.wait_for(run_app(ctx, seconds=0.3, serve=False), 10.0)
+    assert rc == 0
+    assert market.start_calls == [(["BTC"], None)] and market.supported_symbols() == {"BTC/EUR"}
+    assert live.start_calls == [(["BTC"], 0)] and live.supported_symbols() == set()
+
+
+async def test_bybit_demo_paper_venue_starts_execution_only(tmp_path: Path) -> None:
+    from latbot.app import _adapters_to_start
+
+    exchanges = [
+        ExchangeConfig(name="binance", role=ExchangeRole.SIGNAL, stream="bbo"),
+        ExchangeConfig(name="kraken", role=ExchangeRole.EXECUTION),
+        ExchangeConfig(name="bybit", role=ExchangeRole.EXECUTION, demo=True),
+    ]
+    ctx, made = build_with_creds(tmp_path, Secrets(exchanges={"bybit": exchange_creds("bybit")}),
+                                 exchanges=exchanges, paper_engine="bybit_demo")
+    market, demo = made["bybit"]
+    assert ctx.exec_adapters[Mode.PAPER]["bybit"] is demo and not isinstance(demo, PaperAdapter)
+    assert "bybit" not in ctx.exec_adapters[Mode.LIVE]
+    assert demo.market_source is market
+    assert (demo, 0) in _adapters_to_start(ctx) and (market, None) in _adapters_to_start(ctx)
+    assert isinstance(ctx.exec_adapters[Mode.PAPER]["kraken"], PaperAdapter)
+    assert all(not isinstance(a, PaperAdapter) for a, _ in _adapters_to_start(ctx))
+    rc = await asyncio.wait_for(run_app(ctx, seconds=0.3, serve=False), 10.0)
+    assert rc == 0
+    assert demo.start_calls == [(["BTC"], 0)] and market.start_calls == [(["BTC"], None)]
+
+
+async def test_plain_adapters_without_ws_assets_support_still_start(tmp_path: Path) -> None:
+    """An adapter whose start() takes no ``ws_assets`` (FakeAdapter) is started the old way."""
+    b = build(tmp_path)
+    ctx = b.ctx
+    rc = await asyncio.wait_for(run_app(ctx, seconds=0.2, serve=False), 10.0)
+    assert rc == 0
+    assert b.fakes["kraken"].supported_symbols() == {"BTC/EUR"}

@@ -730,7 +730,10 @@ class CcxtAdapter(ExchangeAdapter):
         ``_RL_PENALTY_MAX_S``) - the exchanges' own contract: keep knocking
         and the ban grows - and a quiet period resets it.  The public and
         the private instance share the counter (one IP budget), and
-        ``health.rate_limited_until_mono`` never moves earlier.
+        ``health.rate_limited_until_mono`` never moves earlier.  The header
+        and status are read off the instance right after it raised; with
+        concurrent requests on one instance they may belong to a neighbouring
+        response, in which case only the floors / escalation apply.
         """
         now = self.clock.mono()
         status = _http_status(inst)

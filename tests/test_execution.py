@@ -1326,6 +1326,31 @@ async def test_closing_orders_wait_for_the_rate_limit_window() -> None:
     assert env.risk.open_trades() == 0
 
 
+async def test_emergency_close_refuses_to_send_into_a_long_rate_limit_window() -> None:
+    """An emergency close is awaited by a person (API / Telegram): it waits a
+    few seconds for a short window, but a long ban makes it refuse at once -
+    nothing is sent into the ban and the position stays tracked for a retry."""
+    env = make_env(adapter_cls=OutageAdapter, exit_mode="never", market_price=101.0)
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    a = env.adapter()
+    assert trade.state == OppState.FAILED and len(env.engine.open_positions()) == 1, res
+    a.outage = False
+    await env.engine.emergency_stop("outage over")  # the resting GTC is cancelled, the position is known
+    a.health.rate_limited_until_mono = env.clock.mono() + 600.0  # a ban no route may wait for
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    closed = await env.engine.emergency_close_positions()
+    assert closed == [] and loop.time() - t0 < 1.0
+    assert OrderType.MARKET not in [r.type for r in a.placed()]  # nothing sent into the ban
+    assert len(env.engine.open_positions()) == 1 and env.risk.open_trades() == 1
+    # the window is over: the close goes through
+    a.health.rate_limited_until_mono = None
+    closed = await env.engine.emergency_close_positions()
+    assert [t.id for t in closed] == [trade.id] and trade.state == OppState.CLOSED
+    assert a.placed()[-1].type == OrderType.MARKET and env.engine.open_positions() == []
+
+
 @pytest.mark.parametrize("raise_ccxt", [False, True])
 async def test_entry_timeout_is_reconciled_by_client_id(raise_ccxt: bool) -> None:
     env = make_env(adapter_cls=TimeoutAdapter, raise_ccxt=raise_ccxt)

@@ -781,3 +781,73 @@ async def test_open_orders_and_cancel_all():
     h.private.cancel_all_result = ccxt.NotSupported("no")
     h.private.cancel_result = None
     assert await h.adapter.cancel_all("BTC/EUR") == 2
+
+
+# --------------------------------------------------------------------------- #
+# execution-only adapters (LIVE / Bybit demo) share the market adapter's data
+# --------------------------------------------------------------------------- #
+async def test_exec_only_start_resolves_markets_without_streams():
+    """``ws_assets=0``: load markets + resolve symbols, but no book/trade/health
+    tasks - the market adapter of the same exchange already streams them."""
+    h = Harness(spot_cfg(), CREDS)
+    h.public.books = [dict(BOOK1)]
+    await h.adapter.start(["BTC", "ETH"], ws_assets=0)
+    try:
+        await asyncio.sleep(0.05)
+        assert h.adapter._tasks == []
+        assert h.of(events.BOOK) == [] and h.of(events.HEALTH) == []
+        assert h.adapter.symbol_for("BTC") == "BTC/EUR" and h.adapter.symbol_for("ETH") == "ETH/USDC"
+        assert h.adapter.supported_symbols() == set()
+        assert h.public.loaded == 1 and h.private.markets_set
+        book = await h.adapter.fetch_order_book("BTC")  # REST still works for revalidation
+        assert book.symbol == "BTC/EUR" and book.best_bid == 101.0
+        assert h.adapter.order_book("BTC") is None  # nothing cached without a market source
+    finally:
+        await h.adapter.stop()
+
+
+async def test_exec_only_adapter_shares_the_market_adapters_books_and_health():
+    market = Harness(spot_cfg())
+    instances: list[FakeCcxt] = []
+
+    def factory(name: str, opts: dict[str, Any]) -> FakeCcxt:
+        inst = FakeCcxt(name, opts)
+        instances.append(inst)
+        return inst
+
+    live = CcxtAdapter(spot_cfg(), market.bus, market.clock, market.settings, CREDS, exchange_factory=factory)
+    live.market_source = market.adapter
+    assert live.health is market.adapter.health
+    assert live.market_source is market.adapter
+    market.public.books = [dict(BOOK1)]
+    await market.adapter.start(["BTC"])
+    await live.start(["BTC"], ws_assets=0)
+    try:
+        await asyncio.sleep(0.05)
+        books = market.of(events.BOOK)
+        assert len(books) == 1  # one stream per exchange, not one per adapter
+        assert live.order_book("BTC/EUR") is books[0] and live.order_book("BTC") is books[0]
+        assert live.health.ws_connected is True and live.health.last_msg_mono is not None
+        healths = market.of(events.HEALTH)
+        assert healths and all(hh is market.adapter.health for hh in healths)
+        assert [t.get_name() for t in live._tasks] == []
+        assert instances[0].books == []  # the live public instance never opened a stream
+        await live.stop()
+        assert market.adapter.health.ws_connected is True  # stopping the exec adapter leaves the shared health alone
+    finally:
+        await market.adapter.stop()
+    assert market.adapter.health.ws_connected is False
+
+
+async def test_exec_only_demo_adapter_asserts_the_demo_host_at_start():
+    class NoRewrite(FakeCcxt):
+        demo_rewrites_url = False
+
+    h = Harness(spot_cfg(name="bybit", demo=True), CREDS)
+    h.private.demo_rewrites_url = False
+    h.private.urls["api"] = {"private": "https://api.bybit.com"}
+    with pytest.raises(ExchangeError, match="demo"):
+        await h.adapter.start(["BTC"], ws_assets=0)
+    assert h.adapter._tasks == []
+    await h.adapter.stop()
+    assert NoRewrite.demo_rewrites_url is False

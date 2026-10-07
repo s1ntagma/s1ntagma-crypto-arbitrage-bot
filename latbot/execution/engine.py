@@ -79,7 +79,8 @@ log = logging.getLogger(__name__)
 _EPS = 1e-9
 _CANCEL_REFRESH_ATTEMPTS = 3  # fetch_order attempts after a failed cancel before the state counts as unknown
 _MAX_RETRY_SLEEP_S = 5.0
-_RL_MAX_CLOSE_WAIT_S = 300.0  # longest a closing order / cancel waits for an exchange rate-limit window
+_RL_MAX_CLOSE_WAIT_S = 300.0  # longest the AUTO flow's closing order / cancel waits for an exchange rate-limit window
+_RL_MAX_EMERGENCY_WAIT_S = 5.0  # an emergency close is awaited by a person (API / Telegram): short wait, else refuse
 _GONE_GRACE_S = 10.0  # "order not found" resolves an order only this long after it was sent (propagation lag)
 _RESTORE_MAX_AGE_S = 3 * 86400.0  # older rows are not restored as positions (logged instead)
 _NOTE_TIMEOUT_S = 2.0
@@ -319,10 +320,14 @@ class ExecutionEngine:
         trade_id: str,
         reduce_only: bool = False,
         closing: bool = False,
+        max_rl_wait_s: float = _RL_MAX_CLOSE_WAIT_S,
     ) -> Order:
         """Send ``req``.  Returns an ``Order`` even on failure (status FAILED,
         or SENT without an id = unknown after a timeout that could not be
-        reconciled; the caller must never treat that as "not filled")."""
+        reconciled; the caller must never treat that as "not filled").  A
+        *closing* order waits up to ``max_rl_wait_s`` for the exchange's
+        rate-limit window and comes back FAILED (nothing sent) when the
+        window is longer."""
         failed = Order(
             id="",
             client_id=req.client_id,
@@ -343,7 +348,12 @@ class ExecutionEngine:
             kwargs["reduce_only"] = True
         if closing:
             # a closing order may go out during an emergency, but never into an active rate-limit ban
-            await self._await_rate_limit(adapter, f"{req.type.value} {req.side.value} {req.symbol}")
+            try:
+                await self._await_rate_limit(adapter, f"{req.type.value} {req.side.value} {req.symbol}", max_rl_wait_s)
+            except RateLimited as exc:
+                failed.error = redact(str(exc))
+                log.error("order %s not sent to %s: %s", req.client_id, adapter.name, exc)
+                return failed
         sent_mono, sent_ts = self._clock.mono(), self._clock.wall()
         failed.sent_mono, failed.sent_ts = sent_mono, sent_ts
         log.info(
@@ -457,11 +467,14 @@ class ExecutionEngine:
         return max(0.0, wait)
 
     async def _await_rate_limit(self, adapter: ExchangeAdapter, what: str, max_wait_s: float = _RL_MAX_CLOSE_WAIT_S) -> None:
-        """Wait out the exchange's rate-limit window (bounded) before ``what``
-        - a request sent into an active ban only extends the ban."""
-        wait = min(self._rate_limit_wait_s(adapter), max(0.0, max_wait_s))
+        """Wait out the exchange's rate-limit window before ``what``.  When the
+        window outlasts ``max_wait_s`` raise ``RateLimited`` at once instead -
+        a request sent into an active ban only extends the ban."""
+        wait = self._rate_limit_wait_s(adapter)
         if wait <= 0.0:
             return
+        if wait > max_wait_s:
+            raise RateLimited(retry_after_s=wait, msg=f"{what} not sent: {adapter.name} rate-limit window ends in {wait:.0f} s")
         log.warning("%s on %s delayed %.1f s: inside the exchange's rate-limit window", what, adapter.name, wait)
         await asyncio.sleep(wait)
 
@@ -511,7 +524,12 @@ class ExecutionEngine:
                 return order
         confirmed = False
         retry_after = 0.0
-        await self._await_rate_limit(adapter, f"cancel of {order.id}")
+        try:
+            await self._await_rate_limit(adapter, f"cancel of {order.id}")
+        except RateLimited as exc:
+            order.error = order.error or redact(str(exc))
+            log.error("cancel of %s on %s not sent: %s", order.id, adapter.name, exc)
+            return order  # still resting as far as we know: the caller treats it as unresolved, never as cancelled
         try:
             res = await adapter.cancel_order(order.id, order.symbol)
             confirmed = True
@@ -526,7 +544,11 @@ class ExecutionEngine:
             log.warning("cancel_order %s on %s failed: %s", order.id, adapter.name, exc)
         attempts = 1 if confirmed else _CANCEL_REFRESH_ATTEMPTS
         for i in range(attempts):
-            await self._await_rate_limit(adapter, f"fetch_order {order.id}")
+            try:
+                await self._await_rate_limit(adapter, f"fetch_order {order.id}")
+            except RateLimited as exc:
+                log.error("fetch_order %s on %s not sent: %s", order.id, adapter.name, exc)
+                break
             fresh, _why = await self._fetch_state(adapter, order)
             if fresh is not None:
                 order = fresh
@@ -545,8 +567,11 @@ class ExecutionEngine:
         log.error("order %s on %s: cancel not confirmed and state unknown", order.id, adapter.name)
         return order
 
-    async def _exit_market(self, adapter: ExchangeAdapter, trade: TradeRecord, amount: float) -> Order:
-        """MARKET exit of ``amount`` base (reduceOnly on swap).  Allowed during emergency."""
+    async def _exit_market(
+        self, adapter: ExchangeAdapter, trade: TradeRecord, amount: float, *, max_rl_wait_s: float = _RL_MAX_CLOSE_WAIT_S
+    ) -> Order:
+        """MARKET exit of ``amount`` base (reduceOnly on swap).  Allowed during
+        emergency; waits up to ``max_rl_wait_s`` for a rate-limit window."""
         req = OrderRequest(
             exchange=trade.exchange,
             symbol=trade.symbol,
@@ -560,7 +585,9 @@ class ExecutionEngine:
         holder = self._in_flight.get(trade.opportunity_id or "")
         if holder is not None and holder.trade is not trade:
             holder = None
-        order = await self._place(adapter, req, trade_id=trade.id, reduce_only=self._is_swap(trade.exchange), closing=True)
+        order = await self._place(
+            adapter, req, trade_id=trade.id, reduce_only=self._is_swap(trade.exchange), closing=True, max_rl_wait_s=max_rl_wait_s
+        )
         if order.status in (OrderStatus.FAILED, OrderStatus.REJECTED):
             return order
         if holder is not None:
@@ -1732,7 +1759,7 @@ class ExecutionEngine:
                 closed.append(trade)
                 continue
             await self._note(trade, f"emergency close: exiting {pos.base_open:.8g} {trade.asset} at market")
-            market = await self._exit_market(pos.adapter, trade, pos.base_open)
+            market = await self._exit_market(pos.adapter, trade, pos.base_open, max_rl_wait_s=_RL_MAX_EMERGENCY_WAIT_S)
             self._persist_order(market, trade.id)
             if not market.is_done:
                 pos.pending, pos.pending_filled = market, float(market.filled)
@@ -1790,7 +1817,7 @@ class ExecutionEngine:
                 )
                 self._trades[trade.id] = trade
                 await self._note(trade, f"emergency close: untracked {side} position {amount:.8g} {base_ccy} on {name}")
-                market = await self._exit_market(adapter, trade, amount)
+                market = await self._exit_market(adapter, trade, amount, max_rl_wait_s=_RL_MAX_EMERGENCY_WAIT_S)
                 trade.exit_order = market
                 self._persist_order(market, trade.id)
                 trade.finished_ts = self._clock.wall()

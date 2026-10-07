@@ -294,3 +294,30 @@ async def test_resolve_universe_with_started_ccxt_adapters():
     finally:
         for a in adapters.values():
             await a.stop()
+
+
+class SharingFake(FakeAdapter):
+    """FakeAdapter that, like CcxtAdapter, can share a market adapter's data."""
+
+    market_source: Any = None
+
+
+def test_execution_adapters_share_the_market_adapter_as_source():
+    class Sharing(Builder):
+        def __call__(self, cfg: ExchangeConfig, creds: ExchangeCredentials | None) -> FakeAdapter:
+            self.calls.append((cfg.name, creds))
+            return SharingFake(cfg, self.bus, self.clock, symbols={"BTC": "BTC/EUR"})
+
+    b = Sharing()
+    s = settings(paper_engine="bybit_demo")
+    secrets = Secrets(exchanges={"okx": creds("okx"), "bybit": creds("bybit")})
+    market = build_market_adapters(s, secrets, b.bus, b.clock, adapter_factory=b)
+    ex = build_execution_adapters(s, secrets, b.bus, b.clock, market, db=None, adapter_factory=b)
+    assert ex[Mode.LIVE]["okx"].market_source is market["okx"]
+    assert ex[Mode.PAPER]["bybit"].market_source is market["bybit"]
+    assert market["okx"].market_source is None and market["bybit"].market_source is None
+    # plain adapters without the attribute are left alone
+    b2 = Builder()
+    market2 = build_market_adapters(s, secrets, b2.bus, b2.clock, adapter_factory=b2)
+    ex2 = build_execution_adapters(s, secrets, b2.bus, b2.clock, market2, db=None, adapter_factory=b2)
+    assert not hasattr(ex2[Mode.LIVE]["okx"], "market_source")
