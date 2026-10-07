@@ -95,8 +95,9 @@
 
       <div id="cards" class="cards" aria-live="polite"></div>
       <div id="cards-empty" class="empty hidden">
-        <p class="empty-title">No opportunities match.</p>
-        <p class="empty-sub">Every card is a measured lag: no data, no signal. Nothing is invented to fill the grid.</p>
+        <div class="scanner" aria-hidden="true"></div>
+        <p class="empty-title" data-role="empty-title">Watching exchanges · no executable lag right now</p>
+        <p class="empty-sub" data-role="empty-sub">Signals need ≥2 venues to move while a target lags. Every card is a measured lag: no data, no signal — nothing is invented to fill the grid.</p>
       </div>
     </section>
 
@@ -127,7 +128,11 @@
           <tbody id="trades-body"></tbody>
         </table>
       </div>
-      <div id="trades-empty" class="empty hidden"><p class="empty-title">No trades yet.</p></div>
+      <div id="trades-empty" class="empty hidden">
+        <div class="scanner" aria-hidden="true"></div>
+        <p class="empty-title">No trades yet.</p>
+        <p class="empty-sub">A trade appears here the moment an opportunity is executed — MANUAL or AUTO — with expected vs actual NET side by side.</p>
+      </div>
     </section>
 
     <section id="tab-stats" class="tab-panel hidden" role="tabpanel" aria-label="Statistics">
@@ -141,7 +146,11 @@
           <tbody id="stats-body"></tbody>
         </table>
       </div>
-      <div id="stats-empty" class="empty hidden"><p class="empty-title">No statistics recorded yet.</p></div>
+      <div id="stats-empty" class="empty hidden">
+        <div class="scanner" aria-hidden="true"></div>
+        <p class="empty-title">No statistics recorded yet.</p>
+        <p class="empty-sub">Reaction delays, catch-up ratios and success rates are learned per asset and exchange as opportunities expire.</p>
+      </div>
     </section>
   </main>
 

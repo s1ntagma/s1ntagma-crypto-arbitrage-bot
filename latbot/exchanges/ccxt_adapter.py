@@ -75,6 +75,7 @@ _WS_BOOK_LIMITS: dict[str, list[int | None]] = {
     "bitvavo": [None],
     "htx": [None],
     "mexc": [5, 10, 20],
+    "revolutx": [None],
 }
 _LIMIT_LIST_RE = re.compile(r"\[\s*([0-9]+(?:\s*,\s*[0-9]+)*)\s*\]")
 
@@ -119,10 +120,22 @@ _RL_HEADER_MAX_S = 3 * 86400.0  # sanity cap on Retry-After (Binance bans top ou
 
 
 def _default_factory(name: str, opts: dict[str, Any]) -> Any:
+    """ccxt.pro class when the venue streams; otherwise the REST-only
+    ``ccxt.async_support`` class (e.g. Revolut X), covered by ticker polling
+    and REST order books instead of WebSocket streams."""
     cls = getattr(ccxtpro, name, None)
+    if cls is None:
+        import ccxt.async_support as ccxt_async
+
+        cls = getattr(ccxt_async, name, None)
     if cls is None:
         raise ExchangeError(f"unknown ccxt exchange '{name}'")
     return cls(opts)
+
+
+def is_rest_only(instance: Any) -> bool:
+    """True when the ccxt instance cannot stream (no watch_order_book)."""
+    return not callable(getattr(instance, "watch_order_book", None))
 
 
 def _num(v: Any) -> float | None:
@@ -232,6 +245,7 @@ class CcxtAdapter(ExchangeAdapter):
             popts = dict(opts)
             popts["apiKey"] = creds.api_key
             popts["secret"] = creds.api_secret
+            popts["privateKey"] = creds.api_secret  # venues signing with a private key (Revolut X)
             if creds.passphrase:
                 popts["password"] = creds.passphrase
             self.private = self._factory(cfg.ccxt_name, popts)
@@ -239,6 +253,7 @@ class CcxtAdapter(ExchangeAdapter):
                 self._enable_demo(self.private)
         for inst in (self.public, self.private):
             self._install_status_hook(inst)
+        self._rest_only = cfg.stream == "rest" or is_rest_only(self.public)
         self._rl_hits = 0  # consecutive rate-limit hits (public + private: one IP budget)
         self._rl_last_mono: float | None = None
         self._symbols: dict[str, str] = {}  # asset -> symbol
@@ -431,6 +446,12 @@ class CcxtAdapter(ExchangeAdapter):
         streamed = [a for a in wanted if a in resolved][: max(0, limit)]
         if limit <= 0:
             log.info("%s: execution-only (markets resolved for %d/%d assets, no streams)", self.name, len(resolved), len(wanted))
+            return
+        if self._rest_only:
+            log.info(
+                "%s: REST-only venue (no WebSocket): %d/%d assets resolved; prices via ticker polling, order book via REST",
+                self.name, len(resolved), len(wanted),
+            )
             return
         has = getattr(self.public, "has", None) or {}
         for asset in streamed:
@@ -669,6 +690,9 @@ class CcxtAdapter(ExchangeAdapter):
             self._mark_error(type(exc).__name__)
             raise self._translate(exc, self.public) from exc
         self._mark_rest_latency((self.clock.mono() - t0) * 1000.0)
+        if self._rest_only:
+            # no WebSocket exists: a successful REST call is the liveness signal
+            self._mark_msg(None, self.clock.wall(), self.clock.mono())
         return res
 
     async def fetch_order_book(self, symbol: str, limit: int = 20) -> OrderBook:

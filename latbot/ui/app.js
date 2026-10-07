@@ -196,7 +196,53 @@
     var box = $('toasts');
     var el = h('div', { class: 'toast ' + (kind || ''), role: 'status', text: message });
     box.appendChild(el);
-    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, kind === 'err' ? 7000 : 4000);
+    setTimeout(function () { dismissToast(el); }, kind === 'err' ? 7000 : 4000);
+  }
+
+  function dismissToast(el) {
+    if (!el.parentNode) return;
+    el.classList.add('toast-out');
+    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 220);
+  }
+
+  // ------------------------------------------------------------------ motion helpers
+  // Animations are CSS classes; these helpers only decide WHEN a class is toggled.
+  // uiMemo remembers what the DOM showed last time so a change can be highlighted.
+  var uiMemo = { connected: null, bestId: null, healthCls: {}, loaded: false };
+
+  function pulseOnce(el, cls, ms) {
+    if (!el) return;
+    el.classList.remove(cls);
+    void el.offsetWidth;  // restart the CSS animation
+    el.classList.add(cls);
+    setTimeout(function () { el.classList.remove(cls); }, ms || 1000);
+  }
+
+  function flashChanged(oldRoot, newRoot, selector) {
+    // Same structure, different text → brief highlight on the new element (no layout shift: tabular-nums).
+    if (!oldRoot || !newRoot) return;
+    var a = oldRoot.querySelectorAll(selector);
+    var b = newRoot.querySelectorAll(selector);
+    if (a.length !== b.length) return;
+    for (var i = 0; i < b.length; i++) if (a[i].textContent !== b[i].textContent) b[i].classList.add('flash');
+  }
+
+  function markLightChanges(oldRoot, newRoot) {
+    // HUMAN / BOT light colour changed → one-time pulse of the dot on the fresh card.
+    if (!oldRoot || !newRoot) return;
+    var a = oldRoot.querySelectorAll('.line[data-light]');
+    var b = newRoot.querySelectorAll('.line[data-light]');
+    if (a.length !== b.length) return;
+    for (var i = 0; i < b.length; i++) {
+      if (a[i].dataset.light !== b[i].dataset.light) {
+        var dot = b[i].querySelector('.dot');
+        if (dot) dot.classList.add('light-change');
+      }
+    }
+  }
+
+  function removeAfter(el, ms) {
+    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, ms);
   }
 
   // ------------------------------------------------------------------ websocket
@@ -298,6 +344,7 @@
   }
 
   function applySnapshot(snap) {
+    uiMemo.loaded = true;
     if (snap.state) applyState(snap.state);
     state.opps.clear();
     (snap.opportunities || []).forEach(putOpp);
@@ -461,6 +508,10 @@
 
     $('ws-dot').className = 'dot ' + (state.connected ? 'green' : 'red');
     $('ws-label').textContent = state.connected ? 'live' : 'reconnecting…';
+    if (uiMemo.connected === false && state.connected) pulseOnce($('ws-status'), 'reconnected');
+    uiMemo.connected = state.connected;
+    var topbar = document.querySelector('.topbar');
+    if (topbar) topbar.classList.toggle('emergency', !!state.emergency);
 
     var btn = $('emergency-btn');
     var closeBtn = $('close-positions-btn');
@@ -488,8 +539,8 @@
   function renderDashboard() {
     var d = state.dashboard || {};
     var q = displayQuote();
-    var box = $('dashboard');
-    clear(box);
+    var old = $('dashboard');
+    var box = document.createDocumentFragment();
     var pnlNode = function (v) {
       var n = num(v);
       return h('span', { class: n > 0 ? 'pos' : n < 0 ? 'neg' : '', text: fmtMoney(v, q, { sign: true }) });
@@ -511,6 +562,9 @@
     box.appendChild(tile('Avg latency', fmtMs(d.avg_latency_ms)));
     box.appendChild(tile('Avg exec', fmtSecs(d.avg_execution_time_s)));
     box.appendChild(tile('Success', fmtRate(d.success_rate)));
+    flashChanged(old, box, '.tile-value');
+    clear(old);
+    old.appendChild(box);
   }
 
   function renderHealth() {
@@ -530,7 +584,10 @@
       var pollOnly = !hh.ws_connected && hh.polling;
       var cls = pollOnly ? 'yellow' : !hh.ws_connected ? 'red' : (hh.usable === false || hh.stale || hh.maintenance) ? 'yellow' : 'green';
       var word = pollOnly ? 'poll' : cls === 'red' ? 'offline' : cls === 'yellow' ? 'degraded' : 'ok';
-      var chip = h('span', { class: 'chip-health', title: hh.reason || '' },
+      var prev = uiMemo.healthCls[name];
+      uiMemo.healthCls[name] = cls;
+      var back = prev && prev !== 'green' && cls === 'green';
+      var chip = h('span', { class: 'chip-health' + (back ? ' reconnected' : ''), title: hh.reason || '' },
         h('span', { class: 'dot ' + cls, 'aria-hidden': 'true' }),
         h('span', { text: hh.label || exchangeLabel(name) }),
         h('span', { class: 'muted', text: word }),
@@ -617,26 +674,115 @@
 
   function renderBest() {
     var box = $('best-body');
-    clear(box);
     var best = computeBest();
-    if (!best) {
-      box.appendChild(h('div', { class: 'best-empty', text: 'No executable opportunity right now — waiting for a real lag (no data, no signal).' }));
-      return;
+    var id = best ? best.id : null;
+    var old = box.firstElementChild;
+    var fresh = best ? renderCard(best, { best: true })
+      : h('div', { class: 'best-empty', text: 'No executable opportunity right now — waiting for a real lag (no data, no signal).' });
+    if (best && old && id === uiMemo.bestId) {
+      flashChanged(old, fresh, '.card-net-value, .kv-v');
+      markLightChanges(old, fresh);
     }
-    box.appendChild(renderCard(best, { best: true }));
+    clear(box);
+    box.appendChild(fresh);
+    if (id !== uiMemo.bestId && (old || best)) pulseOnce(box, 'swap', 400);
+    uiMemo.bestId = id;
   }
 
   function renderCards() {
     var box = $('cards');
+    if (!uiMemo.loaded) {
+      renderSkeleton(box);
+      $('cards-empty').classList.add('hidden');
+      $('opps-count').textContent = String(state.opps.size);
+      return;
+    }
     var list = visibleOpps();
-    clear(box);
-    list.forEach(function (o) { box.appendChild(renderCard(o, {})); });
-    $('cards-empty').classList.toggle('hidden', list.length > 0);
+    reconcileCards(box, list);
+    renderEmpty(list.length);
     $('opps-count').textContent = String(state.opps.size);
   }
 
+  function liveAfter(node) {
+    var n = node ? node.nextSibling : null;
+    while (n && n.classList && n.classList.contains('card-exit')) n = n.nextSibling;
+    return n;
+  }
+
+  function reconcileCards(box, list) {
+    // Keyed by data-id: new cards fade+rise in, gone cards fade+collapse out, updated cards are swapped in place.
+    var existing = {};
+    Array.prototype.slice.call(box.children).forEach(function (el) {
+      if (el.classList.contains('skeleton')) { box.removeChild(el); return; }
+      if (el.classList.contains('card-exit')) return;
+      if (el.dataset.id) existing[el.dataset.id] = el;
+    });
+    var keep = {};
+    var cursor = null;
+    list.forEach(function (o) {
+      var fresh = renderCard(o, {});
+      var old = existing[o.id];
+      keep[o.id] = true;
+      if (old) {
+        flashChanged(old, fresh, '.card-net-value, .kv-v');
+        markLightChanges(old, fresh);
+        box.replaceChild(fresh, old);
+      } else {
+        var ghost = box.querySelector('.card-exit[data-id="' + CSS.escape(o.id) + '"]');
+        if (ghost) box.removeChild(ghost);
+        fresh.classList.add('card-enter');
+        box.appendChild(fresh);
+      }
+      var expectedHere = cursor ? liveAfter(cursor) : liveAfter({ nextSibling: box.firstChild });
+      if (expectedHere !== fresh) box.insertBefore(fresh, cursor ? cursor.nextSibling : box.firstChild);
+      cursor = fresh;
+    });
+    Object.keys(existing).forEach(function (id) {
+      if (keep[id]) return;
+      var el = existing[id];
+      el.classList.add('card-exit');
+      el.setAttribute('aria-hidden', 'true');
+      removeAfter(el, 240);
+    });
+  }
+
+  function renderSkeleton(box) {
+    if (box.querySelector('.skeleton')) return;
+    clear(box);
+    for (var i = 0; i < 3; i++) {
+      box.appendChild(h('article', { class: 'card skeleton', 'aria-hidden': 'true' },
+        h('div', { class: 'card-head' }, h('span', { class: 'sk w40' })),
+        h('span', { class: 'sk tall' }),
+        h('div', { class: 'card-grid' }, h('span', { class: 'sk w80' }), h('span', { class: 'sk w80' }), h('span', { class: 'sk w60' }), h('span', { class: 'sk w60' })),
+        h('span', { class: 'sk w100' }),
+        h('span', { class: 'sk w80' }),
+        h('div', { class: 'card-actions' }, h('span', { class: 'sk btn' }), h('span', { class: 'sk btn' }))));
+    }
+  }
+
+  function renderEmpty(visible) {
+    var box = $('cards-empty');
+    box.classList.toggle('hidden', visible > 0);
+    if (visible > 0) return;
+    var title = box.querySelector('[data-role="empty-title"]');
+    var sub = box.querySelector('[data-role="empty-sub"]');
+    if (!title || !sub) return;
+    var n = Object.keys(state.health).length;
+    var active = state.opps.size;
+    if (state.filters.quick === 'EXPIRED') {
+      title.textContent = 'No expired opportunities loaded.';
+      sub.textContent = 'History fills in as windows close; every expired card keeps its WHY and whether the target caught up.';
+    } else if (active === 0) {
+      title.textContent = 'Watching ' + (n ? n + ' exchanges' : 'exchanges') + ' · no executable lag right now';
+      sub.textContent = 'Signals need ≥2 venues to move while a target lags. Every card is a measured lag: no data, no signal — nothing is invented to fill the grid.';
+    } else {
+      title.textContent = 'No opportunities match the current filters.';
+      sub.textContent = active + ' active opportunit' + (active === 1 ? 'y is' : 'ies are') + ' hidden by the filters — press Reset to see everything.';
+    }
+  }
+
   function kv(k, v, cls) {
-    return h('div', { class: 'kv' }, h('span', { class: 'kv-k', text: k }), h('span', { class: 'kv-v ' + (cls || ''), text: v }));
+    return h('div', { class: 'kv' }, h('span', { class: 'kv-k', text: k }), h('span', { class: 'kv-v ' + (cls || ''), text: v, title: v }));
   }
 
   function renderCard(o, opts) {
@@ -660,11 +806,11 @@
     });
 
     card.appendChild(h('div', { class: 'card-head' },
-      h('span', { class: 'card-pair', text: (opts.best ? '🔥 ' : '') + pairName(o) }),
+      h('span', { class: 'card-pair', text: (opts.best ? '🔥 ' : '') + pairName(o), title: pairName(o) }),
       h('span', { class: 'card-side ' + (side === 'LONG' ? 'long' : 'short'), text: side }),
       h('span', { class: 'tag ' + (o.mode === 'live' ? 'live' : 'paper'), text: String(o.mode || '').toUpperCase() }),
       h('span', { class: 'state-badge', text: o.state }),
-      h('span', { class: 'card-target' }, 'TARGET: ', h('b', { text: exchangeLabel(o.target_exchange) }))));
+      h('span', { class: 'card-target', title: 'target exchange: ' + exchangeLabel(o.target_exchange) }, 'TARGET: ', h('b', { text: exchangeLabel(o.target_exchange) }))));
 
     card.appendChild(h('div', { class: 'card-net' },
       h('span', { class: 'card-net-label', text: 'NET PROFIT' }),
@@ -683,7 +829,7 @@
       card.appendChild(h('div', { class: 'window' },
         h('div', { class: 'window-row' },
           h('span', { class: 'kv-k', text: o.state + (Number.isFinite(dur) ? ' after ' + fmtSecs(dur) : '') }),
-          h('span', { class: 'muted', text: o.expire_reason || '' }))));
+          h('span', { class: 'muted', text: o.expire_reason || '', title: o.expire_reason || '' }))));
     } else {
       var frac = est > 0 ? Math.max(0, Math.min(1, rem / est)) : 0;
       card.appendChild(h('div', { class: 'window' },
@@ -700,15 +846,17 @@
     var hn = num(human.stats_n);
     var hr = num(human.stats_rate);
     if (hn >= 5 && Number.isFinite(hr)) humanParts.push('by stats ' + Math.round(hr * hn) + '/' + hn + ' made it');
-    card.appendChild(h('div', { class: 'line light ' + hl.cls },
+    card.appendChild(h('div', { class: 'line light ' + hl.cls, 'data-light': hl.cls },
+      h('span', { class: 'dot ' + hl.cls, 'aria-hidden': 'true' }),
       h('span', { class: 'line-k', text: 'HUMAN' }),
       h('span', { text: humanParts.join(' / ') })));
 
-    var botLine = h('div', { class: 'line light ' + bl.cls },
+    var botLine = h('div', { class: 'line light ' + bl.cls, 'data-light': bl.cls },
+      h('span', { class: 'dot ' + bl.cls, 'aria-hidden': 'true' }),
       h('span', { class: 'line-k', text: 'BOT' }),
       h('span', { text: bl.emoji + ' ' + (bot.label || bl.word) + ' estimated execution: ' + fmtSecs(bot.est_execution_s) }));
     if (bl.cls !== 'green' && Array.isArray(bot.reasons) && bot.reasons.length) {
-      botLine.appendChild(h('span', { class: 'reason', text: '· ' + bot.reasons[0] }));
+      botLine.appendChild(h('span', { class: 'reason', text: '· ' + bot.reasons[0], title: bot.reasons[0] }));
     }
     card.appendChild(botLine);
 
@@ -869,14 +1017,30 @@
   }
 
   // ------------------------------------------------------------------ modals (generic)
+  var modalTimers = {};
+
   function showModal(name) {
-    $('modal-' + name).classList.remove('hidden');
-    var first = $('modal-' + name).querySelector('button, input, select, a');
+    var el = $('modal-' + name);
+    clearTimeout(modalTimers[name]);
+    el.classList.remove('closing');
+    el.classList.remove('hidden');
+    var first = el.querySelector('button, input, select, a');
     if (first) first.focus();
   }
 
-  function hideModal(name) { $('modal-' + name).classList.add('hidden'); }
-  function modalHidden(name) { return $('modal-' + name).classList.contains('hidden'); }
+  function hideModal(name) {
+    // Plays the close animation first; `closing` already counts as hidden for every state check.
+    var el = $('modal-' + name);
+    if (el.classList.contains('hidden') || el.classList.contains('closing')) return;
+    el.classList.add('closing');
+    clearTimeout(modalTimers[name]);
+    modalTimers[name] = setTimeout(function () { el.classList.remove('closing'); el.classList.add('hidden'); }, 200);
+  }
+
+  function modalHidden(name) {
+    var el = $('modal-' + name);
+    return el.classList.contains('hidden') || el.classList.contains('closing');
+  }
 
   var confirmResolve = null;
 
@@ -1613,7 +1777,7 @@
         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
         el.classList.add('focus-flash');
         el.focus({ preventScroll: true });
-        setTimeout(function () { el.classList.remove('focus-flash'); }, 2500);
+        setTimeout(function () { el.classList.remove('focus-flash'); }, 2200);
       });
     };
     if (getOpp(id)) { focus(); return; }
@@ -1632,13 +1796,17 @@
       if (!o || isTerminal(o.state)) return;
       var rem = remaining(o);
       var est = num(o.estimated_duration_s);
+      var urgent = rem > 0 && rem < 3;
       var val = el.querySelector('[data-role="window-val"]');
-      if (val) val.textContent = rem > 0 ? '~' + rem.toFixed(1) + ' sec' : '0.0 sec · expiring';
+      if (val) {
+        val.textContent = rem > 0 ? '~' + rem.toFixed(1) + ' sec' : '0.0 sec · expiring';
+        val.classList.toggle('urgent', urgent);
+      }
       var bar = el.querySelector('[data-role="bar"]');
       if (bar) {
         var frac = est > 0 ? Math.max(0, Math.min(1, rem / est)) : 0;
         bar.style.width = (frac * 100).toFixed(1) + '%';
-        bar.className = 'bar-fill ' + barClass(rem, o);
+        bar.className = 'bar-fill ' + barClass(rem, o) + (urgent ? ' urgent' : '');
         var pb = bar.parentNode;
         if (pb) pb.setAttribute('aria-valuenow', String(Math.round(frac * 100)));
       }
@@ -1717,6 +1885,7 @@
       return api('GET', '/api/opportunities?state=all&limit=500');
     }).then(function (r) {
       if (r && r.ok) (r.data || []).forEach(putOpp);
+      uiMemo.loaded = true;
       renderAll();
       handleHash();
     });
@@ -1725,7 +1894,12 @@
   }
 
   // Debug handle for manual QA in the browser console (read-only use).
-  window.latbot = { state: state, fmtMoney: fmtMoney, fmtPct: fmtPct, fmtSecs: fmtSecs, remaining: remaining, computeBest: computeBest };
+  window.latbot = {
+    state: state, fmtMoney: fmtMoney, fmtPct: fmtPct, fmtSecs: fmtSecs, remaining: remaining, computeBest: computeBest,
+    // QA only: render a synthetic Opportunity.to_dict() payload in THIS tab. Nothing is sent to the server.
+    inject: function (o) { putOpp(o); scheduleRender('cards'); },
+    toast: toast
+  };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

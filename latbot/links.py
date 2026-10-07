@@ -18,6 +18,7 @@ PAIR_URLS: dict[str, str] = {
     "mexc": "https://www.mexc.com/exchange/{BASE}_{QUOTE}",
     "bitget": "https://www.bitget.com/spot/{BASE}{QUOTE}",
     "htx": "https://www.htx.com/trade/{base}_{quote}",
+    "revolutx": "https://x.revolut.com/",  # web app has no public per-pair URL
 }
 
 

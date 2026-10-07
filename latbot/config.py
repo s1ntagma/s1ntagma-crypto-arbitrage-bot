@@ -83,7 +83,7 @@ def load_secrets(env_path: str | os.PathLike[str] | None = ".env") -> Secrets:
         register_secret(c.passphrase)
         s.exchanges[name] = c
     # Named fallbacks (BYBIT_API_KEY=...) for convenience.
-    for name in ("binance", "bybit", "okx", "kraken", "coinbase", "gate", "bitstamp", "bitvavo"):
+    for name in ("binance", "bybit", "okx", "kraken", "coinbase", "gate", "bitstamp", "bitvavo", "cryptocom", "revolutx"):
         key = os.getenv(f"{name.upper()}_API_KEY", "").strip()
         sec = os.getenv(f"{name.upper()}_API_SECRET", "").strip()
         if key and sec and name not in s.exchanges:
@@ -116,7 +116,8 @@ class ExchangeConfig:
     rate_limit_per_s: float = 10.0
     weight: float = 1.0  # tie-breaker for target selection (1 = neutral)
     # Streaming: "book" = full order book (needed for execution targets),
-    # "bbo" = best bid/ask only (cheap; enough for move detection on signal sources).
+    # "bbo" = best bid/ask only (cheap; enough for move detection on signal sources),
+    # "rest" = venue has no WebSocket: ticker polling + REST order book (Revolut X).
     stream: str = "book"
     max_ws_subscriptions: int = 0  # 0 = no limit; Coinbase breaks above ~4 book streams
     poll_tickers: bool = True  # broad coverage via REST fetch_tickers (all common assets)
@@ -153,6 +154,8 @@ DEFAULT_EXCHANGES: list[ExchangeConfig] = [
         taker_fee=0.001, maker_fee=0.001, label="Bybit EU",
     ),
     ExchangeConfig(name="gate", role=ExchangeRole.EXECUTION, taker_fee=0.002, maker_fee=0.002, label="Gate EU"),
+    # Revolut X: REST API only (no WebSocket) -> prices by ticker polling, book by REST before a signal.
+    ExchangeConfig(name="revolutx", role=ExchangeRole.EXECUTION, stream="rest", taker_fee=0.0009, maker_fee=0.0, label="Revolut X"),
     # ---- signal sources only (not MiCA venues; never targets) ----------------
     ExchangeConfig(name="binance", role=ExchangeRole.SIGNAL, stream="bbo", taker_fee=0.001, maker_fee=0.001, label="Binance"),
     ExchangeConfig(name="kucoin", role=ExchangeRole.SIGNAL, stream="bbo", taker_fee=0.001, maker_fee=0.001, label="KuCoin"),
@@ -352,9 +355,9 @@ class Settings:
                 raise ValueError(f"exchange {e.name}: market_type must be spot|swap")
             if e.market_type == "spot":
                 e.allow_short = False
-            if e.stream not in ("book", "bbo"):
-                raise ValueError(f"exchange {e.name}: stream must be book|bbo")
-            if e.role == ExchangeRole.EXECUTION:
+            if e.stream not in ("book", "bbo", "rest"):
+                raise ValueError(f"exchange {e.name}: stream must be book|bbo|rest")
+            if e.role == ExchangeRole.EXECUTION and e.stream == "bbo":
                 e.stream = "book"  # targets always need depth
         self.min_movers = max(1, int(self.min_movers))
         self.ws_assets = max(1, int(self.ws_assets))
