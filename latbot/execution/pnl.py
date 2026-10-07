@@ -203,13 +203,13 @@ def _diff_reason(
     exit_ = trade.exit_order
     if exit_ is not None and exit_filled > _EPS:
         market = 0.0
-        if exit_.type.value == "market":
-            market = exit_filled
-        elif isinstance(exit_.raw, dict):
+        if isinstance(exit_.raw, dict) and "market_filled" in exit_.raw:
             try:
                 market = float(exit_.raw.get("market_filled") or 0.0)
             except (TypeError, ValueError):
                 market = 0.0
+        elif exit_.type.value == "market":
+            market = exit_filled
         if market > _EPS:
             parts.append("exit at market" if market >= exit_filled * (1.0 - 1e-6) else f"exit {market / exit_filled * 100.0:.0f}% at market")
     if entry_filled > _EPS and closed_base + _EPS < entry_filled:

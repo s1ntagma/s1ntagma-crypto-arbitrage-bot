@@ -327,9 +327,12 @@ class ExecutionEngine:
             return order
         return self._merge_timing(order, fresh)
 
-    async def _wait_fill(self, adapter: ExchangeAdapter, order: Order, timeout_s: float, opp_id: str) -> Order:
+    async def _wait_fill(
+        self, adapter: ExchangeAdapter, order: Order, timeout_s: float, opp_id: str, *, closing: bool = False
+    ) -> Order:
         """Poll ``fetch_order`` until the order is done, ``timeout_s`` elapsed,
-        the trade was aborted or the emergency stop was raised."""
+        the trade was aborted or the emergency stop was raised.  A *closing*
+        order (market exit) is waited for regardless of abort / emergency."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, float(timeout_s))
         while True:
@@ -341,7 +344,8 @@ class ExecutionEngine:
                 if order.status not in (OrderStatus.FAILED, OrderStatus.REJECTED) and order.remaining <= _EPS and order.filled > 0:
                     order.status = OrderStatus.FILLED
                 return order
-            if self._risk.emergency or opp_id in self._abort or loop.time() >= deadline:
+            interrupted = not closing and (self._risk.emergency or opp_id in self._abort)
+            if interrupted or loop.time() >= deadline:
                 return order
             await asyncio.sleep(max(0.0, self.poll_interval_s))
             order = await self._refresh(adapter, order)
@@ -380,7 +384,7 @@ class ExecutionEngine:
         order = await self._place(adapter, req, trade_id=trade.id, reduce_only=self._is_swap(trade.exchange), closing=True)
         if order.status in (OrderStatus.FAILED, OrderStatus.REJECTED):
             return order
-        return await self._wait_fill(adapter, order, self._settings.buy_fill_timeout_s, "__closing__")
+        return await self._wait_fill(adapter, order, self._settings.buy_fill_timeout_s, trade.opportunity_id, closing=True)
 
     @staticmethod
     def _combine(orders: list[Order | None]) -> Order | None:
@@ -412,7 +416,7 @@ class ExecutionEngine:
             exchange=first.exchange,
             symbol=first.symbol,
             side=first.side,
-            type=OrderType.MARKET if market_filled > 0 else first.type,
+            type=OrderType.MARKET if market_filled >= filled - _EPS and market_filled > 0 else first.type,
             amount=amount,
             price=first.price,
             status=status,
@@ -1279,7 +1283,11 @@ class ExecutionEngine:
                 trade.exit_order = market
                 self._persist_order(market, trade.id)
                 trade.finished_ts = self._clock.wall()
-                finalize(trade, entry_price=entry if entry > 0 else None)
+                finalize(
+                    trade,
+                    entry_price=entry if entry > 0 else None,
+                    base_amount=float(market.filled) if market.filled > 0 else None,
+                )
                 left = max(0.0, amount - float(market.filled))
                 if left > _EPS:
                     trade.state = OppState.FAILED

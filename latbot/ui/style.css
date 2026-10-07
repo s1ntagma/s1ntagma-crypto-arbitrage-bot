@@ -143,7 +143,7 @@ a { color: var(--accent); }
   padding: 10px var(--gutter) 0;
 }
 .chip-health {
-  display: inline-flex; align-items: center; gap: 8px;
+  display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; white-space: nowrap;
   padding: 5px 10px; border-radius: 999px;
   background: var(--panel); border: 1px solid var(--border); font-size: 0.82rem;
 }
@@ -367,6 +367,7 @@ a { color: var(--accent); }
   .tab { min-height: 48px; }
   .cards { grid-template-columns: 1fr; }
   .dashboard { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+  .health-strip { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; }
   .modal { padding: 0; align-items: stretch; }
   .modal-card, .modal-sm { width: 100%; max-height: none; border-radius: 0; border: none; }
   .drawer { width: 100%; }
