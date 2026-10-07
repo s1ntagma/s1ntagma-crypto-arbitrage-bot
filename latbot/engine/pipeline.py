@@ -153,8 +153,9 @@ class Pipeline:
                 results.append(opp)
                 seen.add(opp.id)
         asset = MarketState.asset_of(book)
-        for opp in self._opps.active():
-            if opp.asset == asset and opp.target_exchange == book.exchange and opp.id not in seen:
+        for direction in (1, -1):
+            opp = self._opps.find_active(asset, book.exchange, direction)
+            if opp is not None and opp.id not in seen:
                 await self.refresh(opp)
         book.ts.proc_mono = self._clock.mono()
         return results

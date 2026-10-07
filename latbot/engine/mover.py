@@ -73,7 +73,7 @@ class MoveDetector:
         self._stats = stats
         self._clock = clock
         self._bus = bus
-        self._cross: dict[tuple[str, str], _Crossing] = {}
+        self._cross: dict[str, dict[str, _Crossing]] = {}  # asset -> exchange -> crossing
         self._episodes: dict[str, _Episode] = {}
         self._tasks: set[asyncio.Task] = set()
         self.reaction_listeners: list[ReactionListener] = []
@@ -110,11 +110,11 @@ class MoveDetector:
         return bool(cfg.allow_short)
 
     def is_crossed(self, exchange: str, asset: str) -> bool:
-        c = self._cross.get((exchange, asset))
+        c = self._cross.get(asset, {}).get(exchange)
         return bool(c and c.crossed)
 
     def crossing_direction(self, exchange: str, asset: str) -> int:
-        c = self._cross.get((exchange, asset))
+        c = self._cross.get(asset, {}).get(exchange)
         return c.direction if c and c.crossed else 0
 
     def current_moves(self, asset: str, now_mono: float, max_age_ms: float | None = None) -> dict[str, Move]:
@@ -137,12 +137,15 @@ class MoveDetector:
         s = self._settings
         thr = s.move_threshold_pct
         moves = self.current_moves(asset, now, max_age_ms)
+        cross = self._cross.setdefault(asset, {})
 
         # ---- step 2: crossing state with hysteresis -----------------------
         new_crossings: list[str] = []
         reverted_now: set[str] = set()
         for ex, (move, start_price, end_price, start_mono) in moves.items():
-            c = self._cross.setdefault((ex, asset), _Crossing())
+            c = cross.get(ex)
+            if c is None:
+                c = cross[ex] = _Crossing()
             if c.crossed and move * c.direction < thr / 2.0:
                 log.debug("crossing reset %s %s move=%.3f%%", ex, asset, move)
                 c.crossed = False
@@ -157,28 +160,28 @@ class MoveDetector:
                 log.info("MOVE %s %s %+.2f%% over %.1fs", ex, asset, move, max(0.0, now - start_mono))
                 self._publish_move(ex, asset, c.direction, move, start_price, end_price, start_mono, now)
         # exchanges without fresh data cannot be measured: clear silently
-        for (ex, a), c in self._cross.items():
-            if a == asset and ex not in moves and c.crossed:
+        for ex, c in cross.items():
+            if ex not in moves and c.crossed:
                 log.debug("crossing cleared (no fresh data) %s %s", ex, asset)
                 c.crossed = False
                 c.direction = 0
 
-        crossed_now = [ex for ex in moves if self._cross[(ex, asset)].crossed]
+        crossed_now = [ex for ex in moves if cross[ex].crossed]
 
         # ---- step 3: episode ----------------------------------------------
         ep = self._episodes.get(asset)
         if ep is not None:
             if ep.movers & reverted_now:
                 ep.reverted = True
-            same = [ex for ex in crossed_now if self._cross[(ex, asset)].direction == ep.direction]
+            same = [ex for ex in crossed_now if cross[ex].direction == ep.direction]
             if not same:
                 self._end_episode(ep)
                 ep = None
             elif ep.first_mover not in same:
-                ep.first_mover = min(same, key=lambda e: (self._cross[(e, asset)].cross_mono, e))
+                ep.first_mover = min(same, key=lambda e: (cross[e].cross_mono, e))
         if ep is None and crossed_now:
-            first = min(crossed_now, key=lambda e: (self._cross[(e, asset)].cross_mono, e))
-            c = self._cross[(first, asset)]
+            first = min(crossed_now, key=lambda e: (cross[e].cross_mono, e))
+            c = cross[first]
             ep = _Episode(asset=asset, first_mover=first, direction=c.direction, start_mono=c.cross_mono)
             self._episodes[asset] = ep
             self._stats.record_first_mover(asset, first)
@@ -187,7 +190,7 @@ class MoveDetector:
             return []
         direction = ep.direction
         for ex in crossed_now:
-            if self._cross[(ex, asset)].direction == direction:
+            if cross[ex].direction == direction:
                 ep.movers.add(ex)
 
         # ---- step 4: learning (execution exchanges crossing later) ---------
@@ -196,7 +199,7 @@ class MoveDetector:
         for ex in new_crossings:
             if ex == ep.first_mover or ex in ep.reacted or ex not in exec_exchanges:
                 continue
-            if self._cross[(ex, asset)].direction != direction:
+            if cross[ex].direction != direction:
                 continue
             delay = max(0.0, now - ep.start_mono)
             ref = first_move_now * direction
@@ -215,7 +218,7 @@ class MoveDetector:
                     log.exception("reaction listener failed")
 
         # ---- step 5: movers (Phase 2.2 volume gate) ------------------------
-        movers = [ex for ex in crossed_now if self._cross[(ex, asset)].direction == direction]
+        movers = [ex for ex in crossed_now if cross[ex].direction == direction]
         min_vol = s.min_mover_volume_quote
         counted: list[str] = []
         volumes: dict[str, float] = {}
@@ -228,9 +231,9 @@ class MoveDetector:
             counted.append(ex)
         if len(counted) < max(1, int(s.min_movers)):
             return []
-        first = min(counted, key=lambda e: (self._cross[(e, asset)].cross_mono, e))
+        first = min(counted, key=lambda e: (cross[e].cross_mono, e))
         first_move = moves[first][0]
-        first_cross_mono = self._cross[(first, asset)].cross_mono
+        first_cross_mono = cross[first].cross_mono
 
         # ---- step 6: lagging execution exchanges ---------------------------
         signals: list[LagSignal] = []
