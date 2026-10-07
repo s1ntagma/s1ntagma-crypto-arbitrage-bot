@@ -2,17 +2,26 @@
 
 Per asset, on every book (or ticker):
  1. measure the move over ``move_window_s`` on every *fresh* exchange,
- 2. keep a per-(exchange, asset) crossing state with hysteresis
-    (cross at ``|move| >= move_threshold_pct``, reset when the move in the
-    crossing direction falls below ``threshold / 2``), publish MoveEvent,
- 3. maintain a per-asset *episode* (first mover = earliest crosser),
+ 2. keep a per-(exchange, asset) crossing state with hysteresis: cross at
+    ``|move| >= move_threshold_pct``.  From then on the exchange is measured
+    against its *anchor* (the pre-move price captured at the cross), so a
+    genuine move keeps its crossing after the sliding window has moved past
+    the jump.  The crossing resets only when the price comes back to within
+    ``threshold / 2`` of the anchor (a reversion), when the data go stale, or
+    when the episode outlives ``max_opp_duration_s``.  Publish MoveEvent.
+ 3. maintain a per-asset *episode* (first mover = earliest crosser).
+    Exchanges that have not crossed are measured from their price at the
+    episode's anchor moment, so the lag is "how much of the move since it
+    began has the target not done yet",
  4. learn reaction delays / catch-up ratios when an execution exchange crosses
-    later, false signals when the movers revert without the target reacting,
+    later (also a slow catch-up that never crosses inside one window), false
+    signals when the movers revert without the target reacting,
  5. emit one LagSignal per lagging execution exchange (Phase 2.2: only when at
     least ``min_movers`` counted exchanges moved).
 
 No data -> no signal.  Stale exchanges are not measured; their crossing state
-is cleared silently (unknown is not "reverted").
+is cleared silently (unknown is not "reverted").  An episode that merely ages
+out is not a false signal either - only a price reversion is.
 """
 from __future__ import annotations
 
@@ -37,12 +46,19 @@ ReactionListener = Callable[[str, str, int, float], None]  # (asset, target, dir
 Move = tuple[float, float, float, float]  # move_pct, start_price, end_price, start_mono
 
 
+def _pct(end_price: float, start_price: float) -> float:
+    return (end_price / start_price - 1.0) * 100.0 if start_price > 0 else 0.0
+
+
 @dataclass(slots=True)
 class _Crossing:
     crossed: bool = False
     direction: int = 0
     cross_mono: float = 0.0
     move_at_cross: float = 0.0
+    anchor_price: float = 0.0  # pre-move price the move is measured against while crossed
+    anchor_mono: float = 0.0  # when that price was seen (start of the window at the cross)
+    anchor_until: float = 0.0  # after a reversion: keep measuring from the anchor until the window forgot the spike
 
 
 @dataclass(slots=True)
@@ -51,10 +67,12 @@ class _Episode:
     first_mover: str
     direction: int
     start_mono: float
+    anchor_mono: float = 0.0  # pre-move moment (the first mover's anchor): others are measured from here
     movers: set[str] = field(default_factory=set)  # every exchange that crossed in this episode
     lagging: set[str] = field(default_factory=set)  # targets with a recorded lag
     reacted: set[str] = field(default_factory=set)  # execution exchanges that crossed later
-    reverted: bool = False  # a mover reset because its move reverted (not because it went stale)
+    reverted: bool = False  # a mover reset because its price reverted (not because it went stale / aged out)
+    anchors: dict[str, float] = field(default_factory=dict)  # pre-move price per not-yet-crossed exchange
 
 
 class MoveDetector:
@@ -95,10 +113,15 @@ class MoveDetector:
         asset = MarketState.asset_of(ticker)
         if not asset:
             return []
-        max_age = self._settings.max_data_age_ms
+        return self._detect(asset, self._clock.mono(), source=source, max_age_ms=self.freshness_bound(source))
+
+    def freshness_bound(self, source: str) -> float:
+        """Data-age bound (ms) used for signals of ``source`` - the pipeline
+        re-measures a signal with the same bound it was detected with."""
+        max_age = float(self._settings.max_data_age_ms)
         if source == "poll":
-            max_age += max(0.0, self._settings.ticker_poll_interval_s) * 1000.0
-        return self._detect(asset, self._clock.mono(), source=source, max_age_ms=max_age)
+            max_age += max(0.0, float(self._settings.ticker_poll_interval_s)) * 1000.0
+        return max_age
 
     def allowed_direction(self, exchange: str, direction: int) -> bool:
         """LONG always (enabled exchange); SHORT only when ``allow_short``."""
@@ -118,17 +141,60 @@ class MoveDetector:
         return c.direction if c and c.crossed else 0
 
     def current_moves(self, asset: str, now_mono: float, max_age_ms: float | None = None) -> dict[str, Move]:
-        """Window move per fresh exchange (step 1) - also used by the pipeline
-        to refresh an opportunity against live data."""
+        """Live move per fresh exchange exactly as the detector sees it:
+        anchored for crossed exchanges and, during an episode, measured from
+        the episode's pre-move moment for the others; the sliding window
+        otherwise.  The pipeline refreshes opportunities with this, so refresh
+        and detection always agree."""
         max_age = self._settings.max_data_age_ms if max_age_ms is None else max_age_ms
+        raw = self._window_moves(asset, now_mono, max_age)
+        return self._effective_moves(asset, raw, self._episodes.get(asset))
+
+    # ------------------------------------------------------------------ #
+    # measurement helpers
+    # ------------------------------------------------------------------ #
+    def _window_moves(self, asset: str, now_mono: float, max_age_ms: float) -> dict[str, Move]:
+        """Step 1: the sliding-window move per fresh exchange."""
         moves: dict[str, Move] = {}
         for ex in self._state.exchanges_for(asset):
-            if not self._state.is_fresh(ex, asset, now_mono, max_age):
+            if not self._state.is_fresh(ex, asset, now_mono, max_age_ms):
                 continue
             r = move_over_window(self._state.mid_series(ex, asset), now_mono, self._settings.move_window_s)
             if r is not None:
                 moves[ex] = r
         return moves
+
+    def _episode_anchor(self, ep: _Episode, exchange: str) -> float | None:
+        """Pre-move price of ``exchange`` for this episode (cached): its mid at
+        the episode's anchor moment, else the oldest point it has."""
+        a = ep.anchors.get(exchange)
+        if a is not None:
+            return a
+        a = self._state.mid_at(exchange, ep.asset, ep.anchor_mono)
+        if a is None:
+            series = self._state.mid_series(exchange, ep.asset)
+            a = series[0][1] if series else None
+        if a is None or a <= 0:
+            return None
+        ep.anchors[exchange] = a
+        return a
+
+    def _effective_moves(self, asset: str, raw: dict[str, Move], ep: _Episode | None) -> dict[str, Move]:
+        cross = self._cross.get(asset, {})
+        out: dict[str, Move] = {}
+        for ex, r in raw.items():
+            end_price = r[2]
+            c = cross.get(ex)
+            if c is not None and c.crossed and c.anchor_price > 0:
+                out[ex] = (_pct(end_price, c.anchor_price), c.anchor_price, end_price, c.anchor_mono)
+                continue
+            if ep is not None:
+                a = self._episode_anchor(ep, ex)
+                if a is not None:
+                    out[ex] = (_pct(end_price, a), a, end_price, ep.anchor_mono)
+                    continue
+            out[ex] = r
+        return out
 
     # ------------------------------------------------------------------ #
     # core algorithm
@@ -136,40 +202,80 @@ class MoveDetector:
     def _detect(self, asset: str, now: float, *, source: str, max_age_ms: float) -> list[LagSignal]:
         s = self._settings
         thr = s.move_threshold_pct
-        moves = self.current_moves(asset, now, max_age_ms)
+        cap = max(float(s.move_window_s), float(s.max_opp_duration_s))
+        raw = self._window_moves(asset, now, max_age_ms)
         cross = self._cross.setdefault(asset, {})
+        ep = self._episodes.get(asset)
 
-        # ---- step 2: crossing state with hysteresis -----------------------
+        # an episode that lasted longer than any opportunity can is over (not a reversion)
+        if ep is not None and now - ep.start_mono > cap:
+            for ex in ep.movers:
+                c = cross.get(ex)
+                if c is not None and c.crossed and c.direction == ep.direction:
+                    c.crossed = False
+                    c.direction = 0
+            log.info("episode timed out %s after %.0fs (first_mover=%s)", asset, now - ep.start_mono, ep.first_mover)
+            self._end_episode(ep)
+            ep = None
+
+        # ---- step 2: crossing state with hysteresis (anchored) -------------
         new_crossings: list[str] = []
         reverted_now: set[str] = set()
-        for ex, (move, start_price, end_price, start_mono) in moves.items():
+        for ex, (move, start_price, end_price, start_mono) in raw.items():
             c = cross.get(ex)
             if c is None:
                 c = cross[ex] = _Crossing()
-            if c.crossed and move * c.direction < thr / 2.0:
-                log.debug("crossing reset %s %s move=%.3f%%", ex, asset, move)
-                c.crossed = False
-                c.direction = 0
-                reverted_now.add(ex)
-            if not c.crossed and abs(move) >= thr:
-                c.crossed = True
-                c.direction = 1 if move > 0 else -1
-                c.cross_mono = now
-                c.move_at_cross = move
-                new_crossings.append(ex)
-                log.info("MOVE %s %s %+.2f%% over %.1fs", ex, asset, move, max(0.0, now - start_mono))
-                self._publish_move(ex, asset, c.direction, move, start_price, end_price, start_mono, now)
+            if c.crossed:
+                anchored = _pct(end_price, c.anchor_price)
+                if anchored * c.direction < thr / 2.0:
+                    log.debug("crossing reset %s %s: %+.3f%% vs anchor %.8g (reverted)", ex, asset, anchored, c.anchor_price)
+                    c.crossed = False
+                    c.direction = 0
+                    c.anchor_until = now + s.move_window_s
+                    reverted_now.add(ex)
+                elif now - c.cross_mono > cap:
+                    log.debug("crossing timed out %s %s after %.0fs", ex, asset, now - c.cross_mono)
+                    c.crossed = False
+                    c.direction = 0
+            if not c.crossed:
+                cand: tuple[float, float, float] | None = None  # (move_pct, start_price, start_mono)
+                if c.anchor_price > 0 and now < c.anchor_until:
+                    # just reverted: the window still holds the spike, so measure from the
+                    # pre-move price (a reversion is not a move the other way)
+                    m = _pct(end_price, c.anchor_price)
+                    if abs(m) >= thr:
+                        cand = (m, c.anchor_price, c.anchor_mono)
+                elif abs(move) >= thr:
+                    cand = (move, start_price, start_mono)
+                elif ep is not None:
+                    # slow catch-up: moved >= threshold since the episode began
+                    a = self._episode_anchor(ep, ex)
+                    if a is not None:
+                        m = _pct(end_price, a)
+                        if m * ep.direction >= thr:
+                            cand = (m, a, ep.anchor_mono)
+                if cand is not None:
+                    m, anchor_price, anchor_mono = cand
+                    c.crossed = True
+                    c.direction = 1 if m > 0 else -1
+                    c.cross_mono = now
+                    c.move_at_cross = m
+                    c.anchor_price = anchor_price
+                    c.anchor_mono = anchor_mono
+                    c.anchor_until = 0.0
+                    new_crossings.append(ex)
+                    log.info("MOVE %s %s %+.2f%% over %.1fs", ex, asset, m, max(0.0, now - anchor_mono))
+                    self._publish_move(ex, asset, c.direction, m, anchor_price, end_price, anchor_mono, now)
         # exchanges without fresh data cannot be measured: clear silently
         for ex, c in cross.items():
-            if ex not in moves and c.crossed:
+            if ex not in raw and c.crossed:
                 log.debug("crossing cleared (no fresh data) %s %s", ex, asset)
                 c.crossed = False
                 c.direction = 0
 
-        crossed_now = [ex for ex in moves if cross[ex].crossed]
+        crossed_now = [ex for ex in raw if cross[ex].crossed]
 
         # ---- step 3: episode ----------------------------------------------
-        ep = self._episodes.get(asset)
         if ep is not None:
             if ep.movers & reverted_now:
                 ep.reverted = True
@@ -182,7 +288,9 @@ class MoveDetector:
         if ep is None and crossed_now:
             first = min(crossed_now, key=lambda e: (cross[e].cross_mono, e))
             c = cross[first]
-            ep = _Episode(asset=asset, first_mover=first, direction=c.direction, start_mono=c.cross_mono)
+            ep = _Episode(
+                asset=asset, first_mover=first, direction=c.direction, start_mono=c.cross_mono, anchor_mono=c.anchor_mono
+            )
             self._episodes[asset] = ep
             self._stats.record_first_mover(asset, first)
             log.info("episode start %s first_mover=%s dir=%+d", asset, first, ep.direction)
@@ -192,6 +300,7 @@ class MoveDetector:
         for ex in crossed_now:
             if cross[ex].direction == direction:
                 ep.movers.add(ex)
+        moves = self._effective_moves(asset, raw, ep)
 
         # ---- step 4: learning (execution exchanges crossing later) ---------
         exec_exchanges = set(s.execution_exchanges())

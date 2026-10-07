@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ..clock import Clock
-from ..models import Opportunity, OppState, Order, ReactionStats, TradeRecord
+from ..models import Fill, Mode, Opportunity, OppState, Order, OrderStatus, OrderType, ReactionStats, Side, TradeRecord
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +106,50 @@ def _enum_value(v: Any) -> Any:
 
 def _utc_day(ts: float) -> str:
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+# --------------------------------------------------------------------------- #
+# deserialisation (the engine restores open trades after a restart)
+# --------------------------------------------------------------------------- #
+def order_from_dict(data: dict[str, Any]) -> Order:
+    """Rebuild an ``Order`` from its JSON form (``save_order`` / ``TradeRecord.to_dict``)."""
+    known = {f.name for f in dataclasses.fields(Order)}
+    d: dict[str, Any] = {k: v for k, v in data.items() if k in known}
+    d["side"] = Side(str(d.get("side") or Side.BUY.value))
+    d["type"] = OrderType(str(d.get("type") or OrderType.LIMIT.value))
+    d["status"] = OrderStatus(str(d.get("status") or OrderStatus.NEW.value))
+    fill_fields = {f.name for f in dataclasses.fields(Fill)}
+    fills: list[Fill] = []
+    for f in d.get("fills") or []:
+        if not isinstance(f, dict):
+            continue
+        try:
+            fills.append(Fill(**{k: v for k, v in f.items() if k in fill_fields}))
+        except TypeError:
+            continue
+    d["fills"] = fills
+    for key in ("id", "client_id", "exchange", "symbol"):
+        d[key] = str(d.get(key) or "")
+    d["amount"] = float(d.get("amount") or 0.0)
+    d["filled"] = float(d.get("filled") or 0.0)
+    d.setdefault("price", None)
+    return Order(**d)
+
+
+def trade_from_dict(data: dict[str, Any]) -> TradeRecord:
+    """Rebuild a ``TradeRecord`` from ``TradeRecord.to_dict()`` (as stored by ``save_trade``)."""
+    known = {f.name for f in dataclasses.fields(TradeRecord)}
+    d: dict[str, Any] = {k: v for k, v in data.items() if k in known}
+    d["mode"] = Mode(str(d.get("mode") or Mode.PAPER.value))
+    d["state"] = OppState(str(d.get("state") or OppState.EXECUTING.value))
+    for key in ("entry_order", "exit_order"):
+        o = d.get(key)
+        d[key] = order_from_dict(o) if isinstance(o, dict) else None
+    d["events"] = [
+        (float(e[0]), str(e[1])) for e in d.get("events") or [] if isinstance(e, (list, tuple)) and len(e) >= 2
+    ]
+    d["direction"] = int(d.get("direction") or 1)
+    return TradeRecord(**d)
 
 
 class Database:
@@ -310,10 +354,16 @@ class Database:
     # orders
     # ------------------------------------------------------------------ #
     def save_order(self, order: Order, trade_id: str | None) -> None:
+        """Upsert by (exchange, id).  An order whose exchange id is still unknown
+        (timed out, status SENT) is keyed by its client id until the id is known."""
         data = dataclasses.asdict(order)
         data.pop("raw", None)
         payload = json.dumps(data, default=_json_default, ensure_ascii=False)
+        client_key = f"client:{order.client_id}" if order.client_id else ""
+        row_id = order.id or client_key
         with self._lock:
+            if order.id and client_key:
+                self._conn.execute("DELETE FROM orders WHERE exchange = ? AND id = ?", (order.exchange, client_key))
             self._conn.execute(
                 """
                 INSERT INTO orders (id, trade_id, exchange, symbol, side, status, json)
@@ -323,7 +373,7 @@ class Database:
                     side=excluded.side, status=excluded.status, json=excluded.json
                 """,
                 (
-                    order.id,
+                    row_id,
                     trade_id,
                     order.exchange,
                     order.symbol,

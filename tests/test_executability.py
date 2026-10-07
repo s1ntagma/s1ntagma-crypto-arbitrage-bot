@@ -105,3 +105,23 @@ def test_bot_yellow_thin_margin_and_low_success_rate():
     good = ReactionStats(asset="BTC", exchange="bybit", success_count=9, fail_count=1)
     d = assess_bot(10.0, econ(1.0), health(), good, S, 1000.0)
     assert d.light is Light.GREEN and d.probability == pytest.approx(0.6 * 0.8 + 0.4 * 0.9)
+
+
+def test_human_not_executable_below_min_trade_size():
+    thin = econ(3.0, ok=False, reason="book supports only $7.00 within 0.3% slippage (min trade $10.00)")
+    thin.executable_quote = 7.0
+    a = assess_human(20.0, 3.0, S, econ=thin)
+    assert a.light is Light.RED and a.label == "NOT EXECUTABLE" and a.probability == pytest.approx(0.1)
+    assert any("not executable at size" in x and "min trade" in x for x in a.reasons)
+    assert any("net +3.00%" in x for x in a.reasons)
+    # an empty book side (executable 0) is never human-executable either
+    empty = econ(0.0, ok=False, reason="empty book side")
+    empty.executable_quote = 0.0
+    assert assess_human(20.0, 0.0, S, econ=empty).light is Light.RED
+    # liquidity_ok=False for the fill-ratio / min-liquidity cases keeps the time-based light
+    # (the card shows CAPITAL = executable_quote, per ARCHITECTURE)
+    partial = econ(3.0, ok=False, reason="book supports only $40.00 of $100.00 requested")
+    partial.executable_quote = 40.0
+    assert assess_human(20.0, 3.0, S, econ=partial).light is Light.GREEN
+    assert assess_human(20.0, 3.0, S, econ=econ(3.0)).light is Light.GREEN
+    assert assess_human(20.0, 3.0, S).light is Light.GREEN  # econ optional

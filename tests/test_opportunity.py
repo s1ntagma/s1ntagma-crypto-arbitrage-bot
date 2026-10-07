@@ -287,3 +287,22 @@ async def test_cancel_does_not_record_human_outcome_and_db_failure_tolerated():
     await mgr.transition(opp.id, OppState.CANCELLED, "user")
     assert opp.is_terminal and opp.expired_mono is not None and mgr.history() == [opp]
     assert mgr._stats.human == []  # noqa: SLF001
+
+
+async def test_upsert_relabels_mode_on_update():
+    env = Env()
+    opp, _ = await env.upsert()
+    assert opp.mode is Mode.PAPER
+    live, is_new = await env.mgr.upsert(make_signal(), make_econ(1.0), make_assess(), make_assess(), "why", 8.0, Mode.LIVE)
+    assert live is opp and not is_new and opp.mode is Mode.LIVE
+    assert opp.to_dict(env.clock.mono())["mode"] == "live" and env.topic_names()[-1] == events.OPP_UPDATE
+    # relabel_mode re-labels every active card (the pipeline sweep calls it after a PAPER/LIVE switch)
+    env.topics.clear()
+    assert await env.mgr.relabel_mode(Mode.PAPER) == [opp]
+    assert opp.mode is Mode.PAPER and env.topic_names() == [events.OPP_UPDATE]
+    assert await env.mgr.relabel_mode(Mode.PAPER) == []
+    await env.mgr.transition(opp.id, OppState.VALIDATING)
+    await env.mgr.transition(opp.id, OppState.VALID)
+    await env.mgr.transition(opp.id, OppState.AUTO_SELECTED)
+    await env.mgr.transition(opp.id, OppState.EXECUTING)
+    assert await env.mgr.relabel_mode(Mode.LIVE) == [] and opp.mode is Mode.PAPER  # executing: owned by the engine

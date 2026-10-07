@@ -368,3 +368,80 @@ def test_ignores_objects_without_asset():
     h = Harness()
     b = OrderBook(exchange="a", symbol="", bids=[], asks=[], ts=h.ts(), asset="")
     assert h.det.on_book(b) == []
+
+
+def test_persistent_move_keeps_lag_past_window():
+    """A genuine, un-reverted move keeps its crossing after the sliding window
+    has moved past the jump: the gap on the target is still fully open."""
+    h = Harness()
+    run_lag_scenario(h)  # a crossed at 1002, b at 1004, c lags at 100 (now = 1004)
+    for _ in range(8):  # 1005 .. 1012, well past move_window_s = 5
+        h.clock.advance(1.0)
+        signals = h.push_all({"a": 101.0, "b": 101.0, "c": 100.0})
+        assert h.det.is_crossed("a", "BTC") and h.det.is_crossed("b", "BTC")
+        assert signals and all(sg.target == "c" and sg.lag_pct == pytest.approx(1.0) for sg in signals)
+        assert signals[-1].first_mover == "a" and signals[-1].first_move_start_mono == 1002.0
+        assert signals[-1].first_move_pct == pytest.approx(1.0) and signals[-1].target_move_pct == pytest.approx(0.0)
+    assert h.stats.get("BTC", "c").false_signal_count == 0
+    assert not any(c[0] == "false" for c in h.stats.calls)
+    assert sum(1 for c in h.stats.calls if c[0] == "first") == 1  # one episode, one first mover
+    assert h.stats.get("BTC", "c").lagging_count == 1
+    # the live view the pipeline refreshes against agrees with the signal
+    moves = h.det.current_moves("BTC", h.clock.mono())
+    assert moves["a"][0] == pytest.approx(1.0) and moves["b"][0] == pytest.approx(1.0)
+    assert moves["c"][0] == pytest.approx(0.0)
+    # a further leg of the same move widens the open gap instead of starting a new episode
+    h.clock.advance(1.0)
+    signals = h.push_all({"a": 102.0, "b": 102.0, "c": 100.0})
+    assert signals[-1].lag_pct == pytest.approx(2.0) and signals[-1].first_move_pct == pytest.approx(2.0)
+    assert sum(1 for c in h.stats.calls if c[0] == "first") == 1
+
+
+def test_anchored_reversion_resets_and_records_false_signal():
+    """Reversion is decided against the pre-move price, not the sliding window."""
+    h = Harness()
+    run_lag_scenario(h)
+    for _ in range(3):  # the window slides past the jump while the price holds
+        h.clock.advance(1.0)
+        h.push_all({"a": 101.0, "b": 101.0, "c": 100.0})
+    h.clock.advance(1.0)
+    h.push("a", 100.1)  # back within thr/2 of the anchor (100.0) -> reverted
+    assert not h.det.is_crossed("a", "BTC") and h.det.is_crossed("b", "BTC")
+    assert not any(c[0] == "false" for c in h.stats.calls)  # b still carries the episode
+    assert h.push("b", 100.1) == []
+    assert not h.det.is_crossed("b", "BTC")
+    assert ("false", "BTC", "c") in h.stats.calls and h.stats.get("BTC", "c").false_signal_count == 1
+    # the reversion is not a new move in the other direction: the price is back where it started
+    assert h.push("c", 100.0) == []
+    assert not h.det.is_crossed("a", "BTC") and not h.det.is_crossed("b", "BTC")
+
+
+def test_window_expiry_without_reversion_is_not_false_signal():
+    """An episode that merely ages out (max_opp_duration_s) ends without a
+    false-signal record; only a price reversion is a false signal."""
+    h = Harness(make_settings(max_opp_duration_s=10.0))
+    run_lag_scenario(h)  # a crossed at 1002
+    for _ in range(7):  # until 1011: crossed for 9 s, the price never came back
+        h.clock.advance(1.0)
+        assert h.push_all({"a": 101.0, "b": 101.0, "c": 100.0})
+    assert h.det.is_crossed("a", "BTC")
+    h.clock.advance(1.5)  # 1012.5: the episode is older than max_opp_duration_s -> timed out
+    assert h.push_all({"a": 101.0, "b": 101.0, "c": 100.0}) == []
+    assert not h.det.is_crossed("a", "BTC") and not h.det.is_crossed("b", "BTC")
+    assert not any(c[0] == "false" for c in h.stats.calls)
+    assert h.stats.get("BTC", "c").false_signal_count == 0 and h.stats.get("BTC", "c").lagging_count == 1
+
+
+def test_slow_target_catch_up_is_measured_from_the_episode_anchor():
+    """The target's move is measured from its pre-move price too: a slow
+    catch-up (never >= threshold inside one window) still shrinks the lag."""
+    h = Harness()
+    run_lag_scenario(h)  # lag 1.0 % at 1004
+    for k, mid in enumerate((100.1, 100.2, 100.3), start=1):
+        h.clock.advance(2.0)
+        signals = h.push_all({"a": 101.0, "b": 101.0, "c": mid})
+        assert signals[-1].target_move_pct == pytest.approx(0.1 * k, abs=1e-6)
+        assert signals[-1].lag_pct == pytest.approx(1.0 - 0.1 * k, abs=1e-6)
+    h.clock.advance(2.0)
+    h.push_all({"a": 101.0, "b": 101.0, "c": 100.5})  # +0.5 % since the move began -> reacted
+    assert ("reaction", "BTC", "c", 10.0, 0.5) in h.stats.calls

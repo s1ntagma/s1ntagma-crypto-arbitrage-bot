@@ -1,9 +1,17 @@
 """Pipeline - glue from live data to opportunities.
 
 BOOK -> MarketState -> MoveDetector -> (per LagSignal) economics on the
-target's latest book -> duration -> human / bot lights -> WHY ->
+target's latest FRESH book -> duration -> human / bot lights -> WHY ->
 OpportunityManager.  A sweep loop expires opportunities, refreshes adapter
 staleness and publishes DASHBOARD.
+
+REST order-book confirmation (polled assets, stale WebSocket books) never
+runs inside the BOOK handler: it is scheduled as a bounded background task
+(single-flight per (exchange, symbol), at most ``_REST_CONCURRENCY`` requests
+per exchange, ``rest_book_timeout_s`` each) and the re-measured signal is
+evaluated once the fresh book is there.  ``refresh`` (MANUAL support, AUTO
+revalidation) waits for the same single-flight fetch inline, so the 300 ms
+modal poll can never hammer the REST API.
 """
 from __future__ import annotations
 
@@ -42,6 +50,10 @@ log = logging.getLogger(__name__)
 
 _FEES_TTL_S = 3600.0
 _STATS_SAVE_INTERVAL_S = 30.0
+_REST_CONCURRENCY = 2  # concurrent REST book fetches per exchange
+
+BookKey = tuple[str, str]  # (exchange, symbol)
+ConfirmKey = tuple[str, str, int]  # (target, asset, direction)
 
 
 class Pipeline:
@@ -76,6 +88,10 @@ class Pipeline:
         self._last_stats_save_mono = clock.mono()
         self._stale_flags: dict[str, bool] = {}
         self._warned_fees: set[str] = set()
+        self._book_fetches: dict[BookKey, asyncio.Future] = {}  # in-flight REST book fetches (single-flight)
+        self._last_fetch_mono: dict[BookKey, float] = {}
+        self._rest_sems: dict[str, asyncio.Semaphore] = {}
+        self._confirm_tasks: dict[ConfirmKey, asyncio.Task] = {}
         listeners = getattr(detector, "reaction_listeners", None)
         if isinstance(listeners, list):
             listeners.append(self._on_reaction)
@@ -103,6 +119,12 @@ class Pipeline:
                 await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
+        pending = [t for t in self._confirm_tasks.values() if not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._confirm_tasks.clear()
         for unsub in self._unsubs:
             try:
                 unsub()
@@ -121,6 +143,19 @@ class Pipeline:
                 raise
             except Exception:  # noqa: BLE001
                 log.exception("sweep failed")
+
+    @property
+    def pending_confirmations(self) -> int:
+        """REST book confirmations still running in the background."""
+        return sum(1 for t in self._confirm_tasks.values() if not t.done())
+
+    async def wait_confirmations(self) -> None:
+        """Await every pending REST confirmation (tests, orderly shutdown)."""
+        while True:
+            pending = [t for t in self._confirm_tasks.values() if not t.done()]
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # ------------------------------------------------------------------ #
     # event handlers
@@ -141,7 +176,8 @@ class Pipeline:
 
     async def on_book(self, book: OrderBook) -> list[Opportunity]:
         """Ingest one book: detect, evaluate signals, refresh live opps on the
-        target exchange that got no new signal (their net decays naturally)."""
+        target exchange that got no new signal (their net decays naturally).
+        Never waits on REST: a stale target book is confirmed in the background."""
         self._state.on_book(book)
         signals = self._detector.on_book(book)
         results: list[Opportunity] = []
@@ -161,36 +197,139 @@ class Pipeline:
         return results
 
     # ------------------------------------------------------------------ #
+    # fresh target books (REST confirmation)
+    # ------------------------------------------------------------------ #
+    def _freshness_bound(self, source: str) -> float:
+        """Data-age bound (ms) a signal of ``source`` was detected with."""
+        bound = getattr(self._detector, "freshness_bound", None)
+        if callable(bound):
+            try:
+                return float(bound(source))
+            except Exception:  # noqa: BLE001 - duck-typed detector
+                pass
+        max_age = float(self._settings.max_data_age_ms)
+        if source == "poll":
+            max_age += max(0.0, float(self._settings.ticker_poll_interval_s)) * 1000.0
+        return max_age
+
+    def _fetcher(self, target: str) -> Any | None:
+        adapter = self._adapters.get(target)
+        fetch = getattr(adapter, "fetch_order_book", None) if adapter is not None else None
+        if not self._settings.confirm_with_rest_book or fetch is None:
+            return None
+        return fetch
+
+    async def _fetch_book(self, target: str, asset: str, symbol: str) -> OrderBook | None:
+        """REST order book for ``(target, symbol)``: single-flight per key, at
+        most ``_REST_CONCURRENCY`` requests per exchange, each bounded by
+        ``rest_book_timeout_s``.  A failed attempt is not retried within
+        ``max_data_age_ms / 2``.  The snapshot is stored in MarketState."""
+        s = self._settings
+        fetch = self._fetcher(target)
+        if fetch is None or not symbol:
+            return None
+        key: BookKey = (target, symbol)
+        inflight = self._book_fetches.get(key)
+        if inflight is not None:
+            return await asyncio.shield(inflight)
+        now = self._clock.mono()
+        last = self._last_fetch_mono.get(key)
+        if last is not None and now - last < s.max_data_age_ms / 2000.0:
+            log.debug("REST book %s %s: attempted %.2fs ago, not retrying yet", target, symbol, now - last)
+            return None
+        self._last_fetch_mono[key] = now
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._book_fetches[key] = fut
+        fresh: OrderBook | None = None
+        try:
+            sem = self._rest_sems.get(target)
+            if sem is None:
+                sem = self._rest_sems[target] = asyncio.Semaphore(_REST_CONCURRENCY)
+            try:
+                async with sem:
+                    fresh = await asyncio.wait_for(fetch(symbol), timeout=float(s.rest_book_timeout_s))
+            except asyncio.TimeoutError:
+                log.warning("REST book fetch %s %s timed out after %.1fs", target, symbol, s.rest_book_timeout_s)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.warning("REST book fetch failed %s %s: %s", target, symbol, exc)
+            if fresh is not None:
+                if not fresh.asset:
+                    fresh.asset = asset
+                self._state.on_book(fresh)
+            return fresh
+        finally:
+            if not fut.done():
+                fut.set_result(fresh)
+            if self._book_fetches.get(key) is fut:
+                del self._book_fetches[key]
+
+    async def _fresh_book(self, target: str, asset: str, symbol: str) -> OrderBook | None:
+        """The latest book of ``(target, asset)`` not older than
+        ``max_data_age_ms``; when the stored one is missing or older and REST
+        confirmation is on, fetch it now (single-flight).  None = no fresh data."""
+        s = self._settings
+        book = self._state.book(target, asset)
+        if book is not None and book.age_ms(self._clock.mono()) <= s.max_data_age_ms:
+            return book
+        fresh = await self._fetch_book(target, asset, symbol or (book.symbol if book else ""))
+        if fresh is None or fresh.age_ms(self._clock.mono()) > s.max_data_age_ms:
+            return None
+        return fresh
+
+    async def _target_book(self, signal: LagSignal) -> OrderBook | None:
+        """Fresh target book for ``evaluate``.  A missing or stale book is
+        confirmed through REST in a background task (the BOOK handler never
+        waits on a throttled REST call); ``evaluate`` returns None until the
+        snapshot is there and the confirmation re-evaluates the signal."""
+        s = self._settings
+        book = self._state.book(signal.target, signal.asset)
+        if book is not None and book.age_ms(self._clock.mono()) <= s.max_data_age_ms:
+            return book
+        symbol = signal.target_symbol or (book.symbol if book else "")
+        if self._fetcher(signal.target) is None or not symbol:
+            log.debug("no fresh book for %s on %s (source=%s)", signal.asset, signal.target, signal.source)
+            return None
+        self._schedule_confirmation(signal, symbol)
+        return None
+
+    def _schedule_confirmation(self, signal: LagSignal, symbol: str) -> None:
+        key: ConfirmKey = (signal.target, signal.asset, signal.direction)
+        task = self._confirm_tasks.get(key)
+        if task is not None and not task.done():
+            return  # this (target, asset, direction) is already being confirmed
+        task = asyncio.create_task(
+            self._confirm_later(signal, symbol), name=f"latbot-confirm-{signal.asset}-{signal.target}"
+        )
+        self._confirm_tasks[key] = task
+        task.add_done_callback(lambda t, k=key: self._confirm_tasks.pop(k, None) if self._confirm_tasks.get(k) is t else None)
+
+    async def _confirm_later(self, signal: LagSignal, symbol: str) -> None:
+        """Fetch the target book, re-measure the signal on live data and
+        evaluate it on the fresh snapshot (no fake signals: lag gone -> nothing)."""
+        s = self._settings
+        try:
+            book = await self._fetch_book(signal.target, signal.asset, symbol)
+            if book is None:
+                return
+            now = self._clock.mono()
+            if book.age_ms(now) > s.max_data_age_ms:
+                return
+            live = self._live_signal(signal, now)
+            if live.lag_pct < s.min_lag_pct:
+                log.debug("confirmation %s on %s: lag gone (%.2f%%)", signal.asset, signal.target, live.lag_pct)
+                return
+            await self.evaluate(live)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("REST confirmation failed for %s on %s", signal.asset, signal.target)
+
+    # ------------------------------------------------------------------ #
     # evaluation
     # ------------------------------------------------------------------ #
-    async def _target_book(self, signal: LagSignal) -> OrderBook | None:
-        s = self._settings
-        now = self._clock.mono()
-        book = self._state.book(signal.target, signal.asset)
-        stale = book is None or book.age_ms(now) > s.max_data_age_ms
-        if signal.source == "poll" or stale:
-            adapter = self._adapters.get(signal.target)
-            fetch = getattr(adapter, "fetch_order_book", None) if adapter is not None else None
-            symbol = signal.target_symbol or (book.symbol if book else "")
-            if not (s.confirm_with_rest_book and fetch is not None and symbol):
-                log.debug("no fresh book for %s on %s (source=%s)", signal.asset, signal.target, signal.source)
-                return None
-            try:
-                fresh = await fetch(symbol)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("REST book fetch failed %s %s: %s", signal.target, symbol, exc)
-                return None
-            if fresh is None:
-                return None
-            if not fresh.asset:
-                fresh.asset = signal.asset
-            self._state.on_book(fresh)
-            book = fresh
-            now = self._clock.mono()
-        if book is None or book.age_ms(now) > s.max_data_age_ms:
-            return None
-        return book
-
     async def _fees(self, exchange: str, symbol: str) -> Fees:
         now = self._clock.mono()
         key = (exchange, symbol)
@@ -239,14 +378,17 @@ class Pipeline:
                 rs = self._stats.get(signal.asset, signal.target)
             except Exception:  # noqa: BLE001
                 rs = None
-        human = assess_human(remaining, econ.net_pct, s, stats=rs)
+        human = assess_human(remaining, econ.net_pct, s, stats=rs, econ=econ)
         bot = assess_bot(remaining, econ, self._health(signal.target), rs, s, now)
         quote = signal.target_quote or split_symbol(book.symbol)[1]
         why = build_why(signal, econ, human, bot, est, names=self._names(), quote=quote, max_slippage_pct=s.max_slippage_pct)
         return econ, human, bot, why, est
 
     async def evaluate(self, signal: LagSignal, capital_quote: float | None = None) -> Opportunity | None:
-        """Turn a LagSignal into an Opportunity (or update the live one)."""
+        """Turn a LagSignal into an Opportunity (or update the live one).
+        None when there is no fresh target book yet (a REST confirmation may
+        be running in the background), when the NET is below the show
+        threshold, or when the book does not support the minimum trade."""
         s = self._settings
         book = await self._target_book(signal)
         if book is None:
@@ -254,11 +396,18 @@ class Pipeline:
         capital = float(capital_quote) if capital_quote is not None else float(s.capital_quote)
         existing = self._opps.find_active(signal.asset, signal.target, signal.direction)
         econ, human, bot, why, est = await self._assess(signal, book, capital, existing)
-        if econ.net_pct < s.min_net_pct_show and existing is None:
-            log.debug(
-                "no opportunity %s on %s: net %+.2f%% < %.2f%%", signal.asset, signal.target, econ.net_pct, s.min_net_pct_show
-            )
-            return None
+        if existing is None:
+            if econ.net_pct < s.min_net_pct_show:
+                log.debug(
+                    "no opportunity %s on %s: net %+.2f%% < %.2f%%", signal.asset, signal.target, econ.net_pct, s.min_net_pct_show
+                )
+                return None
+            if econ.executable_quote < s.min_trade_quote:
+                log.debug(
+                    "no opportunity %s on %s: book supports %.2f < min trade %.2f",
+                    signal.asset, signal.target, econ.executable_quote, s.min_trade_quote,
+                )
+                return None
         opp, is_new = await self._opps.upsert(signal, econ, human, bot, why, est, s.mode())
         if is_new:
             await self._opps.transition(opp.id, OppState.VALIDATING, "economics computed")
@@ -269,16 +418,18 @@ class Pipeline:
 
     def _live_signal(self, signal: LagSignal, now: float) -> LagSignal:
         """Re-measure the signal against live data: current target move and
-        current first-mover move (unmeasurable movers count as no move)."""
+        current first-mover move (unmeasurable movers count as no move), with
+        the same freshness bound the detector used for this signal's source."""
         s = self._settings
         asset, target, d = signal.asset, signal.target, signal.direction
+        max_age = self._freshness_bound(signal.source)
         moves = {}
         get_moves = getattr(self._detector, "current_moves", None)
         if callable(get_moves):
-            moves = get_moves(asset, now)
+            moves = get_moves(asset, now, max_age)
         else:  # pragma: no cover - duck-typed detector
             for ex in self._state.exchanges_for(asset):
-                if self._state.is_fresh(ex, asset, now, s.max_data_age_ms):
+                if self._state.is_fresh(ex, asset, now, max_age):
                     r = move_over_window(self._state.mid_series(ex, asset), now, s.move_window_s)
                     if r is not None:
                         moves[ex] = r
@@ -302,22 +453,26 @@ class Pipeline:
             detected_ts=self._clock.wall(),
         )
 
-    async def refresh(self, opp: Opportunity, capital_quote: float | None = None) -> Opportunity:
-        """Recompute economics/lights from the latest target book.
-        Active opps are updated in place (OPP_UPDATE); executing / terminal
-        opps get an updated shallow copy, the managed object is untouched."""
+    async def refresh(self, opp: Opportunity, capital_quote: float | None = None) -> Opportunity | None:
+        """Recompute economics/lights from the latest FRESH target book; None
+        when there is none (no data -> no numbers).  A book older than
+        ``max_data_age_ms`` is re-fetched through REST when
+        ``confirm_with_rest_book`` (single-flight, so the 300 ms MANUAL poll
+        cannot hammer the API).  Active opps are updated in place
+        (OPP_UPDATE); executing / terminal opps get an updated shallow copy,
+        the managed object is untouched."""
         s = self._settings
-        now = self._clock.mono()
-        book = self._state.book(opp.target_exchange, opp.asset)
+        book = await self._fresh_book(opp.target_exchange, opp.asset, opp.target_symbol or opp.signal.target_symbol)
         if book is None:
-            log.debug("refresh %s: no book for %s on %s", opp.id, opp.asset, opp.target_exchange)
-            return opp
+            log.debug("refresh %s: no fresh book for %s on %s", opp.id, opp.asset, opp.target_exchange)
+            return None
+        now = self._clock.mono()
         capital = float(capital_quote) if capital_quote is not None else float(opp.econ.capital_quote or s.capital_quote)
         live = self._live_signal(opp.signal, now)
         managed = self._opps.get(opp.id)
         if managed is not None and managed.state in ACTIVE_STATES:
             econ, human, bot, why, est = await self._assess(live, book, capital, managed)
-            updated, _ = await self._opps.upsert(live, econ, human, bot, why, est, managed.mode)
+            updated, _ = await self._opps.upsert(live, econ, human, bot, why, est, s.mode())
             if live.target_move_pct * live.direction >= s.move_threshold_pct:
                 updated.caught_up = True
             return updated
@@ -341,7 +496,21 @@ class Pipeline:
     # ------------------------------------------------------------------ #
     async def sweep_once(self) -> list[Opportunity]:
         now = self._clock.mono()
-        expired = await self._opps.sweep(now)
+        s = self._settings
+        expired: list[Opportunity] = []
+        # the card always shows the mode that would execute (PAPER/LIVE switch)
+        relabel = getattr(self._opps, "relabel_mode", None)
+        if callable(relabel):
+            await relabel(s.mode())
+        # no fresh target book for longer than twice the freshness bound -> no data, no opportunity
+        for opp in self._opps.active():
+            book = self._state.book(opp.target_exchange, opp.asset)
+            bound = 2.0 * self._freshness_bound(getattr(opp.signal, "source", "ws"))
+            if book is None or book.age_ms(now) > bound:
+                r = await self._opps.expire(opp.id, "target book stale")
+                if r is not None:
+                    expired.append(r)
+        expired += await self._opps.sweep(now)
         for name, adapter in list(self._adapters.items()):
             check = getattr(adapter, "check_staleness", None)
             if check is None:
@@ -400,9 +569,12 @@ class Pipeline:
                     d["failed_trades"] = int(c.get("failed", d.get("failed_trades", 0)) or 0)
                     d["today"] = max(int(d.get("today", 0)), int(c.get("opportunities_today", 0) or 0))
                     d["expired"] = max(int(d.get("expired", 0)), int(c.get("expired", 0) or 0))
-                    trades = int(c.get("trades", 0) or 0)
-                    if trades > 0:
-                        d["success_rate"] = (trades - d["failed_trades"]) / trades
+                    # success = wins / finished trades (CLOSED + FAILED), the same definition as
+                    # StatsStore.record_trade(success = pnl > 0); EXECUTING / CANCELLED rows do not count
+                    closed = int(c.get("closed", 0) or 0)
+                    wins = int(c.get("wins", 0) or 0)
+                    finished = closed + d["failed_trades"]
+                    d["success_rate"] = (wins / finished) if finished > 0 else None
                     for extra in ("avg_execution_time_s", "avg_latency_ms"):
                         if c.get(extra) is not None:
                             d[extra] = c[extra]

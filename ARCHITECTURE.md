@@ -383,9 +383,12 @@ class ExecutionEngine:
     async def cancel(self, opp_id: str, reason: str = "user") -> dict
     async def revalidate(self, opp: Opportunity) -> tuple[bool, str, ExecutionEconomics | None]
     async def execute(self, opp: Opportunity) -> TradeRecord
-    async def emergency_stop(self, reason: str = "user") -> dict             # risk.set_emergency(True); cancel pending orders on all exec adapters; abort EXECUTING trades before entry; keep history
-    async def emergency_close_positions(self) -> list[TradeRecord]           # market-exit every open position (paper + live adapters of current mode)
+    async def emergency_stop(self, reason: str = "user") -> dict             # risk.set_emergency(True); cancel pending orders on the exec adapters of the CURRENT mode (plus adapters holding a pending exit / open position); adapters of the other mode are never touched; abort EXECUTING trades before entry; keep history
+    async def emergency_close_positions(self) -> list[TradeRecord]           # resolve unknown orders (fetch by id / client id, cancel what still rests), then market-exit every open position (paper + live adapters of current mode)
     async def resume(self) -> None
+    async def shutdown(self, timeout_s: float) -> list[dict]                 # abort running trades (market-exit, like cancel()), wait up to timeout_s, cancel the rest; returns the positions still open
+    def restore_from_db(self) -> list[TradeRecord]                           # after a restart: EXECUTING/PARTIALLY_FILLED/FILLED/FAILED-with-position rows -> tracked open positions + risk exposure (never auto-traded)
+    async def announce_open_positions(self) -> None                          # TRADE_UPDATE for every tracked open position (UI / Telegram)
     def trades(self, limit: int = 200) -> list[TradeRecord]
 ```
 * `manual_support` payload: `{opp_id, valid: bool, status, side, exchange, symbol,
@@ -397,8 +400,9 @@ class ExecutionEngine:
 * `revalidate`: book age ≤ max_data_age_ms (else `fetch_order_book` REST once);
   recompute econ with the current catch-up; require `econ.net_pct ≥ max(settings.min_net_pct_auto,
   opp.econ.net_pct * settings.revalidate_tolerance)`, `liquidity_ok`, bot light
-  ≠ RED, balance ≥ needed (downsize to available if `allow_downsize`, else fail),
-  `risk.check` ok.  Returns reason strings a human can read.
+  ≠ RED, balance ≥ needed where needed = capital × (1 + taker fee + `buy_limit_slippage_pct`)
+  (what the entry order really locks; downsize to free / that factor if `allow_downsize`,
+  else fail), `risk.check` ok.  Returns reason strings a human can read.
 * `execute`: AUTO flow → `EXECUTING`; place entry (LIMIT IOC at
   `entry_vwap*(1±buy_limit_slippage_pct)`), wait ≤ `buy_fill_timeout_s` polling
   `fetch_order` (or returned status); no fill → CANCELLED; partial below
@@ -410,6 +414,22 @@ class ExecutionEngine:
   `pnl.finalize`, `risk.register_close`, `stats.record_trade`, opp → CLOSED
   (or FAILED), publish TRADE_UPDATE at every step, persist.
 * Never execute if `risk.emergency`; re-check right before each order.
+* Hard rule 4 covers both legs: right before the exit order the engine refreshes
+  the book (REST when the WS book is older than `max_data_age_ms`) and reprices
+  the exit from the fresh economics; when the net on the held position is ≤ 0 the
+  position is exited at market immediately (the planned target is used only when
+  the refresh is unavailable - a position is never left unmanaged).
+* Unknown order state is never guessed: a timed-out `place_order` (asyncio timeout,
+  `ccxt.RequestTimeout`, or the adapter's `SENT`/empty-id return) is reconciled by
+  `fetch_order(client_id=…)`; a cancel whose confirmation and follow-up fetch both
+  fail leaves the order open.  An unresolved entry/exit makes the trade FAILED with
+  the position tracked (`open_positions()`, risk exposure kept, `unresolved: true`)
+  - never "entry not filled", never a second exit for the same quantity.
+  `emergency_close_positions` resolves the pending order first.
+* Process lifecycle: `run_app` calls `shutdown()` before the adapters and the
+  database go away; on cancellation the position stays tracked; `build_context`
+  calls `restore_from_db()` so a crash/restart (restart loop, stop.bat) never
+  forgets a position.
 
 ### execution/pnl.py
 ```python
@@ -532,8 +552,10 @@ Integration decisions (implemented):
   UI; `ctx.server_port` holds the bound port, `port=0` → OS-assigned).  Stop
   conditions: `seconds`, `stop.flag` (polled every `ctx.stop_flag_poll_s`, removed
   when seen), SIGINT/SIGTERM, or `ctx.request_stop(reason)`.  Shutdown order:
-  helper tasks → server (10 s, then forced) → Telegram → poller → recorder →
-  pipeline → adapters → `stats.save()` → `db.close()`.  Returns 0.
+  helper tasks → server (10 s, then forced) → execution
+  (`ExecutionEngine.shutdown`: abort running trades → market exit, bounded
+  wait) → Telegram → poller → recorder → pipeline → adapters →
+  `stats.save()` → `db.close()`.  Returns 0.
 * `main(argv)`: `[SECONDS] [--seconds N] [--config PATH] [--env PATH]
   [--no-server]`.  Order: platform setup → secrets → settings → logging
   (`settings.log_dir/log_level`) → `config.json` written when missing (all

@@ -31,6 +31,7 @@ from latbot.events import EventBus
 from latbot.exchanges.fake import FakeAdapter
 from latbot.exchanges.paper import PaperAdapter
 from latbot.models import ExchangeRole, Light, Mode, Opportunity, OppState, OrderStatus
+from latbot.storage.db import Database
 
 REPO = Path(__file__).resolve().parent.parent
 SYMBOLS = {"binance": "BTC/USDT", "kucoin": "BTC/USDT", "kraken": "BTC/EUR"}
@@ -611,3 +612,77 @@ def test_entry_points_exist() -> None:
     assert (REPO / "run.py").exists() and "from latbot.app import main" in (REPO / "run.py").read_text(encoding="utf-8")
     assert (REPO / "latbot" / "__main__.py").exists()
     assert sys.version_info >= (3, 11)
+
+
+# --------------------------------------------------------------------------- #
+# 11. allow_downsize produces a trade the free balance can actually pay for
+# --------------------------------------------------------------------------- #
+async def test_downsize_to_free_balance_produces_trade(tmp_path: Path) -> None:
+    b = build(tmp_path, capital_quote=100.0, paper_balance_quote=95.0)
+    ctx = b.ctx
+    try:
+        opp = await detect(b)
+        ex = ctx.execution
+        ex.poll_interval_s = 0.01
+        sel = await ex.select_auto(opp.id)
+        snap = sel["snapshot"]
+        assert snap["valid"] is True, snap["reason"]
+        assert "downsized" in snap["reason"]
+        # the entry locks notional + taker fee (0.1 %) + limit markup (0.2 %): the size is carved out of the free 95 EUR
+        assert snap["capital"] == pytest.approx(95.0 / 1.003, rel=1e-3) and snap["capital"] < 95.0
+        task = asyncio.create_task(ex.confirm_auto(opp.id, wait=True))
+
+        def entry_filled() -> bool:
+            trades = ex.trades()
+            return bool(trades and trades[0].entry_order is not None and trades[0].entry_order.filled > 0)
+
+        await wait_for(entry_filled, timeout=5.0)
+        await push_all(b.fakes, {"kraken": 102.0})
+        res = await asyncio.wait_for(task, 10.0)
+        assert res["ok"] is True, res
+        trade = ex.trades()[0]
+        assert trade.state is OppState.CLOSED and trade.entry_order.status is OrderStatus.FILLED
+        assert trade.capital_quote == pytest.approx(95.0 / 1.003, rel=1e-3)
+    finally:
+        await ctx.pipeline.stop()
+        ctx.db.close()
+
+
+# --------------------------------------------------------------------------- #
+# 12. stop.flag while an AUTO trade waits for its exit: the position is closed,
+#     not abandoned (never left EXECUTING in the database)
+# --------------------------------------------------------------------------- #
+async def test_run_app_shutdown_closes_a_trade_in_flight(tmp_path: Path) -> None:
+    db_path = tmp_path / "data" / "latbot.sqlite3"
+    b = build(tmp_path, db_path=str(db_path))
+    ctx = b.ctx
+    opp = await detect(b)
+    ex = ctx.execution
+    ex.poll_interval_s = 0.01
+    run = asyncio.create_task(run_app(ctx, seconds=None, serve=False))
+    try:
+        await wait_for(lambda: ctx.request_stop is not None, timeout=5.0)
+        sel = await ex.select_auto(opp.id)
+        assert sel["snapshot"]["valid"] is True, sel
+        start = await ex.confirm_auto(opp.id, wait=False)
+        assert start["ok"] is True, start
+        await wait_for(lambda: opp.id in ex._pending_exit, timeout=5.0)
+        Path(ctx.stop_flag).write_text("stop", encoding="utf-8")
+        rc = await asyncio.wait_for(run, 20.0)
+    finally:
+        if not run.done():
+            run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
+    assert rc == 0 and ctx.stop_reason == "stop.flag"
+    trade = ex.trades()[0]
+    assert trade.state is OppState.CLOSED
+    assert trade.exit_order is not None and trade.exit_order.filled == pytest.approx(trade.entry_order.filled)
+    assert ctx.risk.open_trades() == 0 and ex.open_positions() == []
+    paper = ctx.exec_adapters[Mode.PAPER]["kraken"]
+    assert await paper.open_orders() == []
+    db = Database(str(db_path))
+    try:
+        row = db.get_trade(trade.id)
+        assert row is not None and row["state"] == "CLOSED"
+    finally:
+        db.close()

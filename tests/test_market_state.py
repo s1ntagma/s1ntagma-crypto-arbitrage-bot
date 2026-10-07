@@ -129,3 +129,19 @@ def test_ticker_mid_volume_and_series():
     assert st.mid_series("kraken", "BTC")[-1] == (1001.0, 200.0)
     assert st.volume24h("kraken", "ETH") is None
     assert "kraken" in st.exchanges_for("BTC")
+
+
+def test_on_ticker_volume_only_does_not_touch_series():
+    """Polled tickers for WebSocket-streamed assets update volume / ticker /
+    liveness only: their (older) price never enters the live mid series."""
+    st, _ = make_state(price_sample_min_interval_ms=0)
+    st.on_book(book("binance", 102.0, 1000.0))
+    st.on_ticker(ticker("binance", 1000.2, bid=99.99, ask=100.01, quote_volume=7_000_000.0), append_mid=False)
+    assert list(st.mid_series("binance", "BTC")) == [(1000.0, 102.0)]
+    assert st.volume24h("binance", "BTC") == 7_000_000.0
+    assert st.ticker("binance", "BTC") is not None and st.symbol("binance", "BTC") == "BTC/USDT"
+    assert st.last_data_mono("binance", "BTC") == 1000.2  # the feed is alive
+    assert st.is_fresh("binance", "BTC", 1001.0, 1500.0) is True
+    # default keeps appending (poll-only assets, WS bbo tickers)
+    st.on_ticker(ticker("binance", 1000.4, bid=99.99, ask=100.01))
+    assert list(st.mid_series("binance", "BTC"))[-1] == (1000.4, 100.0)

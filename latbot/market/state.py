@@ -113,8 +113,14 @@ class MarketState:
         if mid:
             self._append_mid(key, mono, mid)
 
-    def on_ticker(self, ticker: Ticker) -> None:
-        """Store the ticker, its 24h volume and append its mid to the series."""
+    def on_ticker(self, ticker: Ticker, *, append_mid: bool = True) -> None:
+        """Store the ticker, its 24h volume and (``append_mid``) its mid.
+
+        ``append_mid=False`` is for polled REST tickers of assets the same
+        exchange already streams over WebSocket: a REST price is 1-2 s old and
+        must never become the newest point of the live series (it would read
+        as a move that is not there); volume, ticker and liveness still count.
+        """
         asset = self.asset_of(ticker)
         if not asset:
             return
@@ -137,7 +143,7 @@ class MarketState:
             vol = float(ticker.base_volume) * mid
         if vol is not None and vol >= 0:
             self._volume24h[key] = vol
-        if mid:
+        if mid and append_mid:
             self._append_mid(key, mono, mid)
 
     def on_trade(self, trade: Trade) -> None:

@@ -74,6 +74,7 @@ _ADAPTER_START_TIMEOUT_S = 120.0
 _ADAPTER_RETRY_MIN_S = 5.0
 _ADAPTER_RETRY_MAX_S = 60.0
 _SHUTDOWN_STEP_S = 5.0
+_EXEC_SHUTDOWN_EXTRA_S = 5.0  # on top of buy_fill_timeout_s: cancel a resting exit + market-exit the remainder
 _SERVER_STOP_S = 10.0
 _RESTART_BACKOFF_STEP_S = 10.0
 _RESTART_BACKOFF_MAX_S = 120.0
@@ -162,6 +163,13 @@ def build_context(
     exec_adapters = build_execution_adapters(settings, secrets, bus, clock, adapters, db, adapter_factory=adapter_factory)
     risk = RiskManager(settings, db, clock, bus)
     execution = ExecutionEngine(settings, bus, clock, pipeline, opps, exec_adapters, risk, db, stats)
+    try:
+        restored = execution.restore_from_db()  # positions a crash / restart left behind stay tracked
+    except Exception:  # noqa: BLE001
+        log.exception("restore of open trades from the database failed")
+    else:
+        if restored:
+            log.error("%d open trade(s) restored from the database - see the trades tab / EMERGENCY CLOSE", len(restored))
 
     cfg_path = Path(config_path)
     notifier: TelegramNotifier | None = None
@@ -494,6 +502,8 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
             await _guarded("recorder start", ctx.recorder.start())
         if ctx.notifier is not None:
             await _guarded("telegram start", ctx.notifier.start(), timeout_s=30.0)
+        if ctx.execution is not None and hasattr(ctx.execution, "announce_open_positions"):
+            await _guarded("announce open positions", ctx.execution.announce_open_positions())
         if ctx.poller is not None:
             # Poll the watchlist right away (REST tickers carry the 24h volumes the
             # Phase-2 gates need); widen to the common universe once exchanges answer.
@@ -548,6 +558,10 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
             except Exception:  # noqa: BLE001
                 log.exception("HTTP server shutdown failed")
         ctx.server = None
+        if ctx.execution is not None and hasattr(ctx.execution, "shutdown"):
+            # running trades first: abort -> market exit while the adapters, Telegram and the db are still up
+            drain_s = float(settings.buy_fill_timeout_s) + _EXEC_SHUTDOWN_EXTRA_S
+            await _guarded("execution shutdown", ctx.execution.shutdown(timeout_s=drain_s), timeout_s=drain_s + _SHUTDOWN_STEP_S)
         if ctx.notifier is not None:
             await _guarded("telegram stop", ctx.notifier.stop(), timeout_s=15.0)
         if ctx.poller is not None and hasattr(ctx.poller, "stop"):

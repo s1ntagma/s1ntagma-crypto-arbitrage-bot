@@ -195,6 +195,7 @@ class Settings:
     ticker_poll_interval_s: float = 2.0
     poll_assets_max: int = 600  # cap on polled assets (common to >= 2 exchanges)
     confirm_with_rest_book: bool = True  # for polled assets fetch the target REST book before creating an opportunity
+    rest_book_timeout_s: float = 2.0  # REST book confirmation: per-request timeout (single-flight, bounded per exchange)
     price_sample_min_interval_ms: float = 100.0  # throttle mid-price series appends per stream
     # ---- signal quality --------------------------------------------------
     min_movers: int = 2  # at least this many exchanges must have moved (single-venue spikes revert)
@@ -359,6 +360,8 @@ class Settings:
         self.ws_assets = max(1, int(self.ws_assets))
         if self.capital_quote <= 0 or self.max_trade_quote <= 0:
             raise ValueError("capital must be > 0")
+        if self.rest_book_timeout_s <= 0:
+            raise ValueError("rest_book_timeout_s must be > 0")
         if self.max_slippage_pct < 0 or self.max_slippage_pct > 10:
             raise ValueError("max_slippage_pct out of range")
         if self.telegram_profit_threshold_pct < 0:

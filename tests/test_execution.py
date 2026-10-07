@@ -8,6 +8,8 @@ Everything is stubbed locally: a scripted ``StubAdapter``, ``StubPipeline``
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -17,9 +19,10 @@ from latbot import events
 from latbot.clock import SimClock
 from latbot.config import ExchangeConfig, Settings
 from latbot.events import EventBus
-from latbot.exchanges.base import ExchangeAdapter, OrderRejected
+from latbot.exchanges.base import ExchangeAdapter, ExchangeError, InsufficientBalance, OrderRejected, RateLimited
 from latbot.execution.engine import ExecutionEngine
 from latbot.execution.risk import RiskManager
+from latbot.logging_setup import register_secret
 from latbot.models import (
     TRANSITIONS,
     Balance,
@@ -150,6 +153,13 @@ class StubAdapter(ExchangeAdapter):
         if self.reject_next:
             self.reject_next = False
             raise OrderRejected("rejected by stub")
+        if req.side == Side.BUY and req.type == OrderType.LIMIT and req.price:
+            # like a real venue (and the SimBroker): a limit buy needs notional + taker fee free
+            quote = req.symbol.split("/")[1].split(":")[0]
+            free = self.balances[quote].free if quote in self.balances else 0.0
+            need = float(req.price) * float(req.amount) * (1.0 + self.taker)
+            if need > free + 1e-9:
+                raise InsufficientBalance(f"need {need:.8g} {quote}, free {free:.8g}")
         self._n += 1
         order = Order(id=f"{self.name}-o{self._n}", client_id=req.client_id, exchange=self.name, symbol=req.symbol,
                       side=req.side, type=req.type, amount=req.amount, price=req.price, status=OrderStatus.ACKNOWLEDGED,
@@ -222,12 +232,15 @@ class StubPipeline:
         self.fail = fail
         self.bot = bot
         self.on_refresh = on_refresh
+        self.return_none = False
         self.calls: list[tuple[str, float | None]] = []
 
-    async def refresh(self, opp: Opportunity, capital_quote: float | None = None) -> Opportunity:
+    async def refresh(self, opp: Opportunity, capital_quote: float | None = None) -> Opportunity | None:
         self.calls.append((opp.id, capital_quote))
         if self.fail:
             raise RuntimeError("no book")
+        if self.return_none:
+            return None
         if self.next_econ is not None:
             opp.econ = self.next_econ
         if self.bot is not None:
@@ -833,12 +846,16 @@ async def test_balance_downsize_when_allowed() -> None:
     sel = await env.engine.select_auto(opp.id)
     snap = sel["snapshot"]
     assert snap["balance"] == {"quote": "USDT", "free": 40.0}
-    assert snap["capital"] == 40.0 and snap["valid"] is True
+    # the entry order locks notional + taker fee (0.1 %) + the limit markup (0.2 %): downsize below the free balance
+    assert snap["capital"] == pytest.approx(40.0 / 1.003, rel=1e-3) and snap["capital"] < 40.0 / 1.003
+    assert snap["valid"] is True
     assert "downsized" in snap["reason"]
     res = await env.engine.confirm_auto(opp.id)
     trade = env.engine.trade(res["trade_id"])
-    assert trade.state == OppState.CLOSED and trade.capital_quote == 40.0
-    assert env.adapter().placed()[0].amount == pytest.approx(0.4)
+    assert trade.state == OppState.CLOSED, res
+    assert trade.capital_quote == pytest.approx(40.0 / 1.003, rel=1e-3)
+    assert trade.entry_order.status == OrderStatus.FILLED
+    assert env.adapter().placed()[0].amount == pytest.approx(0.4 / 1.003, rel=1e-3)
 
 
 async def test_balance_insufficient_without_downsize() -> None:
@@ -846,11 +863,11 @@ async def test_balance_insufficient_without_downsize() -> None:
     opp = env.opps.add(make_opp(env.clock))
     res, trade = await run_auto(env, opp)
     assert trade.state == OppState.CANCELLED
-    assert trade.error == "Insufficient USDT balance: free 40.00 < needed 100.00"
+    assert trade.error == "Insufficient USDT balance: free 40.00 < needed 100.30"
     env2 = make_env(balances={"USDT": 5.0})  # below min trade size even with downsizing
     opp2 = env2.opps.add(make_opp(env2.clock))
     ok, reason, _ = await env2.engine.revalidate(opp2)
-    assert not ok and reason == "Insufficient USDT balance: free 5.00 < needed 100.00"
+    assert not ok and reason == "Insufficient USDT balance: free 5.00 < needed 100.30"
 
 
 # --------------------------------------------------------------------------- #
@@ -1028,3 +1045,524 @@ async def test_manual_short_on_swap() -> None:
     # fees from the adapter (stub taker 0.1 %), not from the config (0.06 %)
     assert trade.realized_pnl_quote == pytest.approx((100.0 - 96.0) * 1.0 - (100.0 + 96.0) * 0.001)
     assert trade.actual_slippage_pct == pytest.approx(0.0 + (96.0 / (100.0 * (1 - 0.0505)) - 1) * 100)
+
+
+async def test_auto_and_manual_refuse_when_mode_changed_since_detection() -> None:
+    """The card says PAPER; the owner flips to LIVE: nothing executes from that
+    card until it has been re-labelled (adapter_for follows the current mode)."""
+    live_adapters: dict[str, StubAdapter] = {}
+    env = make_env(make_settings(auto_confirm=True))
+    for cfg in env.settings.exchanges:
+        symbols = {"BTC": "BTC/USDT"} if cfg.market_type == "spot" else {"BTC": "BTC/USDT:USDT"}
+        a = StubAdapter(cfg, env.bus, env.clock, symbols=symbols)
+        for sym in symbols.values():
+            a.books[sym] = make_book(sym, env.clock, exchange=cfg.name)
+        live_adapters[cfg.name] = a
+    env.engine._exec_adapters[Mode.LIVE] = live_adapters  # type: ignore[index]
+    opp = env.opps.add(make_opp(env.clock))
+    assert opp.mode is Mode.PAPER
+    env.settings.update({"paper_mode": False, "live_mode": True})
+    assert env.settings.mode() is Mode.LIVE
+    r = await env.engine.select_auto(opp.id)
+    assert r["ok"] is False and "mode changed to LIVE" in r["reason"]
+    p = await env.engine.select_manual(opp.id)
+    assert p["valid"] is False and p["status"] == "mode_changed" and "LIVE" in p["message"]
+    r2 = await env.engine.manual_entered(opp.id, 100.0, 50.0)
+    assert r2["ok"] is False and "mode changed" in r2["reason"]
+    assert opp.state is OppState.VALID and env.engine.trades() == []
+    assert all(a.placed() == [] for a in list(env.adapters.values()) + list(live_adapters.values()))
+    # once the card carries the current mode the flows work again (on the LIVE adapters)
+    opp.mode = Mode.LIVE
+    r = await env.engine.select_auto(opp.id)
+    assert r["ok"] is True
+    await wait_until(lambda: env.engine.trade(r["trade_id"]) is not None and env.engine.trade(r["trade_id"]).finished_ts is not None)
+    trade = env.engine.trade(r["trade_id"])
+    assert trade.mode is Mode.LIVE and live_adapters["testex"].placed() and env.adapters["testex"].placed() == []
+
+
+async def test_manual_support_reports_not_executable_for_size_not_time() -> None:
+    env = make_env()
+    opp = env.opps.add(make_opp(env.clock, duration_s=30.0, human=Light.RED))
+    opp.human.reasons = ["not executable at size: book supports only $7.00 (min trade $10.00)", "net +4.80%"]
+    p = await env.engine.manual_support(opp.id)
+    assert p["valid"] is True and p["status"] == "not_executable"
+    assert p["message"] == "⚠️ NOT EXECUTABLE - not executable at size: book supports only $7.00 (min trade $10.00)"
+    # too little time stays TOO FAST
+    fast = env.opps.add(make_opp(env.clock, duration_s=3.0, human=Light.RED))
+    assert (await env.engine.manual_support(fast.id))["status"] == "too_fast"
+
+
+# --------------------------------------------------------------------------- #
+# order timeouts / unknown order state (hard rule 5)
+# --------------------------------------------------------------------------- #
+class TimeoutAdapter(StubAdapter):
+    """The exchange executes the order but the response is lost: ``place_order``
+    returns the ccxt-adapter timeout shape (status SENT, id "") once, for the
+    ``timeout_leg`` ("entry" IOC | "exit" GTC) - or raises ``ccxt.RequestTimeout``
+    when ``raise_ccxt``.  ``fetch_order`` resolves an empty id by client id unless
+    ``fetch_fails``."""
+
+    def __init__(self, *args: Any, timeout_leg: str = "entry", fetch_fails: bool = False, raise_ccxt: bool = False,
+                 **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.timeout_leg = timeout_leg
+        self.fetch_fails = fetch_fails
+        self.raise_ccxt = raise_ccxt
+        self.client_fetches: list[str] = []
+        self._timed_out = False
+
+    async def place_order(self, req: OrderRequest, *, reduce_only: bool = False) -> Order:
+        order = await self._place(req, reduce_only)  # executed on the "exchange"
+        if req.type == OrderType.LIMIT and req.tif == TimeInForce.IOC:
+            leg = "entry"
+        elif req.type == OrderType.LIMIT and req.tif == TimeInForce.GTC:
+            leg = "exit"
+        else:
+            leg = "market"
+        if leg != self.timeout_leg or self._timed_out:
+            return order
+        self._timed_out = True
+        if self.raise_ccxt:
+            import ccxt
+
+            raise ccxt.RequestTimeout("slow")
+        return Order(id="", client_id=req.client_id, exchange=self.name, symbol=req.symbol, side=req.side, type=req.type,
+                     amount=req.amount, price=req.price, status=OrderStatus.SENT, sent_mono=order.sent_mono,
+                     sent_ts=order.sent_ts, error="timeout: status unknown")
+
+    async def fetch_order(self, order_id: str, symbol: str, *, client_id: str | None = None) -> Order:  # type: ignore[override]
+        if self.fetch_fails:
+            self.calls.append(("fetch-fail", order_id or client_id))
+            raise ExchangeError("fetch_order unavailable")
+        if not order_id:
+            self.client_fetches.append(client_id or "")
+            found = next((o for o in self.orders.values() if o.client_id == client_id), None)
+            if found is None:
+                raise ExchangeError(f"unknown client id {client_id}")
+            order_id = found.id
+        return await super().fetch_order(order_id, symbol)
+
+
+class OutageAdapter(StubAdapter):
+    """``cancel_order`` / ``fetch_order`` raise ``RateLimited`` while ``outage``
+    is set.  The outage starts when the ``outage_on`` order is placed ("exit" =
+    the GTC exit, "entry" = the IOC entry, which then comes back ACKNOWLEDGED
+    with its fill unknown)."""
+
+    def __init__(self, *args: Any, outage_on: str = "exit", **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.outage_on = outage_on
+        self.outage = False
+
+    async def place_order(self, req: OrderRequest, *, reduce_only: bool = False) -> Order:
+        if self.outage_on == "entry" and req.type == OrderType.LIMIT and req.tif == TimeInForce.IOC and not self.outage:
+            self.calls.append(("place", req, reduce_only))
+            self._n += 1
+            order = Order(id=f"{self.name}-o{self._n}", client_id=req.client_id, exchange=self.name, symbol=req.symbol,
+                          side=req.side, type=req.type, amount=req.amount, price=req.price, status=OrderStatus.ACKNOWLEDGED,
+                          sent_mono=self.clock.mono(), sent_ts=self.clock.wall(), ack_mono=self.clock.mono() + self.latency_s)
+            self.orders[order.id] = order
+            self._polls[order.id] = 0
+            self.outage = True
+            return order
+        order = await self._place(req, reduce_only)
+        if self.outage_on == "exit" and req.type == OrderType.LIMIT and req.tif == TimeInForce.GTC:
+            self.outage = True
+        return order
+
+    async def fetch_order(self, order_id: str, symbol: str) -> Order:
+        if self.outage:
+            self.calls.append(("fetch-fail", order_id))
+            raise RateLimited(retry_after_s=0.001, msg="rate limited")
+        return await super().fetch_order(order_id, symbol)
+
+    async def cancel_order(self, order_id: str, symbol: str) -> Order:
+        if self.outage:
+            self.calls.append(("cancel-fail", order_id))
+            raise RateLimited(retry_after_s=0.001, msg="rate limited")
+        return await super().cancel_order(order_id, symbol)
+
+
+@pytest.mark.parametrize("raise_ccxt", [False, True])
+async def test_entry_timeout_is_reconciled_by_client_id(raise_ccxt: bool) -> None:
+    env = make_env(adapter_cls=TimeoutAdapter, raise_ccxt=raise_ccxt)
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    a = env.adapter()
+    assert res["ok"] is True and trade.state == OppState.CLOSED, res
+    assert a.client_fetches and a.client_fetches[0] == trade.entry_order.client_id
+    assert trade.entry_order.id and trade.entry_order.status == OrderStatus.FILLED
+    assert [r.type for r in a.placed()] == [OrderType.LIMIT, OrderType.LIMIT]  # never a retry
+    assert not any(c[0] == "cancel" for c in a.calls)
+    assert env.risk.open_trades() == 0
+
+
+async def test_entry_timeout_unreconciled_fails_and_keeps_position_tracked() -> None:
+    env = make_env(adapter_cls=TimeoutAdapter, fetch_fails=True, market_price=101.0)
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    a = env.adapter()
+    assert trade.state == OppState.FAILED, res
+    assert "unknown" in trade.error and "not filled" not in trade.error
+    assert trade.entry_order.status == OrderStatus.SENT and trade.entry_order.id == ""
+    assert trade.entry_order.ack_mono is None  # never acknowledged
+    assert len(a.placed()) == 1  # never a retry
+    assert opp.state == OppState.FAILED
+    assert env.risk.open_trades() == 1 and env.risk.exposure(exchange="testex") == pytest.approx(100.0)  # exposure kept
+    positions = env.engine.open_positions()
+    assert len(positions) == 1 and positions[0]["trade_id"] == trade.id and positions[0]["base"] == pytest.approx(1.0)
+    assert positions[0]["unresolved"] is True
+    assert env.db.get_trade(trade.id)["state"] == "FAILED"
+    # the exchange answers again: emergency close learns the entry had filled and exits at market once
+    a.fetch_fails = False
+    closed = await env.engine.emergency_close_positions()
+    assert [t.id for t in closed] == [trade.id] and trade.state == OppState.CLOSED
+    assert trade.entry_order.status == OrderStatus.FILLED and trade.entry_order.filled == pytest.approx(1.0)
+    assert a.placed()[-1].type == OrderType.MARKET and a.placed()[-1].amount == pytest.approx(1.0)
+    assert trade.realized_pnl_quote == pytest.approx((101.0 - 100.2) - (100.2 + 101.0) * 0.001)
+    assert env.risk.open_trades() == 0 and env.engine.open_positions() == []
+
+
+async def test_exit_timeout_unreconciled_never_sends_a_duplicate_exit() -> None:
+    env = make_env(adapter_cls=TimeoutAdapter, timeout_leg="exit", fetch_fails=True, exit_mode="never", market_price=101.0)
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    a = env.adapter()
+    assert trade.state == OppState.FAILED, res
+    assert "unknown" in trade.error
+    assert [r.type for r in a.placed()] == [OrderType.LIMIT, OrderType.LIMIT]  # no MARKET exit on top of an unknown GTC
+    assert trade.exit_order is not None and trade.exit_order.status == OrderStatus.SENT and trade.exit_order.id == ""
+    assert env.risk.open_trades() == 1
+    positions = env.engine.open_positions()
+    assert len(positions) == 1 and positions[0]["base"] == pytest.approx(1.0) and positions[0]["unresolved"] is True
+    gtc = next(o for o in a.orders.values() if o.type == OrderType.LIMIT and o.side == Side.SELL)
+    assert not gtc.is_done  # still resting on the exchange
+    # exchange reachable again: emergency stop finds the GTC by client id and cancels it ...
+    a.fetch_fails = False
+    res = await env.engine.emergency_stop("panic")
+    assert res["cancelled_orders"] >= 1 and gtc.status == OrderStatus.CANCELLED
+    assert env.engine.open_positions()[0]["unresolved"] is False
+    # ... and emergency close exits the position at market exactly once
+    closed = await env.engine.emergency_close_positions()
+    assert [t.id for t in closed] == [trade.id] and trade.state == OppState.CLOSED
+    assert [r.type for r in a.placed()] == [OrderType.LIMIT, OrderType.LIMIT, OrderType.MARKET]
+    assert trade.exit_order.filled == pytest.approx(1.0) and trade.exit_order.raw["market_filled"] == pytest.approx(1.0)
+    assert env.risk.open_trades() == 0
+
+
+async def test_cancel_failure_does_not_market_exit_unknown_order() -> None:
+    env = make_env(adapter_cls=OutageAdapter, exit_mode="never", market_price=101.0)
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    a = env.adapter()
+    assert trade.state == OppState.FAILED, res
+    assert "unknown" in trade.error
+    assert [r.type for r in a.placed()] == [OrderType.LIMIT, OrderType.LIMIT]  # no MARKET exit
+    assert any(c[0] == "cancel-fail" for c in a.calls) and sum(1 for c in a.calls if c[0] == "fetch-fail") >= 3
+    gtc = next(o for o in a.orders.values() if o.type == OrderType.LIMIT and o.side == Side.SELL)
+    assert gtc.status == OrderStatus.ACKNOWLEDGED  # still live on the exchange - and the engine says so
+    assert trade.exit_order is not None and trade.exit_order.status == OrderStatus.ACKNOWLEDGED
+    assert env.risk.open_trades() == 1
+    positions = env.engine.open_positions()
+    assert len(positions) == 1 and positions[0]["trade_id"] == trade.id and positions[0]["unresolved"] is True
+    # the outage ends: emergency stop cancels the resting GTC, emergency close exits at market
+    a.outage = False
+    res = await env.engine.emergency_stop("outage over")
+    assert res["cancelled_orders"] >= 1 and gtc.status == OrderStatus.CANCELLED
+    closed = await env.engine.emergency_close_positions()
+    assert [t.id for t in closed] == [trade.id] and trade.state == OppState.CLOSED
+    assert a.placed()[-1].type == OrderType.MARKET and a.placed()[-1].amount == pytest.approx(1.0)
+    assert env.risk.open_trades() == 0 and env.engine.open_positions() == []
+
+
+async def test_entry_cancel_failure_reports_unknown_state_not_no_fill() -> None:
+    env = make_env(adapter_cls=OutageAdapter, outage_on="entry", market_price=101.0)
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    a = env.adapter()
+    assert trade.state == OppState.FAILED, res
+    assert "unknown" in trade.error and "not filled" not in trade.error
+    assert len(a.placed()) == 1 and trade.exit_order is None
+    assert env.risk.open_trades() == 1 and env.engine.open_positions()[0]["unresolved"] is True
+    # meanwhile the IOC had actually filled on the exchange; once reachable, emergency close learns that and exits
+    entry = next(iter(a.orders.values()))
+    a._fill(entry, 1.0, 100.2)
+    a.outage = False
+    closed = await env.engine.emergency_close_positions()
+    assert [t.id for t in closed] == [trade.id] and trade.state == OppState.CLOSED
+    assert trade.entry_order.filled == pytest.approx(1.0) and trade.actual_entry_price == pytest.approx(100.2)
+    assert a.placed()[-1].type == OrderType.MARKET and a.placed()[-1].amount == pytest.approx(1.0)
+    assert env.risk.open_trades() == 0
+
+
+async def test_unknown_entry_that_never_filled_is_cancelled_on_emergency_close() -> None:
+    env = make_env(adapter_cls=OutageAdapter, outage_on="entry")
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    assert trade.state == OppState.FAILED
+    a = env.adapter()
+    a.outage = False
+    closed = await env.engine.emergency_close_positions()
+    assert [t.id for t in closed] == [trade.id]
+    assert trade.state == OppState.CANCELLED and trade.entry_order.status == OrderStatus.CANCELLED
+    assert len(a.placed()) == 1  # nothing to sell: no market order
+    assert env.risk.open_trades() == 0 and env.engine.open_positions() == []
+
+
+# --------------------------------------------------------------------------- #
+# emergency stop is scoped to the active mode (hard rule 8)
+# --------------------------------------------------------------------------- #
+async def test_emergency_stop_never_touches_adapters_of_the_other_mode() -> None:
+    env = make_env(exit_mode="never")
+    cfg = env.settings.exchange("testex")
+    live = StubAdapter(cfg, env.bus, env.clock, symbols={"BTC": "BTC/USDT"}, exit_mode="never")
+    req = OrderRequest(exchange="testex", symbol="BTC/USDT", side=Side.SELL, amount=1.0, type=OrderType.LIMIT, price=120.0,
+                       tif=TimeInForce.GTC)
+    resting = await live.place_order(req)  # the owner's own order on the real account
+    env.engine._exec_adapters[Mode.LIVE] = {"testex": live}
+    res = await env.engine.emergency_stop("paper panic")
+    assert res["emergency"] is True
+    assert ("cancel_all",) in env.adapter().calls and ("cancel_all",) in env.adapter("swapex").calls
+    assert ("cancel_all",) not in live.calls and resting.status == OrderStatus.ACKNOWLEDGED
+    # mirror: a LIVE emergency stop leaves the paper venue alone
+    live_settings = make_settings(paper_mode=False, live_mode=True)
+    env2 = make_env(live_settings, mode=Mode.LIVE, exit_mode="never")
+    assert env2.settings.mode() is Mode.LIVE
+    paper = StubAdapter(live_settings.exchange("testex"), env2.bus, env2.clock, symbols={"BTC": "BTC/USDT"}, exit_mode="never")
+    resting2 = await paper.place_order(req)
+    env2.engine._exec_adapters[Mode.PAPER] = {"testex": paper}
+    await env2.engine.emergency_stop("live panic")
+    assert ("cancel_all",) in env2.adapter().calls
+    assert ("cancel_all",) not in paper.calls and resting2.status == OrderStatus.ACKNOWLEDGED
+
+
+# --------------------------------------------------------------------------- #
+# secrets never leak through trade / order / plan text (hard rule 7)
+# --------------------------------------------------------------------------- #
+async def test_exchange_error_text_is_redacted_everywhere() -> None:
+    key = "VVE0TZMN9xTBtU1AK0"
+    register_secret(key)
+    leak = f'AuthenticationError: bybit {{"retCode":10004,"retMsg":"error sign! origin_string[1751658755149{key}5000..."}}'
+
+    class LeakyAdapter(StubAdapter):
+        leak_balances = False
+
+        async def _place(self, req: OrderRequest, reduce_only: bool) -> Order:
+            self.calls.append(("place", req, reduce_only))
+            raise OrderRejected(leak)
+
+        async def fetch_balances(self) -> dict[str, Balance]:
+            if self.leak_balances:
+                raise ExchangeError(leak)
+            return await super().fetch_balances()
+
+    env = make_env(adapter_cls=LeakyAdapter)
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    assert trade.state == OppState.FAILED
+    assert trade.error.startswith("entry order failed: AuthenticationError") and "***" in trade.error
+    sinks = {
+        "trade": trade.to_dict(),
+        "confirm": res,
+        "orders_db": env.db.list_orders(trade.id),
+        "trades_db": env.db.list_trades(),
+        "events": [(t, p.to_dict() if isinstance(p, TradeRecord) else str(p)) for t, p in env.events],
+        "opp": opp.to_dict(env.clock.mono()),
+    }
+    blob = json.dumps(sinks, default=str, ensure_ascii=False)
+    assert key not in blob
+    assert key not in str(trade.entry_order.error) and key not in trade.diff_reason
+
+    env2 = make_env(adapter_cls=LeakyAdapter)
+    env2.adapter().leak_balances = True
+    opp2 = env2.opps.add(make_opp(env2.clock))
+    sel = await env2.engine.select_auto(opp2.id)
+    assert sel["snapshot"]["valid"] is False and sel["snapshot"]["reason"].startswith("Balance check failed")
+    assert key not in json.dumps(sel, default=str, ensure_ascii=False)
+    res2 = await env2.engine.confirm_auto(opp2.id)
+    assert key not in json.dumps(res2, default=str, ensure_ascii=False)
+
+
+# --------------------------------------------------------------------------- #
+# MANUAL support never shows a dead book as live (hard rules 1 and 4)
+# --------------------------------------------------------------------------- #
+async def test_manual_support_reports_no_fresh_data_on_stale_book() -> None:
+    env = make_env()
+    a = env.adapter()
+    opp = env.opps.add(make_opp(env.clock))
+    p = await env.engine.select_manual(opp.id)
+    assert p["valid"] is True and p["fresh"] is True
+    calls = len(env.pipeline.calls)
+    # the target feed dropped and REST is down: honest NO FRESH DATA, and no refresh
+    # (a refresh would keep bumping last_update_mono and defeat the sweep's "no updates" expiry)
+    a.books["BTC/USDT"] = make_book("BTC/USDT", env.clock, recv_mono=env.clock.mono() - 3.0)
+    a.rest_fail = True
+    p = await env.engine.manual_support(opp.id)
+    assert p["valid"] is False and p["fresh"] is False and p["status"] == "no_data"
+    assert p["message"] == "⚠️ NO FRESH DATA" and p["expired"] is False and p["entry_price_now"] is None
+    assert len(env.pipeline.calls) == calls and a.rest_calls == 1
+    # the modal polls every 300 ms: REST is not hammered inside max_data_age_ms
+    p = await env.engine.manual_support(opp.id)
+    assert p["status"] == "no_data" and a.rest_calls == 1
+    # REST is back: one snapshot, published as BOOK, and the modal is live again
+    env.clock.advance(2.0)
+    a.rest_fail = False
+    p = await env.engine.manual_support(opp.id)
+    assert p["valid"] is True and p["fresh"] is True and p["status"] == "ok"
+    assert a.rest_calls == 2 and len(env.pipeline.calls) == calls + 1
+    assert any(t == events.BOOK for t, _ in env.events)
+    # the pipeline itself reporting a stale book is not fresh either
+    env.pipeline.next_econ = make_econ(book_age_ms=5000.0)
+    p = await env.engine.manual_support(opp.id)
+    assert p["valid"] is False and p["status"] == "no_data"
+    env.pipeline.next_econ = None
+    env.pipeline.return_none = True
+    p = await env.engine.manual_support(opp.id)
+    assert p["valid"] is False and p["fresh"] is False and p["status"] == "no_data"
+
+
+# --------------------------------------------------------------------------- #
+# revalidation before the exit order (hard rule 4, second half)
+# --------------------------------------------------------------------------- #
+async def test_exit_is_repriced_from_the_fresh_book() -> None:
+    n = {"calls": 0}
+
+    async def hook(o: Opportunity) -> None:
+        n["calls"] += 1
+        if n["calls"] == 2:  # the refresh right before the exit order
+            o.econ = make_econ(net=2.0)
+
+    env = make_env(pipeline=StubPipeline(on_refresh=hook))
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    assert trade.state == OppState.CLOSED, res
+    assert len(env.pipeline.calls) == 2
+    reqs = env.adapter().placed()
+    assert reqs[1].tif == TimeInForce.GTC and reqs[1].price == pytest.approx(102.25)
+    assert any("exit revalidated" in m for _, m in trade.events)
+    assert trade.expected_exit_price == pytest.approx(105.05)  # expected-vs-actual keeps what the user saw
+    assert trade.actual_exit_price == pytest.approx(102.25)
+
+
+async def test_exit_markets_out_when_the_fresh_edge_is_gone() -> None:
+    n = {"calls": 0}
+
+    async def hook(o: Opportunity) -> None:
+        n["calls"] += 1
+        if n["calls"] == 2:
+            o.econ = dataclasses.replace(make_econ(), exit_vwap_now=99.0, exit_target=99.0)
+
+    env = make_env(pipeline=StubPipeline(on_refresh=hook), exit_mode="never", market_price=99.0)
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    assert trade.state == OppState.CLOSED, res
+    reqs = env.adapter().placed()
+    assert [r.type for r in reqs] == [OrderType.LIMIT, OrderType.MARKET]  # no GTC at a target that no longer exists
+    assert trade.exit_order.type == OrderType.MARKET and trade.actual_exit_price == pytest.approx(99.0)
+    assert trade.realized_pnl_quote < 0
+    assert any("edge gone" in m for _, m in trade.events)
+
+
+async def test_exit_falls_back_to_the_planned_target_when_refresh_fails() -> None:
+    n = {"calls": 0}
+
+    async def hook(o: Opportunity) -> None:
+        n["calls"] += 1
+        if n["calls"] == 2:
+            raise RuntimeError("book gone")
+
+    env = make_env(pipeline=StubPipeline(on_refresh=hook))
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    assert trade.state == OppState.CLOSED, res  # a position is never left unmanaged
+    reqs = env.adapter().placed()
+    assert reqs[1].tif == TimeInForce.GTC and reqs[1].price == pytest.approx(105.05)
+    assert any("exit revalidation unavailable" in m for _, m in trade.events)
+
+
+# --------------------------------------------------------------------------- #
+# shutdown / crash / restart never abandon a position (hard rules 5 and 6)
+# --------------------------------------------------------------------------- #
+async def test_shutdown_market_exits_a_pending_exit() -> None:
+    env = make_env(exit_mode="never", market_price=101.0)
+    env.settings.sell_timeout_s = 5.0
+    opp = env.opps.add(make_opp(env.clock))
+    await env.engine.confirm_auto(opp.id, wait=False)
+    await wait_until(lambda: opp.id in env.engine._pending_exit)
+    left = await env.engine.shutdown(2.0)
+    assert left == []
+    trade = env.engine.trades()[0]
+    assert trade.state == OppState.CLOSED and env.engine._tasks == {}
+    a = env.adapter()
+    assert any(c[0] == "cancel" for c in a.calls) and a.placed()[-1].type == OrderType.MARKET
+    assert [o for o in a.orders.values() if not o.is_done] == []
+    assert env.risk.open_trades() == 0
+    assert env.db.get_trade(trade.id)["state"] == "CLOSED"
+    assert any("shutdown" in m for _, m in trade.events)
+
+
+async def test_cancelled_task_keeps_the_open_position_tracked() -> None:
+    env = make_env(exit_mode="never", market_price=101.0)
+    env.settings.sell_timeout_s = 5.0
+    opp = env.opps.add(make_opp(env.clock))
+    await env.engine.confirm_auto(opp.id, wait=False)
+    await wait_until(lambda: opp.id in env.engine._pending_exit)
+    task = env.engine._tasks[opp.id]
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    trade = env.engine.trades()[0]
+    assert trade.state == OppState.FAILED and "cancelled" in trade.error
+    assert env.db.get_trade(trade.id)["state"] == "FAILED"
+    assert env.risk.open_trades() == 1
+    positions = env.engine.open_positions()
+    assert len(positions) == 1 and positions[0]["trade_id"] == trade.id and positions[0]["base"] == pytest.approx(1.0)
+    assert positions[0]["unresolved"] is True  # the GTC exit is still resting
+    assert env.trade_updates()[-1].state == OppState.FAILED
+    assert opp.id not in env.engine._active and opp.id not in env.engine._tasks
+    a = env.adapter()
+    gtc = next(o for o in a.orders.values() if o.side == Side.SELL)
+    assert not gtc.is_done
+    closed = await env.engine.emergency_close_positions()
+    assert [t.id for t in closed] == [trade.id] and trade.state == OppState.CLOSED
+    assert gtc.status == OrderStatus.CANCELLED and a.placed()[-1].type == OrderType.MARKET
+    assert env.risk.open_trades() == 0
+
+
+async def test_restore_open_trades_from_db() -> None:
+    env = make_env(market_price=101.0)
+    a = env.adapter()
+    entry = Order(id="testex-e1", client_id="o-entry", exchange="testex", symbol="BTC/USDT", side=Side.BUY, type=OrderType.LIMIT,
+                  amount=1.0, price=100.2, status=OrderStatus.FILLED, filled=1.0, avg_price=100.2, fee_cost_quote=0.1002,
+                  fills=[Fill(order_id="testex-e1", price=100.2, amount=1.0, fee_cost=0.1002, fee_asset="USDT", ts=T0)],
+                  sent_ts=T0, sent_mono=M0, ack_mono=M0 + 0.05, first_fill_mono=M0 + 0.05, done_mono=M0 + 0.05)
+    exit_ = Order(id="testex-x1", client_id="o-exit", exchange="testex", symbol="BTC/USDT", side=Side.SELL, type=OrderType.LIMIT,
+                  amount=1.0, price=105.05, status=OrderStatus.ACKNOWLEDGED, sent_ts=T0 + 0.1, sent_mono=M0 + 0.1, ack_mono=M0 + 0.15)
+    a.orders[exit_.id] = exit_  # still resting on the exchange
+    crashed = TradeRecord(id="tr_crash", opportunity_id="opp_crash", mode=Mode.PAPER, exchange="testex", asset="BTC", symbol="BTC/USDT",
+                          direction=1, capital_quote=100.0, expected_net_pct=4.8, expected_profit_quote=4.8, expected_entry_price=100.0,
+                          expected_exit_price=105.05, state=OppState.EXECUTING, entry_order=entry, exit_order=exit_, started_ts=T0)
+    env.db.save_trade(crashed)
+    env.db.save_order(entry, crashed.id)
+    env.db.save_order(exit_, crashed.id)
+    # noise that must NOT come back: a closed trade, a trade on an exchange without an adapter, an ancient one
+    done_exit = dataclasses.replace(exit_, status=OrderStatus.FILLED, filled=1.0, avg_price=105.05)
+    env.db.save_trade(dataclasses.replace(crashed, id="tr_done", state=OppState.CLOSED, exit_order=done_exit))
+    env.db.save_trade(dataclasses.replace(crashed, id="tr_noadapter", exchange="nowhere"))
+    env.db.save_trade(dataclasses.replace(crashed, id="tr_ancient", started_ts=T0 - 30 * 86400))
+    restored = env.engine.restore_from_db()
+    assert [t.id for t in restored] == ["tr_crash"]
+    trade = env.engine.trade("tr_crash")
+    assert trade is not None and trade.state == OppState.FAILED and "restart" in trade.error
+    assert env.db.get_trade("tr_crash")["state"] == "FAILED"
+    assert env.risk.open_trades() == 1 and env.risk.exposure(exchange="testex") == pytest.approx(100.0)
+    positions = env.engine.open_positions()
+    assert len(positions) == 1 and positions[0]["trade_id"] == "tr_crash" and positions[0]["base"] == pytest.approx(1.0)
+    assert positions[0]["unresolved"] is True
+    assert env.engine.restore_from_db() == []  # idempotent
+    # emergency close: the resting GTC is cancelled first, then the position is exited at market once
+    closed = await env.engine.emergency_close_positions()
+    assert [t.id for t in closed] == ["tr_crash"] and trade.state == OppState.CLOSED
+    assert exit_.status == OrderStatus.CANCELLED
+    assert a.placed()[-1].type == OrderType.MARKET and a.placed()[-1].amount == pytest.approx(1.0)
+    assert trade.realized_pnl_quote == pytest.approx((101.0 - 100.2) - (100.2 + 101.0) * 0.001)
+    assert env.risk.open_trades() == 0 and env.engine.open_positions() == []

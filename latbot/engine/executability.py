@@ -25,9 +25,20 @@ def _fmt_margin(margin: float) -> str:
 
 
 def assess_human(
-    remaining_s: float, net_pct: float, settings: Settings, stats: ReactionStats | None = None
+    remaining_s: float,
+    net_pct: float,
+    settings: Settings,
+    stats: ReactionStats | None = None,
+    econ: ExecutionEconomics | None = None,
 ) -> ExecAssessment:
-    """Can a human do BUY + SELL by hand inside the remaining window?"""
+    """Can a human do BUY + SELL by hand inside the remaining window?
+
+    With ``econ`` the size is part of the answer: a book that supports less
+    than ``min_trade_quote`` is not executable by anyone (RED), whatever the
+    window says.  Other ``liquidity_ok=False`` cases (fill ratio, minimum
+    liquidity) keep the time-based light - the card shows CAPITAL =
+    executable_quote for those.
+    """
     est = float(settings.human_execution_time_s)
     remaining = max(0.0, float(remaining_s))
     margin = remaining - est
@@ -43,6 +54,12 @@ def assess_human(
     else:
         light, label, prob = Light.RED, "NOT EXECUTABLE", _P_RED
         reasons.append(f"too fast for human: {remaining:.1f} s window < {est:.0f} s needed")
+    if econ is not None and econ.executable_quote < settings.min_trade_quote:
+        light, label, prob = Light.RED, "NOT EXECUTABLE", _P_RED
+        detail = econ.liquidity_reason or f"book supports only ${econ.executable_quote:,.2f}"
+        if "min trade" not in detail:
+            detail += f" (min trade ${settings.min_trade_quote:,.2f})"
+        reasons.insert(0, f"not executable at size: {detail}")
     reasons.append(f"net {net_pct:+.2f}%")
 
     stats_rate: float | None = None

@@ -2,22 +2,28 @@
 
 Every ``settings.ticker_poll_interval_s`` the poller calls ``fetch_tickers``
 on every market adapter whose ``ExchangeConfig.poll_tickers`` is on (one REST
-call per exchange), then for each ``Ticker``:
+call per exchange), then:
 
-1. ``state.on_ticker(ticker)`` - mid price into the series and, above all,
-   the 24h quote volume that the Phase-2 gates (``min_mover_volume_quote`` /
-   ``min_target_volume_quote``) need.  WebSocket book/bbo streams carry no
-   volume, so this is what makes the watchlist assets eligible at all.
-2. ``detector.on_ticker(ticker)`` (``source="poll"``) - move detection for
-   assets this exchange does NOT stream over WebSocket (streamed assets are
-   detected on their live stream; a polled ticker is up to one interval old).
+1. ``state.on_ticker(ticker)`` for every ticker - above all the 24h quote
+   volume that the Phase-2 gates (``min_mover_volume_quote`` /
+   ``min_target_volume_quote``) need; WebSocket book/bbo streams carry no
+   volume, so this is what makes the watchlist assets eligible at all.  For
+   assets the same exchange streams over WebSocket the ticker updates volume
+   / ticker / liveness only (``append_mid=False``): a REST price is one
+   interval old and must never become the newest point of the live series.
+2. ``detector.on_ticker(ticker)`` (``source="poll"``) ONCE per asset per
+   round (detection is asset-wide), and only for assets at least one polled
+   exchange does not stream (streamed assets are detected on their stream).
 3. every ``LagSignal`` -> ``pipeline.evaluate`` (the pipeline confirms polled
-   signals on a fresh REST order book before creating an opportunity).
+   signals on a fresh REST order book - in the background - before creating
+   an opportunity).
 
-Per-exchange backoff on errors (interval -> 60 s, ``RateLimited.retry_after_s``
-honoured).  ``set_assets`` narrows the polled universe at runtime (the app
-starts with the watchlist and upgrades to ``registry.resolve_universe`` once
-the exchanges answer).
+A round never blocks the event loop for long: it yields every few hundred
+tickers, and it does not wait for REST book confirmations.  Per-exchange
+backoff on errors (interval -> 60 s, ``RateLimited.retry_after_s`` honoured).
+``set_assets`` narrows the polled universe at runtime (the app starts with the
+watchlist and upgrades to ``registry.resolve_universe`` once the exchanges
+answer).
 """
 from __future__ import annotations
 
@@ -35,6 +41,8 @@ log = logging.getLogger(__name__)
 
 _BACKOFF_MAX_S = 60.0
 _MIN_INTERVAL_S = 0.2
+_YIELD_EVERY_TICKERS = 200  # give the loop back to WebSocket frames / UI / fill polling
+_YIELD_EVERY_ASSETS = 100
 
 
 class TickerPoller:
@@ -55,7 +63,8 @@ class TickerPoller:
         self._detector = detector
         self._pipeline = pipeline
         self._clock = clock
-        self._assets: list[str] | None = None  # None = everything the adapter lists
+        self._assets: set[str] | None = None  # None = everything the adapter lists
+        self._assets_order: list[str] = []
         self._task: asyncio.Task[None] | None = None
         self._next_allowed: dict[str, float] = {}
         self._backoff: dict[str, float] = {}
@@ -63,7 +72,7 @@ class TickerPoller:
         self.polls = 0
         self.tickers_seen = 0
         self.signals_seen = 0
-        self.evaluated = 0  # signals that produced or refreshed an opportunity
+        self.evaluated = 0  # signals that produced or refreshed an opportunity on an already-fresh book
 
     # ------------------------------------------------------------------ #
     # configuration / lifecycle
@@ -74,7 +83,7 @@ class TickerPoller:
 
     @property
     def assets(self) -> list[str] | None:
-        return None if self._assets is None else list(self._assets)
+        return None if self._assets is None else list(self._assets_order)
 
     @property
     def running(self) -> bool:
@@ -84,9 +93,11 @@ class TickerPoller:
         """Restrict polling to ``assets`` (None = every listed market)."""
         if assets is None:
             self._assets = None
+            self._assets_order = []
             return
         cleaned = [str(a).strip().upper() for a in assets if str(a).strip()]
-        self._assets = list(dict.fromkeys(cleaned))
+        self._assets_order = list(dict.fromkeys(cleaned))
+        self._assets = set(self._assets_order)
 
     async def start(self, assets: Iterable[str] | None = None) -> None:
         """Start the poll loop (no-op when ``settings.ticker_poll_enabled`` is off)."""
@@ -160,7 +171,7 @@ class TickerPoller:
         try:
             fetch = adapter.fetch_tickers
             if self._assets is not None and _accepts_argument(fetch):
-                res = await fetch(list(self._assets))
+                res = await fetch(list(self._assets_order))
             else:
                 res = await fetch()
         except asyncio.CancelledError:
@@ -205,6 +216,10 @@ class TickerPoller:
         self.polls += 1
         results = await asyncio.gather(*(self._fetch(n, a) for n, a in targets))
         count = 0
+        # pass A: every ticker into MarketState (volume!), remember one ticker per asset
+        # from an exchange that does not stream it (detection runs once per asset)
+        pending: dict[str, Ticker] = {}
+        processed = 0
         for (name, adapter), tickers in zip(targets, results):
             if not tickers:
                 continue
@@ -213,29 +228,39 @@ class TickerPoller:
                 if self._assets is not None and asset not in self._assets:
                     continue
                 count += 1
+                is_streamed = asset in streamed
                 try:
-                    self._state.on_ticker(ticker)
+                    self._state.on_ticker(ticker, append_mid=not is_streamed)
                 except Exception:  # noqa: BLE001
                     log.exception("state.on_ticker failed for %s %s", name, asset)
                     continue
-                if asset in streamed:
-                    continue
+                if not is_streamed and asset not in pending:
+                    pending[asset] = ticker
+                processed += 1
+                if processed % _YIELD_EVERY_TICKERS == 0:
+                    await asyncio.sleep(0)
+        # pass B: asset-wide detection, once per asset, on all freshly stored tickers
+        detected = 0
+        for asset, ticker in pending.items():
+            try:
+                signals = self._detector.on_ticker(ticker, source="poll") or []
+            except Exception:  # noqa: BLE001
+                log.exception("detector.on_ticker failed for %s %s", ticker.exchange, asset)
+                signals = []
+            for sig in signals:
+                self.signals_seen += 1
                 try:
-                    signals = self._detector.on_ticker(ticker, source="poll") or []
+                    opp = await self._pipeline.evaluate(sig)
+                except asyncio.CancelledError:
+                    raise
                 except Exception:  # noqa: BLE001
-                    log.exception("detector.on_ticker failed for %s %s", name, asset)
+                    log.exception("pipeline.evaluate failed for polled signal %s on %s", sig.asset, sig.target)
                     continue
-                for sig in signals:
-                    self.signals_seen += 1
-                    try:
-                        opp = await self._pipeline.evaluate(sig)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:  # noqa: BLE001
-                        log.exception("pipeline.evaluate failed for polled signal %s on %s", sig.asset, sig.target)
-                        continue
-                    if opp is not None:
-                        self.evaluated += 1
+                if opp is not None:
+                    self.evaluated += 1
+            detected += 1
+            if detected % _YIELD_EVERY_ASSETS == 0:
+                await asyncio.sleep(0)
         self.tickers_seen += count
         return count
 

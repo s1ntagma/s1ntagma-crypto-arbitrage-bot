@@ -7,21 +7,29 @@ AUTO flow (``execute``)::
                   -> no fill            -> CANCELLED
                   -> fill < min ratio   -> cancel rest, market-exit the filled part -> FAILED
                   -> PARTIALLY_FILLED / FILLED
+                  -> exit revalidated on the latest book (repriced; edge gone -> MARKET exit)
                   -> exit LIMIT GTC at exit_target (reduceOnly on swap), wait sell_timeout_s
                   -> unfilled: exit_on_timeout == "market" -> cancel + MARKET exit
                                "hold"  -> wait until max_hold_s from entry, then MARKET
                   -> finalize (pnl), CLOSED, risk.register_close, stats.record_trade
 
 Hard rules implemented here: never execute a stale snapshot (``revalidate``
-runs on the latest book right before the entry), one place sends orders
+runs on the latest book right before the entry, and the exit is repriced from
+the latest book right before the exit order), one place sends orders
 (``_place``), every order carries an idempotent ``client_id``, a timeout is
-status "unknown" (one ``fetch_order`` reconcile, never a retry), risk is
-checked before every order and nothing is sent while ``risk.emergency``.
+status "unknown" (one ``fetch_order`` by client id, never a retry), an order
+whose state can not be confirmed is never assumed cancelled: the trade FAILS
+with the position tracked (``open_positions()``, risk exposure kept) until
+``emergency_close_positions`` resolves the order and exits what is really
+open.  Risk is checked before every order and nothing is sent while
+``risk.emergency``.  ``shutdown`` drains running trades (abort -> market exit)
+and ``restore_from_db`` picks up positions a crash / restart left behind.
 
 MANUAL flow: ``select_manual`` -> ``manual_support`` (live payload polled by
-the UI) -> ``manual_entered`` (user bought by hand) -> ``manual_exited``
-(user sold by hand) -> realized P&L.  Manual trades are ``TradeRecord``s
-without orders; prices are user-reported, fees estimated from the adapter.
+the UI; "NO FRESH DATA" when the target book is older than max_data_age_ms)
+-> ``manual_entered`` (user bought by hand) -> ``manual_exited`` (user sold by
+hand) -> realized P&L.  Manual trades are ``TradeRecord``s without orders;
+prices are user-reported, fees estimated from the adapter.
 """
 from __future__ import annotations
 
@@ -35,16 +43,19 @@ from typing import TYPE_CHECKING, Any
 from .. import events
 from ..clock import Clock
 from ..config import Settings
-from ..exchanges.base import ExchangeAdapter, ExchangeError
+from ..exchanges.base import ExchangeAdapter, ExchangeError, OrderRejected
 from ..links import split_symbol
+from ..logging_setup import redact
 from ..models import (
     ACTIVE_STATES,
+    EXECUTION_STATES,
     ExecutionEconomics,
     Light,
     Mode,
     Opportunity,
     OppState,
     Order,
+    OrderBook,
     OrderRequest,
     OrderStatus,
     OrderType,
@@ -53,6 +64,7 @@ from ..models import (
     TradeRecord,
     new_id,
 )
+from ..storage.db import trade_from_dict
 from .pnl import finalize
 from .risk import RiskManager
 
@@ -65,15 +77,39 @@ if TYPE_CHECKING:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 _EPS = 1e-9
+_CANCEL_REFRESH_ATTEMPTS = 3  # fetch_order attempts after a failed cancel before the state counts as unknown
+_MAX_RETRY_SLEEP_S = 5.0
+_GONE_GRACE_S = 10.0  # "order not found" resolves an order only this long after it was sent (propagation lag)
+_RESTORE_MAX_AGE_S = 3 * 86400.0  # older rows are not restored as positions (logged instead)
+_NOTE_TIMEOUT_S = 2.0
 EXPIRED_MESSAGE = "⚠️ OPPORTUNITY EXPIRED"
 TOO_FAST_MESSAGE = "🔴 TOO FAST FOR HUMAN"
+NO_DATA_MESSAGE = "⚠️ NO FRESH DATA"
 
 
 @dataclass(slots=True)
 class _OpenPosition:
+    """A position the engine still owns: a FAILED trade with base left, or the
+    progress of a running trade (``_in_flight``).
+
+    ``pending`` is an order whose final state is not confirmed (no exchange id
+    after a timeout, a cancel that could not be confirmed, an order in flight
+    when the task was cancelled).  It must be resolved - fetched by id / client
+    id, cancelled if it still rests - before the remainder may be exited at
+    market: never a second order for the same quantity.  ``entry_unknown``
+    marks ``pending`` as the entry; ``base_open`` is then the worst case (the
+    full amount) until the fill is known."""
+
     adapter: ExchangeAdapter
     trade: TradeRecord
     base_open: float
+    pending: Order | None = None
+    pending_filled: float = 0.0  # pending.filled when it was recorded
+    entry_unknown: bool = False
+
+    @property
+    def unresolved(self) -> bool:
+        return self.pending is not None and not self.pending.is_done
 
 
 @dataclass(slots=True)
@@ -131,13 +167,16 @@ class ExecutionEngine:
         self._trades: dict[str, TradeRecord] = {}
         self._active: dict[str, TradeRecord] = {}  # opp_id -> running AUTO trade (duplicate guard)
         self._tasks: dict[str, asyncio.Task[TradeRecord]] = {}
-        self._pending_exit: dict[str, tuple[ExchangeAdapter, Order]] = {}
+        self._pending_exit: dict[str, tuple[ExchangeAdapter, Order]] = {}  # running trades' resting exits
+        self._in_flight: dict[str, _OpenPosition] = {}  # opp_id -> progress of the running trade
         self._abort: dict[str, str] = {}
         self._expected: dict[str, ExecutionEconomics] = {}  # what the user saw when selecting
         self._plan: dict[str, _Plan] = {}
         self._open_positions: dict[str, _OpenPosition] = {}
         self._manual: dict[str, TradeRecord] = {}
         self._manual_entry_mono: dict[str, float] = {}
+        self._rest_book_mono: dict[tuple[str, str], float] = {}  # (exchange, symbol) -> last REST book attempt
+        self._restored: list[TradeRecord] = []
 
     # ------------------------------------------------------------------ #
     # small helpers
@@ -171,7 +210,7 @@ class ExecutionEngine:
         try:
             self._db.save_order(order, trade_id)
         except Exception:  # noqa: BLE001
-            log.exception("db.save_order failed for %s", order.id)
+            log.exception("db.save_order failed for %s", order.id or order.client_id)
 
     async def _note(self, trade: TradeRecord, msg: str) -> None:
         """Append an event, log, persist and publish TRADE_UPDATE."""
@@ -226,6 +265,47 @@ class ExecutionEngine:
             new.client_id = old.client_id
         return new
 
+    @staticmethod
+    def _unresolved(orders: list[Order | None]) -> Order | None:
+        """The first order whose final state is not confirmed (not done)."""
+        for o in orders:
+            if o is not None and not o.is_done:
+                return o
+        return None
+
+    async def _fresh_book(
+        self, adapter: ExchangeAdapter, symbol: str, *, throttle_s: float = 0.0
+    ) -> tuple[OrderBook | None, float | None]:
+        """The adapter's book for ``symbol`` when it is younger than
+        ``max_data_age_ms``; otherwise one REST snapshot (published as BOOK so
+        the pipeline's state sees it too).  ``throttle_s`` bounds the REST rate
+        for callers that poll.  Returns ``(book, age_ms)``; the caller decides."""
+        s = self._settings
+        now = self._clock.mono()
+        book = adapter.order_book(symbol)
+        age = book.age_ms(now) if book is not None else None
+        if book is not None and age is not None and age <= s.max_data_age_ms:
+            return book, age
+        key = (adapter.name, symbol)
+        last = self._rest_book_mono.get(key)
+        if throttle_s > 0 and last is not None and now - last < throttle_s:
+            return book, age
+        self._rest_book_mono[key] = now
+        try:
+            rest = await adapter.fetch_order_book(symbol)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("%s: REST book for %s failed: %s", adapter.name, symbol, exc)
+            return book, age
+        if rest is None:
+            return book, age
+        try:
+            await self._bus.publish(events.BOOK, rest)
+        except Exception:  # noqa: BLE001
+            log.exception("BOOK publish failed")
+        return rest, rest.age_ms(self._clock.mono())
+
     # ------------------------------------------------------------------ #
     # orders - the single place that sends them
     # ------------------------------------------------------------------ #
@@ -239,7 +319,8 @@ class ExecutionEngine:
         closing: bool = False,
     ) -> Order:
         """Send ``req``.  Returns an ``Order`` even on failure (status FAILED,
-        or SENT = unknown after a timeout that could not be reconciled)."""
+        or SENT without an id = unknown after a timeout that could not be
+        reconciled; the caller must never treat that as "not filled")."""
         failed = Order(
             id="",
             client_id=req.client_id,
@@ -271,20 +352,28 @@ class ExecutionEngine:
             log.error("order %s timed out -> status unknown, reconciling once", req.client_id)
             order = await self._reconcile_unknown(adapter, req, failed)
         except ExchangeError as exc:
-            failed.error = str(exc)
+            failed.error = redact(str(exc))
             log.error("order %s rejected by %s: %s", req.client_id, adapter.name, exc)
             order = failed
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            failed.error = f"{type(exc).__name__}: {exc}"
-            log.exception("order %s failed on %s", req.client_id, adapter.name)
-            order = failed
+            if type(exc).__name__ == "RequestTimeout":  # ccxt's network timeout is not an asyncio one
+                log.error("order %s timed out on %s (%s) -> status unknown, reconciling once", req.client_id, adapter.name, type(exc).__name__)
+                order = await self._reconcile_unknown(adapter, req, failed)
+            else:
+                failed.error = redact(f"{type(exc).__name__}: {exc}")
+                log.exception("order %s failed on %s", req.client_id, adapter.name)
+                order = failed
+        if order.status is OrderStatus.SENT and not order.id:
+            # the adapter swallowed a timeout (ccxt adapter contract): the exchange may well have the order
+            log.error("order %s on %s came back without an id -> status unknown, reconciling once", req.client_id, adapter.name)
+            order = await self._reconcile_unknown(adapter, req, self._merge_timing(failed, order))
         if order.sent_mono is None:
             order.sent_mono = sent_mono
         if order.sent_ts is None:
             order.sent_ts = sent_ts
-        if order.ack_mono is None and order.status not in (OrderStatus.NEW, OrderStatus.FAILED):
+        if order.ack_mono is None and order.status not in (OrderStatus.NEW, OrderStatus.SENT, OrderStatus.FAILED):
             order.ack_mono = self._clock.mono()
         if order.filled > 0 and order.first_fill_mono is None:
             order.first_fill_mono = self._clock.mono()
@@ -298,34 +387,45 @@ class ExecutionEngine:
         return order
 
     async def _reconcile_unknown(self, adapter: ExchangeAdapter, req: OrderRequest, unknown: Order) -> Order:
-        """One fetch_order by client id after a timeout; never a retry."""
+        """One fetch_order by client id after a timeout; never a retry.  The
+        order stays SENT without an id when the exchange can not be asked."""
         unknown.status = OrderStatus.SENT
-        unknown.error = "timeout: status unknown"
-        try:
-            if _accepts_kwarg(adapter.fetch_order, "client_id"):
-                found = await adapter.fetch_order(req.client_id, req.symbol, client_id=req.client_id)
-            else:
-                found = await adapter.fetch_order(req.client_id, req.symbol)
-        except Exception as exc:  # noqa: BLE001
-            log.error("reconcile of %s failed: %s", req.client_id, exc)
-            return unknown
+        unknown.error = unknown.error or "timeout: status unknown"
+        found, why = await self._fetch_state(adapter, unknown)
         if found is None:
+            log.error("reconcile of %s on %s failed (%s): order state unknown", req.client_id, adapter.name, why)
             return unknown
-        return self._merge_timing(unknown, found)
+        return found
 
-    async def _refresh(self, adapter: ExchangeAdapter, order: Order) -> Order:
-        if not order.id:
-            return order
+    async def _fetch_state(self, adapter: ExchangeAdapter, order: Order) -> tuple[Order | None, str]:
+        """``fetch_order`` by exchange id, or by client id when the id is unknown
+        (adapters whose ``fetch_order`` accepts ``client_id``).  Returns the
+        order merged with the fresh state and ``"ok"``, or ``(None, why)`` with
+        why in ``unavailable`` (no way to ask), ``gone`` (the exchange says the
+        order does not exist) or ``error``."""
+        ident = order.id or order.client_id
         try:
-            fresh = await adapter.fetch_order(order.id, order.symbol)
+            if order.id:
+                fresh = await adapter.fetch_order(order.id, order.symbol)
+            elif order.client_id and _accepts_kwarg(adapter.fetch_order, "client_id"):
+                fresh = await adapter.fetch_order("", order.symbol, client_id=order.client_id)
+            else:
+                return None, "unavailable"
         except asyncio.CancelledError:
             raise
+        except OrderRejected as exc:
+            log.warning("fetch_order %s on %s: not found (%s)", ident, adapter.name, exc)
+            return None, "gone"
         except Exception as exc:  # noqa: BLE001
-            log.warning("fetch_order %s failed: %s", order.id, exc)
-            return order
+            log.warning("fetch_order %s on %s failed: %s", ident, adapter.name, exc)
+            return None, "error"
         if fresh is None:
-            return order
-        return self._merge_timing(order, fresh)
+            return None, "error"
+        return self._merge_timing(order, fresh), "ok"
+
+    async def _refresh(self, adapter: ExchangeAdapter, order: Order) -> Order:
+        fresh, _why = await self._fetch_state(adapter, order)
+        return fresh if fresh is not None else order
 
     async def _wait_fill(
         self, adapter: ExchangeAdapter, order: Order, timeout_s: float, opp_id: str, *, closing: bool = False
@@ -351,22 +451,53 @@ class ExecutionEngine:
             order = await self._refresh(adapter, order)
 
     async def _cancel(self, adapter: ExchangeAdapter, order: Order) -> Order:
-        """Cancel an open order (best effort) and return its final state."""
-        if order.is_done or not order.id:
+        """Cancel an open order and return its confirmed state.
+
+        The order is marked CANCELLED only when the exchange accepted the cancel
+        (or reports the order done).  When the cancel and the follow-up fetches
+        all fail, or the order has no id the exchange knows, it is returned as
+        it is - not done - and the caller must treat its state as unknown,
+        never as cancelled (hard rule 5)."""
+        if order.is_done:
             return order
+        if not order.id:
+            order = await self._refresh(adapter, order)  # learn the id by client id
+            if order.is_done:
+                return order
+            if not order.id:
+                order.error = order.error or "cancel skipped: order id unknown"
+                log.error("cancel of %s on %s skipped: order id unknown", order.client_id, adapter.name)
+                return order
+        confirmed = False
+        retry_after = 0.0
         try:
             res = await adapter.cancel_order(order.id, order.symbol)
+            confirmed = True
             if res is not None:
                 order = self._merge_timing(order, res)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            log.warning("cancel_order %s failed: %s", order.id, exc)
-        order = await self._refresh(adapter, order)
-        if not order.is_done:
+            retry_after = float(getattr(exc, "retry_after_s", 0.0) or 0.0)
+            log.warning("cancel_order %s on %s failed: %s", order.id, adapter.name, exc)
+        attempts = 1 if confirmed else _CANCEL_REFRESH_ATTEMPTS
+        for i in range(attempts):
+            fresh, _why = await self._fetch_state(adapter, order)
+            if fresh is not None:
+                order = fresh
+                break
+            if i + 1 < attempts:
+                await asyncio.sleep(min(_MAX_RETRY_SLEEP_S, max(self.poll_interval_s, retry_after)))
+        if order.is_done:
+            if order.done_mono is None:
+                order.done_mono = self._clock.mono()
+            return order
+        if confirmed:
             order.status = OrderStatus.CANCELLED
-        if order.done_mono is None:
             order.done_mono = self._clock.mono()
+            return order
+        order.error = order.error or "cancel failed: order state unknown"
+        log.error("order %s on %s: cancel not confirmed and state unknown", order.id, adapter.name)
         return order
 
     async def _exit_market(self, adapter: ExchangeAdapter, trade: TradeRecord, amount: float) -> Order:
@@ -381,10 +512,20 @@ class ExecutionEngine:
             tif=TimeInForce.IOC,
             opportunity_id=trade.opportunity_id or None,
         )
+        holder = self._in_flight.get(trade.opportunity_id or "")
+        if holder is not None and holder.trade is not trade:
+            holder = None
         order = await self._place(adapter, req, trade_id=trade.id, reduce_only=self._is_swap(trade.exchange), closing=True)
         if order.status in (OrderStatus.FAILED, OrderStatus.REJECTED):
             return order
-        return await self._wait_fill(adapter, order, self._settings.buy_fill_timeout_s, trade.opportunity_id, closing=True)
+        if holder is not None:
+            holder.pending, holder.pending_filled = order, 0.0
+        order = await self._wait_fill(adapter, order, self._settings.buy_fill_timeout_s, trade.opportunity_id, closing=True)
+        if holder is not None:
+            holder.pending = None if order.is_done else order
+            holder.pending_filled = 0.0 if order.is_done else float(order.filled)
+            holder.base_open = max(0.0, holder.base_open - float(order.filled))
+        return order
 
     @staticmethod
     def _combine(orders: list[Order | None]) -> Order | None:
@@ -430,7 +571,7 @@ class ExecutionEngine:
             first_fill_mono=min(firsts) if firsts else None,
             done_mono=max(dones) if dones else None,
             error="; ".join(o.error for o in real if o.error) or None,
-            raw={"orders": [o.id for o in real], "market_filled": market_filled},
+            raw={"orders": [o.id for o in real], "client_ids": [o.client_id for o in real], "market_filled": market_filled},
         )
 
     # ------------------------------------------------------------------ #
@@ -475,6 +616,32 @@ class ExecutionEngine:
             )
         return d
 
+    def _no_data_payload(self, opp: Opportunity, manual: TradeRecord | None) -> dict[str, Any]:
+        """No fresh target book: no live price is shown (hard rule 1)."""
+        d = self._expired_payload(opp, opp.id, NO_DATA_MESSAGE)
+        d.update(
+            status="no_data",
+            expired=not opp.is_active and manual is None,
+            entry_price_now=None,
+            exit_target_now=None,
+            net_now_pct=None,
+            remaining_s=round(opp.remaining_s(self._clock.mono()), 2),
+            trade_id=manual.id if manual is not None else None,
+        )
+        return d
+
+    def _mode_mismatch(self, opp: Opportunity) -> str | None:
+        """Hard rule 8: the card the owner acts on must show the mode that
+        would execute.  After a PAPER/LIVE switch the pipeline re-labels the
+        active cards within one sweep; until then nothing executes from them."""
+        mode = self._settings.mode()
+        if opp.mode is mode:
+            return None
+        return (
+            f"mode changed to {mode.value.upper()} since this opportunity was detected "
+            f"(card shows {opp.mode.value.upper()}); wait for the card to refresh and select again"
+        )
+
     async def select_manual(self, opp_id: str) -> dict[str, Any]:
         """Mark the opportunity MANUAL_SELECTED and return the live support payload."""
         opp = self._opps.get(opp_id)
@@ -482,6 +649,12 @@ class ExecutionEngine:
             return self._expired_payload(None, opp_id)
         if opp_id in self._active:
             return self._expired_payload(opp, opp_id, "⚠️ AUTO EXECUTION IN PROGRESS")
+        mismatch = self._mode_mismatch(opp)
+        if mismatch is not None and opp.is_active:
+            d = self._expired_payload(opp, opp_id, f"⚠️ {mismatch}")
+            d["status"] = "mode_changed"
+            d["expired"] = False
+            return d
         if opp.state == OppState.AUTO_SELECTED:
             await self._transition(opp, OppState.VALID, "switched to manual")
         if opp.state in (OppState.VALID, OppState.NOTIFIED):
@@ -491,7 +664,12 @@ class ExecutionEngine:
         return await self.manual_support(opp_id)
 
     async def manual_support(self, opp_id: str) -> dict[str, Any]:
-        """Live numbers for the MANUAL modal, recomputed from the latest book."""
+        """Live numbers for the MANUAL modal, recomputed from the latest book.
+
+        The target book must be younger than ``max_data_age_ms`` (one throttled
+        REST snapshot otherwise); without fresh data the payload says so
+        (``status="no_data"``) and the pipeline is NOT refreshed, so the poll
+        can not keep a dead opportunity alive."""
         s = self._settings
         opp = self._opps.get(opp_id)
         manual = self._manual.get(opp_id)
@@ -500,16 +678,21 @@ class ExecutionEngine:
         if not opp.is_active and manual is None:
             return self._expired_payload(opp, opp_id)
         capital = manual.capital_quote if manual is not None else float(opp.econ.capital_quote or s.capital_quote)
+        adapter = self.adapter_for(opp)
+        if adapter is not None:
+            book, age = await self._fresh_book(adapter, opp.target_symbol, throttle_s=s.max_data_age_ms / 1000.0)
+            if book is None or age is None or age > s.max_data_age_ms:
+                log.debug("manual_support %s: no fresh book for %s on %s (age %s ms)", opp_id, opp.target_symbol, opp.target_exchange, age)
+                return self._no_data_payload(opp, manual)
         try:
             fresh = await self._pipeline.refresh(opp, capital)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001
             log.warning("manual_support %s: refresh failed: %s", opp_id, exc)
             fresh = None
-        if fresh is None:
-            d = self._expired_payload(opp, opp_id, "⚠️ NO FRESH DATA")
-            d["status"] = "no_data"
-            d["expired"] = not opp.is_active and manual is None
-            return d
+        if fresh is None or float(fresh.econ.book_age_ms) > s.max_data_age_ms:
+            return self._no_data_payload(opp, manual)
         econ = fresh.econ
         now = self._clock.mono()
         remaining = fresh.remaining_s(now)
@@ -517,8 +700,11 @@ class ExecutionEngine:
         expected = self._expected.get(opp_id, opp.econ)
         if manual is not None:
             status, message = "in_position", "🟢 IN POSITION - report your exit price"
-        elif remaining < s.human_execution_time_s or human.light == Light.RED:
+        elif remaining < s.human_execution_time_s:
             status, message = "too_fast", TOO_FAST_MESSAGE
+        elif human.light == Light.RED:  # time is fine, the size / book is not
+            status = "not_executable"
+            message = "⚠️ NOT EXECUTABLE - " + (human.reasons[0] if human.reasons else human.label)
         elif human.light == Light.GREEN:
             status, message = "ok", "🟢 EXECUTABLE"
         else:
@@ -570,6 +756,9 @@ class ExecutionEngine:
             return {"ok": False, "reason": "price and quote_amount must be positive"}
         if opp.state in (OppState.CLOSED, OppState.CANCELLED, OppState.FAILED):
             return {"ok": False, "reason": f"opportunity is {opp.state.value}", "message": EXPIRED_MESSAGE}
+        mismatch = self._mode_mismatch(opp)
+        if mismatch is not None:
+            return {"ok": False, "reason": mismatch}
         if opp.state == OppState.AUTO_SELECTED:
             await self._transition(opp, OppState.VALID, "switched to manual")
         if opp.state in (OppState.VALID, OppState.NOTIFIED):
@@ -706,6 +895,9 @@ class ExecutionEngine:
             return "manual position is open for this opportunity"
         if self.adapter_for(opp) is None:
             return f"No {self._settings.mode().value} execution adapter for {opp.target_exchange}"
+        mismatch = self._mode_mismatch(opp)
+        if mismatch is not None:
+            return mismatch
         if opp.state == OppState.MANUAL_SELECTED:
             await self._transition(opp, OppState.VALID, "switched to auto")
         if opp.state in (OppState.VALID, OppState.NOTIFIED):
@@ -783,7 +975,7 @@ class ExecutionEngine:
             raise
         except Exception as exc:  # noqa: BLE001
             log.exception("execute(%s) crashed", opp_id)
-            return {"ok": False, "reason": f"execution error: {exc}", "opp_id": opp_id}
+            return {"ok": False, "reason": redact(f"execution error: {exc}"), "opp_id": opp_id}
         return {
             "ok": trade.state == OppState.CLOSED,
             "opp_id": opp_id,
@@ -820,6 +1012,7 @@ class ExecutionEngine:
         self._plan[opp.id] = plan
 
         def fail(reason: str) -> tuple[bool, str, None]:
+            reason = redact(reason)
             plan.valid, plan.reason = False, reason
             log.info("revalidate %s: FAIL - %s", opp.id, reason)
             return False, reason, None
@@ -836,23 +1029,7 @@ class ExecutionEngine:
             return fail(f"Exchange {opp.target_exchange} is not usable ({why})")
 
         symbol = opp.target_symbol
-        book = adapter.order_book(symbol)
-        age = book.age_ms(now) if book is not None else None
-        if book is None or age is None or age > s.max_data_age_ms:
-            try:
-                rest = await adapter.fetch_order_book(symbol)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                log.warning("revalidate %s: REST book failed: %s", opp.id, exc)
-                rest = None
-            if rest is not None:
-                book = rest
-                try:
-                    await self._bus.publish(events.BOOK, rest)
-                except Exception:  # noqa: BLE001
-                    log.exception("BOOK publish failed")
-                age = book.age_ms(self._clock.mono())
+        book, age = await self._fresh_book(adapter, symbol)
         if book is None:
             return fail(f"No order book for {symbol} on {opp.target_exchange}")
         if age is None or age > s.max_data_age_ms:
@@ -900,12 +1077,17 @@ class ExecutionEngine:
         plan.balance["free"] = free
         capital_final = executable
         notes: list[str] = []
-        if free + _EPS < capital_final:
-            if s.allow_downsize and free >= s.min_trade_quote:
+        # The entry order locks notional + taker fee + the limit markup (exchanges
+        # reserve price * amount for a limit buy), not the bare capital.
+        reserve_factor = 1.0 + float(econ.entry_fee_pct) / 100.0 + float(s.buy_limit_slippage_pct) / 100.0
+        needed = capital_final * reserve_factor
+        if free + _EPS < needed:
+            downsized = free / reserve_factor * (1.0 - 1e-4)  # small margin against rounding
+            if s.allow_downsize and downsized >= s.min_trade_quote:
                 notes.append(f"downsized to the free {quote} balance {free:.2f}")
-                capital_final = free
+                capital_final = downsized
             else:
-                return fail(f"Insufficient {quote} balance: free {free:.2f} < needed {capital_final:.2f}")
+                return fail(f"Insufficient {quote} balance: free {free:.2f} < needed {needed:.2f}")
 
         ok, why, allowed = self._risk.check(opp.target_exchange, opp.asset, capital_final, s.mode())
         plan.risk = {"ok": ok, "reason": why, "allowed": allowed}
@@ -915,6 +1097,7 @@ class ExecutionEngine:
             notes.append(why)
             capital_final = allowed
         if capital_final + _EPS < executable:
+            # linear scale at the same VWAP: a smaller walk of the same book never fills worse
             ratio = capital_final / executable
             econ = dataclasses.replace(
                 econ,
@@ -928,6 +1111,44 @@ class ExecutionEngine:
         plan.valid, plan.reason = True, ("; ".join(notes) or "OK")
         log.info("revalidate %s: OK net %+.2f%% on %.2f %s (%s)", opp.id, econ.net_pct, capital_final, quote, plan.reason)
         return True, plan.reason, econ
+
+    async def _fresh_exit_target(
+        self, opp: Opportunity, adapter: ExchangeAdapter, trade: TradeRecord, econ: ExecutionEconomics, entry_avg: float
+    ) -> tuple[float, float | None]:
+        """Hard rule 4 for the exit leg: reprice the exit from the latest book.
+        Returns ``(exit_target, net % on the held position)``; the planned
+        target and ``None`` when no fresh economics are available."""
+        s = self._settings
+        planned = float(econ.exit_target)
+        why = ""
+        fresh: Opportunity | None = None
+        try:
+            book, age = await self._fresh_book(adapter, trade.symbol)
+            if book is None or age is None or age > s.max_data_age_ms:
+                why = "no fresh book" if age is None else f"book {age:.0f} ms old"
+            else:
+                fresh = await self._pipeline.refresh(opp, trade.capital_quote)
+                if fresh is None:
+                    why = "no fresh economics"
+                elif float(fresh.econ.book_age_ms) > s.max_data_age_ms:
+                    why = f"book {fresh.econ.book_age_ms:.0f} ms old"
+                    fresh = None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            why = redact(f"{type(exc).__name__}: {exc}")
+            fresh = None
+        if fresh is None or not float(fresh.econ.exit_target) > 0:
+            why = why or "no target"
+            log.warning("trade %s: exit revalidation unavailable (%s); using the planned target %.8g", trade.id, why, planned)
+            await self._note(trade, f"exit revalidation unavailable ({why}): using the planned target {planned:.8g}")
+            return planned, None
+        target = float(fresh.econ.exit_target)
+        if entry_avg <= 0:
+            return target, None
+        d = 1 if trade.direction > 0 else -1
+        pos_net = d * (target / entry_avg - 1.0) * 100.0 - float(econ.total_cost_pct)
+        return target, pos_net
 
     # ------------------------------------------------------------------ #
     # execution
@@ -960,29 +1181,64 @@ class ExecutionEngine:
         self._active[opp.id] = trade
         opp.execution_id = trade.id
         adapter = self.adapter_for(opp)
-        registered = False
-        position_open = 0.0
         try:
-            registered, position_open = await self._run(opp, adapter, trade, expected)
+            await self._run(opp, adapter, trade, expected)
         except asyncio.CancelledError:
-            trade.state = OppState.FAILED
-            trade.error = "execution task cancelled"
-            trade.finished_ts = self._clock.wall()
-            log.error("trade %s: task cancelled (position may be open)", trade.id)
-            self._persist_trade(trade)
+            await self._on_cancelled(opp, trade)
             raise
         except Exception as exc:  # noqa: BLE001
             log.exception("trade %s: unexpected error", trade.id)
-            await self._fail(opp, adapter, trade, f"error: {exc}", registered=registered, position_open=position_open)
+            pos = self._in_flight.get(opp.id)
+            await self._fail(
+                opp, adapter, trade, redact(f"error: {exc}"),
+                registered=pos is not None,
+                position_open=pos.base_open if pos is not None else 0.0,
+                pending=pos.pending if pos is not None else None,
+                entry_unknown=pos.entry_unknown if pos is not None else False,
+            )
         finally:
+            self._in_flight.pop(opp.id, None)
             self._active.pop(opp.id, None)
             self._forget(opp.id)
         return trade
 
+    async def _on_cancelled(self, opp: Opportunity, trade: TradeRecord) -> None:
+        """The execute task was cancelled (hard stop, crash): keep whatever may
+        be open tracked - exposure is never released on a guess."""
+        pos = self._in_flight.get(opp.id)
+        trade.finished_ts = self._clock.wall()
+        if pos is not None and (pos.base_open > _EPS or pos.unresolved):
+            trade.state = OppState.FAILED
+            trade.error = "execution task cancelled: position may be open"
+            finalize(trade)
+            self._open_positions[trade.id] = pos
+            log.error(
+                "trade %s: task cancelled with %.8g %s open%s", trade.id, pos.base_open, trade.asset,
+                " (order state unknown)" if pos.unresolved else "",
+            )
+        else:
+            finalize(trade)
+            round_trip = trade.exit_order is not None and float(trade.exit_order.filled) > _EPS
+            trade.state = OppState.CLOSED if round_trip else OppState.CANCELLED
+            trade.error = "execution task cancelled" + (" after the exit filled" if round_trip else "")
+            if pos is not None:
+                self._risk.register_close(trade.id, float(trade.realized_pnl_quote or 0.0))
+        self._persist_trade(trade)
+        try:
+            await asyncio.wait_for(self._announce(opp, trade, trade.error or "cancelled"), _NOTE_TIMEOUT_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.debug("trade %s: cancel announcement skipped: %s", trade.id, exc)
+
+    async def _announce(self, opp: Opportunity, trade: TradeRecord, reason: str) -> None:
+        await self._transition(opp, trade.state, reason)
+        await self._note(trade, reason)
+
     async def _run(
         self, opp: Opportunity, adapter: ExchangeAdapter | None, trade: TradeRecord, expected: ExecutionEconomics
     ) -> tuple[bool, float]:
-        """The flow.  Returns (exposure registered, base still open) for the error path."""
+        """The flow.  Returns (exposure registered, base still open)."""
         s = self._settings
         ok, reason, econ = await self.revalidate(opp)
         if not ok or econ is None or adapter is None:
@@ -993,6 +1249,8 @@ class ExecutionEngine:
         await self._transition(opp, OppState.EXECUTING, "revalidated")
         self._risk.register_open(trade.id, trade.exchange, trade.asset, trade.capital_quote, trade.mode)
         registered = True
+        holder = _OpenPosition(adapter=adapter, trade=trade, base_open=0.0)
+        self._in_flight[opp.id] = holder
         await self._note(trade, f"revalidated: net {econ.net_pct:+.2f}% on {trade.capital_quote:.2f} ({reason})")
 
         if self._risk.emergency:
@@ -1020,13 +1278,24 @@ class ExecutionEngine:
         if entry.status in (OrderStatus.FAILED, OrderStatus.REJECTED):
             await self._fail(opp, adapter, trade, f"entry order failed: {entry.error or entry.status.value}", registered=registered, position_open=0.0)
             return registered, 0.0
+        holder.pending, holder.pending_filled, holder.entry_unknown = entry, 0.0, True
+        holder.base_open = float(entry_req.amount)  # worst case until the fill is confirmed
         await self._note(trade, f"entry {entry_req.side.value} {entry_req.amount:.8g} @ {entry_price:.8g} IOC sent ({entry.status.value})")
         entry = await self._wait_fill(adapter, entry, s.buy_fill_timeout_s, opp.id)
         if not entry.is_done:
             entry = await self._cancel(adapter, entry)
         trade.entry_order = entry
         self._persist_order(entry, trade.id)
+        if not entry.is_done:
+            # hard rule 5: unknown is unknown - never "not filled"
+            detail = "no order id after timeout" if not entry.id else "cancel not confirmed"
+            await self._fail(
+                opp, adapter, trade, f"entry order state unknown ({detail}): position may be open",
+                registered=registered, position_open=float(entry_req.amount), pending=entry, entry_unknown=True,
+            )
+            return registered, float(entry_req.amount)
         filled = float(entry.filled)
+        holder.pending, holder.entry_unknown, holder.base_open = None, False, filled
         if filled <= _EPS:
             await self._cancelled(opp, trade, "entry not filled (CANCELLED)", registered=registered)
             return registered, 0.0
@@ -1040,7 +1309,7 @@ class ExecutionEngine:
             await self._fail(
                 opp, adapter, trade,
                 f"partial fill {ratio * 100:.0f}% below minimum {float(s.min_partial_fill_ratio) * 100:.0f}%: exited at market",
-                registered=registered, position_open=still_open,
+                registered=registered, position_open=still_open, pending=self._unresolved([exit_order]),
             )
             return registered, still_open
         await self._transition(opp, OppState.FILLED if ratio >= 1.0 - 1e-6 else OppState.PARTIALLY_FILLED, f"entry filled {ratio * 100:.0f}%")
@@ -1056,14 +1325,24 @@ class ExecutionEngine:
             exit_order = await self._exit_market(adapter, trade, position_open)
             return await self._close(opp, adapter, trade, [exit_order], registered, position_open)
 
-        # ---- exit: LIMIT GTC at exit_target ------------------------------
+        # ---- exit revalidation (hard rule 4, second half) ---------------
+        entry_avg = float(entry.avg_price or entry_price)
+        exit_target, pos_net = await self._fresh_exit_target(opp, adapter, trade, econ, entry_avg)
+        if pos_net is not None:
+            await self._note(trade, f"exit revalidated: target {exit_target:.8g}, net on position {pos_net:+.2f}%")
+            if pos_net <= 0.0:
+                await self._note(trade, "exit revalidation: edge gone - exiting at market")
+                market = await self._exit_market(adapter, trade, position_open)
+                return await self._close(opp, adapter, trade, [market], registered, position_open)
+
+        # ---- exit: LIMIT GTC at the (fresh) exit_target --------------------
         exit_req = OrderRequest(
             exchange=trade.exchange,
             symbol=trade.symbol,
             side=Side.SELL if d > 0 else Side.BUY,
             amount=position_open,
             type=OrderType.LIMIT,
-            price=float(econ.exit_target),
+            price=float(exit_target),
             tif=TimeInForce.GTC,
             opportunity_id=opp.id,
         )
@@ -1073,6 +1352,8 @@ class ExecutionEngine:
             await self._note(trade, f"exit limit rejected ({exit_limit.error or exit_limit.status.value}): exiting at market")
             market = await self._exit_market(adapter, trade, position_open)
             return await self._close(opp, adapter, trade, [market], registered, position_open)
+        trade.exit_order = exit_limit
+        holder.pending, holder.pending_filled = exit_limit, float(exit_limit.filled)
         self._pending_exit[opp.id] = (adapter, exit_limit)
         await self._note(trade, f"exit {exit_req.side.value} {exit_req.amount:.8g} @ {exit_req.price:.8g} GTC sent ({exit_limit.status.value})")
         exit_limit = await self._wait_fill(adapter, exit_limit, s.sell_timeout_s, opp.id)
@@ -1082,13 +1363,22 @@ class ExecutionEngine:
             if hold_left > 0:
                 await self._note(trade, f"exit not filled after {s.sell_timeout_s:.0f} s - holding up to {hold_left:.0f} s more")
                 exit_limit = await self._wait_fill(adapter, exit_limit, hold_left, opp.id)
-        self._pending_exit.pop(opp.id, None)
-        orders.append(exit_limit)
         if not exit_limit.is_done:
             exit_limit = await self._cancel(adapter, exit_limit)
-            orders[-1] = exit_limit
+        orders.append(exit_limit)
         self._persist_order(exit_limit, trade.id)
+        trade.exit_order = exit_limit
+        self._pending_exit.pop(opp.id, None)
         remaining = max(0.0, position_open - float(exit_limit.filled))
+        if not exit_limit.is_done:
+            # the GTC may still rest - or fill - on the exchange: no second exit for the same quantity
+            detail = "no order id after timeout" if not exit_limit.id else "cancel not confirmed"
+            await self._fail(
+                opp, adapter, trade, f"exit order state unknown ({detail}): {remaining:.8g} {trade.asset} left open",
+                registered=registered, position_open=remaining, pending=exit_limit,
+            )
+            return registered, remaining
+        holder.pending, holder.base_open = None, remaining
         if remaining > _EPS:
             if self._risk.emergency:
                 combined = self._combine(orders)
@@ -1110,16 +1400,21 @@ class ExecutionEngine:
         registered: bool,
         position_open: float,
     ) -> tuple[bool, float]:
-        """Finalize after the exit leg; FAILED when part of the position is still open."""
-        combined = self._combine(exit_orders)
-        trade.exit_order = combined
+        """Finalize after the exit leg; FAILED when part of the position is still
+        open or the state of an exit order could not be confirmed."""
+        pending = self._unresolved(exit_orders)
+        combined = self._combine([o for o in exit_orders if o is not None and o is not pending])
+        trade.exit_order = combined if combined is not None else pending
         for o in exit_orders:
-            if o is not None and o.id and "+" not in o.id:
+            if o is not None and "+" not in (o.id or ""):
                 self._persist_order(o, trade.id)
-        exit_filled = float(combined.filled) if combined is not None else 0.0
+        exit_filled = sum(float(o.filled) for o in exit_orders if o is not None)
         still_open = max(0.0, position_open - exit_filled)
-        if still_open > _EPS:
-            await self._fail(opp, adapter, trade, f"exit incomplete: {still_open:.8g} {trade.asset} still open", registered=registered, position_open=still_open)
+        if still_open > _EPS or pending is not None:
+            why = f"exit incomplete: {still_open:.8g} {trade.asset} still open"
+            if pending is not None:
+                why += " (exit order state unknown)"
+            await self._fail(opp, adapter, trade, why, registered=registered, position_open=still_open, pending=pending)
             return registered, still_open
         trade.finished_ts = self._clock.wall()
         finalize(trade)
@@ -1134,6 +1429,7 @@ class ExecutionEngine:
         return False, 0.0
 
     async def _cancelled(self, opp: Opportunity, trade: TradeRecord, reason: str, *, registered: bool) -> None:
+        reason = redact(reason)
         trade.state = OppState.CANCELLED
         trade.error = reason
         trade.finished_ts = self._clock.wall()
@@ -1152,16 +1448,32 @@ class ExecutionEngine:
         *,
         registered: bool,
         position_open: float,
+        pending: Order | None = None,
+        entry_unknown: bool = False,
     ) -> None:
+        """FAILED.  With base open - or an order whose state is unknown - the
+        position stays tracked (``open_positions``) and risk exposure stays
+        registered until ``emergency_close_positions`` resolves it."""
+        reason = redact(reason)
         trade.state = OppState.FAILED
         trade.error = reason
         trade.finished_ts = self._clock.wall()
         finalize(trade)
         pnl = float(trade.realized_pnl_quote or 0.0)
-        if position_open > _EPS and adapter is not None:
-            # exposure stays registered until emergency_close_positions closes it
-            self._open_positions[trade.id] = _OpenPosition(adapter=adapter, trade=trade, base_open=position_open)
-            log.error("trade %s FAILED with %.8g %s still open: %s", trade.id, position_open, trade.asset, reason)
+        unresolved = pending is not None and not pending.is_done
+        if adapter is not None and (position_open > _EPS or unresolved):
+            self._open_positions[trade.id] = _OpenPosition(
+                adapter=adapter,
+                trade=trade,
+                base_open=max(0.0, position_open),
+                pending=pending if unresolved else None,
+                pending_filled=float(pending.filled) if unresolved and pending is not None else 0.0,
+                entry_unknown=bool(entry_unknown and unresolved),
+            )
+            log.error(
+                "trade %s FAILED with %.8g %s still open%s: %s", trade.id, position_open, trade.asset,
+                " (order state unknown)" if unresolved else "", reason,
+            )
         elif registered:
             self._risk.register_close(trade.id, pnl)
         self._record_stats(trade, success=False)
@@ -1169,11 +1481,94 @@ class ExecutionEngine:
         await self._note(trade, f"failed: {reason}")
 
     # ------------------------------------------------------------------ #
+    # unknown orders
+    # ------------------------------------------------------------------ #
+    async def _resolve_pending(self, pos: _OpenPosition) -> Order | None:
+        """Confirm the final state of ``pos.pending`` (fetch by id / client id,
+        cancel it when it still rests) and fold its fills into the position.
+        Returns the resolved order, or ``None`` when the exchange could not
+        confirm it - then nothing is sent for this position (hard rule 5)."""
+        order = pos.pending
+        if order is None:
+            return None
+        adapter, trade = pos.adapter, pos.trade
+        if not order.is_done:
+            fresh, why = await self._fetch_state(adapter, order)
+            now = self._clock.mono()
+            if fresh is None:
+                sent = order.sent_mono
+                if why == "gone" and sent is not None and now - sent >= _GONE_GRACE_S:
+                    # the exchange does not know the order: it can not fill any more
+                    order.status = OrderStatus.CANCELLED
+                    order.done_mono = now
+                    order.error = (order.error + "; " if order.error else "") + "not found on the exchange"
+                    fresh = order
+                else:
+                    log.error("trade %s: order %s on %s still unresolved (%s)", trade.id, order.id or order.client_id, adapter.name, why)
+                    return None
+            order = fresh
+            if not order.is_done:
+                try:
+                    res = await adapter.cancel_order(order.id, order.symbol)
+                    if res is not None:
+                        order = self._merge_timing(order, res)
+                    if not order.is_done:
+                        order.status = OrderStatus.CANCELLED
+                        order.done_mono = self._clock.mono()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("trade %s: cancel of %s on %s failed: %s", trade.id, order.id, adapter.name, exc)
+                    again, _why = await self._fetch_state(adapter, order)
+                    if again is None or not again.is_done:
+                        pos.pending = order
+                        return None
+                    order = again
+        new_fills = max(0.0, float(order.filled) - pos.pending_filled)
+        if pos.entry_unknown:
+            trade.entry_order = order
+            pos.base_open = float(order.filled)
+        else:
+            pos.base_open = max(0.0, pos.base_open - new_fills)
+            if trade.exit_order is None or trade.exit_order.client_id == order.client_id:
+                trade.exit_order = order
+            else:
+                trade.exit_order = self._combine([trade.exit_order, order])
+        pos.pending, pos.pending_filled, pos.entry_unknown = None, 0.0, False
+        self._persist_order(order, trade.id)
+        await self._note(
+            trade,
+            f"order {order.client_id} resolved: {order.status.value}, filled {order.filled:.8g}; {pos.base_open:.8g} {trade.asset} open",
+        )
+        return order
+
+    async def _emergency_cancel(self, adapter: ExchangeAdapter, order: Order) -> int:
+        """Cancel a running trade's resting exit (the task itself reconciles the rest)."""
+        try:
+            if not order.id:
+                fresh, _why = await self._fetch_state(adapter, order)
+                if fresh is None or not fresh.id:
+                    log.warning("emergency: order %s on %s has no known id yet; the running trade reconciles it", order.client_id, adapter.name)
+                    return 0
+                order = fresh
+            if order.is_done:
+                return 0
+            await adapter.cancel_order(order.id, order.symbol)
+            return 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("emergency: cancel of %s on %s failed: %s", order.id or order.client_id, adapter.name, exc)
+            return 0
+
+    # ------------------------------------------------------------------ #
     # emergency
     # ------------------------------------------------------------------ #
     async def emergency_stop(self, reason: str = "user") -> dict[str, Any]:
-        """Block new AUTO trades, abort trades before entry, cancel pending orders.
-        Open positions are NOT closed here (see ``emergency_close_positions``)."""
+        """Block new AUTO trades, abort trades before entry, cancel pending
+        orders - on the exec adapters of the CURRENT mode only (hard rule 8:
+        a PAPER stop never reaches a LIVE account).  Open positions are NOT
+        closed here (see ``emergency_close_positions``)."""
         await self._risk.set_emergency(True, reason)
         aborted: list[str] = []
         running = [t for t in self._tasks.values() if not t.done()]
@@ -1182,18 +1577,23 @@ class ExecutionEngine:
                 self._abort[opp_id] = f"emergency stop: {reason}"
                 aborted.append(opp_id)
         cancelled = 0
-        for opp_id, (adapter, order) in list(self._pending_exit.items()):
+        touched: dict[int, ExchangeAdapter] = {}
+        for _opp_id, (adapter, order) in list(self._pending_exit.items()):
+            touched[id(adapter)] = adapter
+            cancelled += await self._emergency_cancel(adapter, order)
+        for pos in list(self._open_positions.values()):
+            touched[id(pos.adapter)] = pos.adapter
+            if pos.unresolved:
+                resolved = await self._resolve_pending(pos)
+                if resolved is not None and resolved.status is OrderStatus.CANCELLED:
+                    cancelled += 1
+        for adapter in self._adapters_of_mode().values():
+            touched.setdefault(id(adapter), adapter)
+        for adapter in touched.values():
             try:
-                await adapter.cancel_order(order.id, order.symbol)
-                cancelled += 1
+                cancelled += int(await adapter.cancel_all() or 0)
             except Exception as exc:  # noqa: BLE001
-                log.warning("emergency: cancel of %s on %s failed: %s", order.id, adapter.name, exc)
-        for mode_adapters in self._exec_adapters.values():
-            for adapter in mode_adapters.values():
-                try:
-                    cancelled += int(await adapter.cancel_all() or 0)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("emergency: cancel_all on %s failed: %s", adapter.name, exc)
+                log.warning("emergency: cancel_all on %s failed: %s", adapter.name, exc)
         if running:
             wait_s = min(2.0, max(0.05, self.poll_interval_s * 10))
             await asyncio.wait(running, timeout=wait_s)
@@ -1211,24 +1611,59 @@ class ExecutionEngine:
     def _open_position_list(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for tid, pos in self._open_positions.items():
-            out.append({"trade_id": tid, "opp_id": pos.trade.opportunity_id, "exchange": pos.trade.exchange,
-                        "symbol": pos.trade.symbol, "base": pos.base_open, "source": "auto"})
+            out.append({
+                "trade_id": tid, "opp_id": pos.trade.opportunity_id, "exchange": pos.trade.exchange,
+                "symbol": pos.trade.symbol, "base": pos.base_open, "source": "auto", "mode": pos.trade.mode.value,
+                "unresolved": pos.unresolved, "pending_order": pos.pending.client_id if pos.pending is not None else None,
+                "error": pos.trade.error,
+            })
         for opp_id, trade in self._manual.items():
             base = trade.capital_quote / trade.actual_entry_price if trade.actual_entry_price else None
-            out.append({"trade_id": trade.id, "opp_id": opp_id, "exchange": trade.exchange,
-                        "symbol": trade.symbol, "base": base, "source": "manual"})
+            out.append({
+                "trade_id": trade.id, "opp_id": opp_id, "exchange": trade.exchange, "symbol": trade.symbol, "base": base,
+                "source": "manual", "mode": trade.mode.value, "unresolved": False, "pending_order": None, "error": trade.error,
+            })
         return out
 
     async def emergency_close_positions(self) -> list[TradeRecord]:
-        """Market-exit every open position: tracked FAILED trades first, then
-        whatever the adapters of the current mode still report (``positions``)."""
+        """Market-exit every open position: tracked FAILED trades first (after
+        resolving an order whose state is unknown - never a second order for a
+        quantity that may already be gone), then whatever the adapters of the
+        current mode still report (``positions``)."""
         closed: list[TradeRecord] = []
         for tid, pos in list(self._open_positions.items()):
             trade = pos.trade
+            if pos.unresolved:
+                pending = pos.pending
+                resolved = await self._resolve_pending(pos)
+                if resolved is None:
+                    await self._note(
+                        trade,
+                        f"emergency close skipped: order {pending.client_id if pending else '?'} state unknown (exchange not answering) - retry",
+                    )
+                    continue
+            if pos.base_open <= _EPS:
+                # nothing is open: the unknown entry never filled, or the exit had filled after all
+                self._open_positions.pop(tid, None)
+                trade.finished_ts = self._clock.wall()
+                finalize(trade)
+                pnl = float(trade.realized_pnl_quote or 0.0)
+                round_trip = trade.exit_order is not None and float(trade.exit_order.filled) > _EPS
+                trade.state = OppState.CLOSED if round_trip else OppState.CANCELLED
+                trade.error = (trade.error + "; " if trade.error else "") + ("closed: the exit had filled" if round_trip else "entry never filled")
+                self._risk.register_close(trade.id, pnl)
+                await self._note(trade, f"resolved without an open position: {trade.state.value} (realized {pnl:+.2f})")
+                closed.append(trade)
+                continue
             await self._note(trade, f"emergency close: exiting {pos.base_open:.8g} {trade.asset} at market")
             market = await self._exit_market(pos.adapter, trade, pos.base_open)
-            trade.exit_order = self._combine([trade.exit_order, market])
             self._persist_order(market, trade.id)
+            if not market.is_done:
+                pos.pending, pos.pending_filled = market, float(market.filled)
+                pos.base_open = max(0.0, pos.base_open - float(market.filled))
+                await self._note(trade, f"emergency close: market order {market.client_id} state unknown - will be resolved first next time")
+                continue
+            trade.exit_order = self._combine([trade.exit_order, market])
             left = max(0.0, pos.base_open - float(market.filled))
             if left > _EPS:
                 pos.base_open = left
@@ -1292,7 +1727,10 @@ class ExecutionEngine:
                 if left > _EPS:
                     trade.state = OppState.FAILED
                     trade.error = f"emergency close incomplete: {left:.8g} {base_ccy} still open"
-                    self._open_positions[trade.id] = _OpenPosition(adapter=adapter, trade=trade, base_open=left)
+                    self._open_positions[trade.id] = _OpenPosition(
+                        adapter=adapter, trade=trade, base_open=left, pending=self._unresolved([market]),
+                        pending_filled=float(market.filled) if not market.is_done else 0.0,
+                    )
                 else:
                     trade.state = OppState.CLOSED
                 await self._note(trade, f"emergency close {trade.state.value}: realized {float(trade.realized_pnl_quote or 0.0):+.2f}")
@@ -1304,6 +1742,151 @@ class ExecutionEngine:
         await self._risk.set_emergency(False, "resume")
         self._abort.clear()
         log.warning("execution resumed")
+
+    # ------------------------------------------------------------------ #
+    # process lifecycle: shutdown / restart
+    # ------------------------------------------------------------------ #
+    async def shutdown(self, timeout_s: float = 10.0) -> list[dict[str, Any]]:
+        """Drain running trades before the process goes away: abort them (the
+        flow cancels a resting exit and market-exits the remainder, exactly
+        like ``cancel``), wait up to ``timeout_s``, cancel the rest (their
+        positions stay tracked).  Returns the positions still open."""
+        running = {oid: t for oid, t in self._tasks.items() if not t.done()}
+        for oid in running:
+            self._abort.setdefault(oid, "shutdown")
+        if running:
+            log.warning("shutdown: %d running trade(s) - aborting (market exit), waiting up to %.0f s", len(running), timeout_s)
+            _done, pending = await asyncio.wait(list(running.values()), timeout=max(0.0, float(timeout_s)))
+            if pending:
+                log.error("shutdown: %d trade(s) did not finish in time - cancelling", len(pending))
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+        positions = self._open_position_list()
+        if positions:
+            log.error("shutdown with %d open position(s): %s", len(positions), positions)
+        return positions
+
+    def restore_from_db(self) -> list[TradeRecord]:
+        """After a restart: trades the previous process left EXECUTING /
+        PARTIALLY_FILLED / FILLED, or FAILED with base open, become tracked
+        open positions (risk exposure registered, order state to be resolved
+        by ``emergency_close_positions``).  Nothing is traded automatically."""
+        if self._db is None:
+            return []
+        try:
+            rows = self._db.list_trades(limit=500)
+        except Exception:  # noqa: BLE001
+            log.exception("restore: list_trades failed")
+            return []
+        now_ts = self._clock.wall()
+        restored: list[TradeRecord] = []
+        for row in rows:
+            try:
+                trade = trade_from_dict(row)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("restore: trade row unreadable (%s): %s", exc, row.get("id") if isinstance(row, dict) else row)
+                continue
+            if trade.id in self._trades:
+                continue
+            in_flight = trade.state in EXECUTION_STATES
+            if not in_flight and trade.state is not OppState.FAILED:
+                continue
+            if now_ts - float(trade.started_ts) > _RESTORE_MAX_AGE_S:
+                if in_flight:
+                    log.warning("restore: trade %s (%s) is %.0f h old - not restored; check the exchange by hand",
+                                trade.id, trade.state.value, (now_ts - float(trade.started_ts)) / 3600.0)
+                continue
+            entry, exit_ = trade.entry_order, trade.exit_order
+            if entry is None:
+                if in_flight and trade.actual_entry_price and trade.opportunity_id and trade.opportunity_id not in self._manual:
+                    # a MANUAL position the owner still holds
+                    self._trades[trade.id] = trade
+                    self._manual[trade.opportunity_id] = trade
+                    self._risk.register_open(trade.id, trade.exchange, trade.asset, trade.capital_quote, trade.mode)
+                    trade.events.append((now_ts, "manual position restored after restart - report the exit price when sold"))
+                    self._persist_trade(trade)
+                    restored.append(trade)
+                    log.error("restore: MANUAL position %s on %s (%s %.2f) restored - report the exit price when sold",
+                              trade.id, trade.exchange, trade.asset, trade.capital_quote)
+                elif in_flight:
+                    self._finish_restored(trade, OppState.FAILED, "process restarted before the entry was sent", now_ts)
+                continue
+            entry_filled = float(entry.filled)
+            exit_filled = float(exit_.filled) if exit_ is not None else 0.0
+            pending: Order | None = None
+            entry_unknown = False
+            if not entry.is_done:
+                pending, entry_unknown, base_open = entry, True, float(entry.amount)
+            else:
+                base_open = max(0.0, entry_filled - exit_filled)
+                if exit_ is not None and not exit_.is_done:
+                    pending = exit_
+            if base_open <= _EPS and pending is None:
+                if in_flight:
+                    if entry_filled > _EPS:
+                        self._finish_restored(trade, OppState.CLOSED, "process restarted after the exit filled", now_ts)
+                    else:
+                        self._finish_restored(trade, OppState.CANCELLED, "process restarted: entry not filled", now_ts)
+                continue
+            adapter = self._exec_adapters.get(trade.mode, {}).get(trade.exchange)
+            if adapter is None:
+                log.error(
+                    "restore: trade %s has %.8g %s open on %s (%s) but there is no %s execution adapter - NOT tracked; check the exchange by hand",
+                    trade.id, base_open, trade.asset, trade.exchange, trade.state.value, trade.mode.value,
+                )
+                continue
+            self._trades[trade.id] = trade
+            self._risk.register_open(trade.id, trade.exchange, trade.asset, trade.capital_quote, trade.mode)
+            self._open_positions[trade.id] = _OpenPosition(
+                adapter=adapter,
+                trade=trade,
+                base_open=base_open,
+                pending=pending,
+                pending_filled=float(pending.filled) if pending is not None else 0.0,
+                entry_unknown=entry_unknown,
+            )
+            if in_flight:
+                trade.state = OppState.FAILED
+                trade.error = "process restarted during execution: position left open"
+                trade.finished_ts = now_ts
+                finalize(trade)
+            trade.events.append((
+                now_ts,
+                f"restored after restart: {base_open:.8g} {trade.asset} open" + (" (order state unknown)" if pending is not None else ""),
+            ))
+            self._persist_trade(trade)
+            restored.append(trade)
+            log.error(
+                "restore: trade %s on %s has %.8g %s open%s (%s) - tracked; use EMERGENCY CLOSE or close it by hand",
+                trade.id, trade.exchange, base_open, trade.asset, " with an unresolved order" if pending is not None else "",
+                trade.mode.value,
+            )
+        self._restored.extend(restored)
+        return restored
+
+    def _finish_restored(self, trade: TradeRecord, state: OppState, why: str, now_ts: float) -> None:
+        trade.state = state
+        trade.error = (trade.error + "; " if trade.error else "") + why
+        trade.finished_ts = now_ts
+        finalize(trade)
+        trade.events.append((now_ts, why))
+        self._trades[trade.id] = trade
+        self._persist_trade(trade)
+        log.warning("restore: trade %s -> %s (%s)", trade.id, state.value, why)
+
+    async def announce_open_positions(self) -> None:
+        """TRADE_UPDATE for every position restored from the database (UI / Telegram)."""
+        restored, self._restored = self._restored, []
+        for trade in restored:
+            pos = self._open_positions.get(trade.id)
+            if pos is not None:
+                msg = f"open position after restart: {pos.base_open:.8g} {trade.asset} on {trade.exchange}"
+                msg += " (order state unknown)" if pos.unresolved else ""
+                msg += " - EMERGENCY CLOSE exits it at market, or close it by hand"
+            else:
+                msg = f"manual position after restart: {trade.capital_quote:.2f} on {trade.exchange} - report the exit price when sold"
+            await self._note(trade, msg)
 
     # ------------------------------------------------------------------ #
     # queries

@@ -141,6 +141,7 @@ class OpportunityManager:
         if existing is not None and existing.state in ACTIVE_STATES:
             opp = existing
             opp.signal = signal
+            opp.mode = mode  # the card always shows the mode that would execute
             opp.first_mover = signal.first_mover
             if signal.target_symbol:
                 opp.target_symbol = signal.target_symbol
@@ -295,6 +296,21 @@ class OpportunityManager:
                 if r is not None:
                     expired.append(r)
         return expired
+
+    async def relabel_mode(self, mode: Mode) -> list[Opportunity]:
+        """Re-label every active opportunity after a PAPER/LIVE switch (hard
+        rule 8: the UI always shows the mode that would execute).  Executing
+        opportunities belong to the engine and keep the mode their trade runs
+        in."""
+        changed: list[Opportunity] = []
+        for opp in self.active():
+            if opp.mode is mode:
+                continue
+            opp.mode = mode
+            changed.append(opp)
+            await self._bus.publish(events.OPP_UPDATE, opp)
+            self._persist(opp, force=True)
+        return changed
 
     # ------------------------------------------------------------------ #
     # learning hooks
