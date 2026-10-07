@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from .. import events
 from ..clock import Clock
@@ -37,11 +37,12 @@ from ..models import (
     OrderBook,
     Ticker,
     Trade,
+    median,
 )
 from .duration import DurationEstimator
 from .economics import compute_economics
 from .executability import assess_bot, assess_human
-from .explain import build_why
+from .explain import build_plan, build_why
 from .mover import MoveDetector
 from .opportunity import OpportunityManager
 from .stats import StatsStore
@@ -362,6 +363,52 @@ class Pipeline:
     def _names(self) -> dict[str, str]:
         return {e.name: e.display for e in self._settings.exchanges}
 
+    def _learned(self, asset: str, target: str) -> tuple[float | None, int, int, int, int]:
+        """What StatsStore knows about (asset, target) for the plan:
+        (median opportunity duration, caught_up_ok, caught_up_total,
+        human_window_ok, human_window_total).  Nothing known -> (None, 0, 0, 0, 0)."""
+        stats = self._stats
+        if stats is None:
+            return None, 0, 0, 0, 0
+        try:
+            rs = stats.get(asset, target)
+            typical = None
+            med = getattr(stats, "median_duration", None)
+            if callable(med):
+                typical = med(asset, target)
+            elif rs is not None:
+                typical = median(list(getattr(rs, "opp_durations_s", []) or []))
+            if typical is not None and not typical > 0:
+                typical = None
+            return (
+                float(typical) if typical is not None else None,
+                int(getattr(rs, "caught_up_ok", 0) or 0),
+                int(getattr(rs, "caught_up_total", 0) or 0),
+                int(getattr(rs, "human_window_ok", 0) or 0),
+                int(getattr(rs, "human_window_total", 0) or 0),
+            )
+        except Exception:  # noqa: BLE001 - learning never blocks a signal
+            log.exception("stats lookup failed for %s on %s", asset, target)
+            return None, 0, 0, 0, 0
+
+    def _enricher(self) -> Callable[[Opportunity], None]:
+        """Callback for ``OpportunityManager.upsert`` (runs before OPP_NEW /
+        OPP_UPDATE is published): copies the learned history onto the
+        opportunity, stamps ``last_update_ts`` and builds the Russian plan."""
+        names = self._names()
+        settings = self._settings
+        clock = self._clock
+
+        def enrich(opp: Opportunity) -> None:
+            typical, cu_ok, cu_total, h_ok, h_total = self._learned(opp.asset, opp.target_exchange)
+            opp.typical_window_s = typical
+            opp.caught_up_ok, opp.caught_up_total = cu_ok, cu_total
+            opp.human_ok, opp.human_total = h_ok, h_total
+            opp.last_update_ts = clock.wall()
+            opp.plan = build_plan(opp, settings, names, clock.mono(), opp.last_update_ts)
+
+        return enrich
+
     async def _assess(
         self, signal: LagSignal, book: OrderBook, capital: float, existing: Opportunity | None
     ) -> tuple[Any, Any, Any, str, float]:
@@ -408,7 +455,7 @@ class Pipeline:
                     signal.asset, signal.target, econ.executable_quote, s.min_trade_quote,
                 )
                 return None
-        opp, is_new = await self._opps.upsert(signal, econ, human, bot, why, est, s.mode())
+        opp, is_new = await self._opps.upsert(signal, econ, human, bot, why, est, s.mode(), enrich=self._enricher())
         if is_new:
             await self._opps.transition(opp.id, OppState.VALIDATING, "economics computed")
             await self._opps.transition(opp.id, OppState.VALID, f"net {econ.net_pct:+.2f}% on real book")
@@ -472,7 +519,7 @@ class Pipeline:
         managed = self._opps.get(opp.id)
         if managed is not None and managed.state in ACTIVE_STATES:
             econ, human, bot, why, est = await self._assess(live, book, capital, managed)
-            updated, _ = await self._opps.upsert(live, econ, human, bot, why, est, s.mode())
+            updated, _ = await self._opps.upsert(live, econ, human, bot, why, est, s.mode(), enrich=self._enricher())
             if live.target_move_pct * live.direction >= s.move_threshold_pct:
                 updated.caught_up = True
             return updated
@@ -488,7 +535,9 @@ class Pipeline:
             last_update_mono=now,
             state_history=list(opp.state_history),
             net_history=list(opp.net_history) + [(now, econ.net_pct)],
+            plan=dict(opp.plan),
         )
+        self._enricher()(copy)
         return copy
 
     # ------------------------------------------------------------------ #

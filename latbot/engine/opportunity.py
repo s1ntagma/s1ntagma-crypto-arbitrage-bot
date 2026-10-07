@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Deque
+from typing import Any, Callable, Deque
 
 from .. import events
 from ..clock import Clock
@@ -128,9 +128,13 @@ class OpportunityManager:
         why: str,
         est_duration_s: float,
         mode: Mode,
+        enrich: Callable[[Opportunity], None] | None = None,
     ) -> tuple[Opportunity, bool]:
         """Create or update the opportunity for the signal's key.
-        Returns ``(opp, is_new)``; an executing opp is returned untouched."""
+        Returns ``(opp, is_new)``; an executing opp is returned untouched.
+        ``enrich(opp)`` (optional) runs after the fields are replaced and
+        BEFORE OPP_NEW / OPP_UPDATE is published, so derived fields (stats,
+        the trading plan) reach the UI and Telegram in the same event."""
         now = self._clock.mono()
         wall = self._clock.wall()
         k = self.key(signal.asset, signal.target, signal.direction)
@@ -158,6 +162,8 @@ class OpportunityManager:
                 del opp.net_history[: len(opp.net_history) - _NET_HISTORY_MAX]
             opp.update_count += 1
             opp.max_net_pct = max(opp.max_net_pct, econ.net_pct)
+            opp.last_update_ts = wall
+            self._enrich(opp, enrich)
             await self._bus.publish(events.OPP_UPDATE, opp)
             self._persist(opp)
             return opp, False
@@ -187,9 +193,11 @@ class OpportunityManager:
             quote=quote,
             pair_url=pair_url(signal.target, symbol, cfg.pair_url if cfg and cfg.pair_url else None),
             max_net_pct=econ.net_pct,
+            last_update_ts=wall,
         )
         opp.state_history.append((wall, OppState.DETECTED.value, "detected"))
         opp.net_history.append((now, econ.net_pct))
+        self._enrich(opp, enrich)
         self._opps[opp.id] = opp
         self._by_key[k] = opp.id
         log.info(
@@ -200,6 +208,15 @@ class OpportunityManager:
         await self._bus.publish(events.OPP_NEW, opp)
         self._persist(opp, force=True)
         return opp, True
+
+    @staticmethod
+    def _enrich(opp: Opportunity, enrich: Callable[[Opportunity], None] | None) -> None:
+        if enrich is None:
+            return
+        try:
+            enrich(opp)
+        except Exception:  # noqa: BLE001 - derived fields never block the opportunity itself
+            log.exception("opportunity enrich failed for %s", opp.id)
 
     # ------------------------------------------------------------------ #
     # state machine

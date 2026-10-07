@@ -136,6 +136,28 @@ def _money(x: float) -> str:
     return f"${x:,.2f}"
 
 
+def entry_cap_price(exit_target: float, direction: int, total_cost_pct: float, min_net_pct: float) -> float:
+    """Worst entry price at which the round trip still nets ``min_net_pct``
+    against ``exit_target`` after ``total_cost_pct`` (fees + execution loss).
+
+    LONG (+1): the highest BUY price  = exit_target / (1 + x)
+    SHORT (-1): the lowest SELL price = exit_target / (1 - x)
+    with x = (total_cost_pct + min_net_pct) / 100 (net = gross - total_cost,
+    gross = (exit_target / entry - 1) * 100 * direction).  0.0 when there is
+    no usable exit price or the costs alone exceed 100 %.
+    """
+    if exit_target is None or exit_target <= 0:
+        return 0.0
+    x = (max(0.0, float(total_cost_pct)) + max(0.0, float(min_net_pct))) / 100.0
+    if direction > 0:
+        cap = exit_target / (1.0 + x)
+    else:
+        if x >= 1.0:
+            return 0.0
+        cap = exit_target / (1.0 - x)
+    return max(0.0, cap)
+
+
 def compute_economics(
     book: OrderBook,
     direction: int,
@@ -249,6 +271,7 @@ def compute_economics(
     net_quote = executable * net / 100.0
     entry_slip = abs(entry_vwap - entry_best) / entry_best * 100.0 if entry_best > 0 else 0.0
     exit_slip = abs(exit_best - exit_vwap_now) / exit_best * 100.0 if exit_best > 0 else 0.0
+    cap = entry_cap_price(exit_target, d, total_cost, settings.min_net_pct_show)
 
     return ExecutionEconomics(
         direction=d,
@@ -275,4 +298,5 @@ def compute_economics(
         book_age_ms=age_ms,
         bid_depth_quote=bid_depth,
         ask_depth_quote=ask_depth,
+        entry_cap_price=cap,
     )

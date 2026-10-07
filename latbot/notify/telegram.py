@@ -19,20 +19,21 @@ Discipline (carried over from the previous bot):
 * the bot token never appears in logs: only Telegram method names are logged,
 * every failure is caught and logged - the notifier never crashes the app.
 
-Replies are in Russian; the alert card follows the English spec format.
+Replies are in Russian; the alert is the Russian trading PLAN
+(``engine.explain.build_plan``) plus a HUMAN / BOT line.
 """
 from __future__ import annotations
 
 import asyncio
 import html
 import logging
-import math
 import re
 from typing import Any
 
 from .. import events
 from ..clock import Clock
 from ..config import Secrets, Settings, save_settings
+from ..engine.explain import build_plan, fmt_money
 from ..links import split_symbol
 from ..logging_setup import register_secret
 from ..models import ExchangeHealth, Light, Opportunity, OppState, TradeRecord
@@ -73,25 +74,7 @@ def _strip_tags(text: str) -> str:
     return html.unescape(_TAG_RE.sub("", text))
 
 
-def _money(value: float | None, quote: str = "", signed: bool = False) -> str:
-    """``$102,140`` / ``$4.82`` / ``$100`` / ``€0.5234`` / ``+$4.82`` (signed)."""
-    sym = "€" if (quote or "").upper() == "EUR" else "$"
-    v = float(value or 0.0)
-    if signed:
-        sign = "+" if v >= 0 else "-"
-    else:
-        sign = "-" if v < 0 else ""
-    a = abs(v)
-    if a >= 1000:
-        body = f"{a:,.0f}"
-    elif abs(a - round(a)) < 1e-9:
-        body = f"{a:,.0f}"
-    elif a >= 1:
-        body = f"{a:,.2f}"
-    else:
-        decimals = max(2, -int(math.floor(math.log10(a))) + 3) if a > 0 else 2
-        body = f"{a:.{min(decimals, 10)}f}".rstrip("0").rstrip(".")
-    return f"{sign}{sym}{body}"
+_money = fmt_money  # ``$102,140`` / ``€0.5234`` / ``+$4.82`` - shared with the plan
 
 
 def _num(text: str) -> float | None:
@@ -212,6 +195,9 @@ class TelegramNotifier:
     def _display(self, exchange: str) -> str:
         cfg = self._settings.exchange(exchange)
         return cfg.display if cfg is not None else str(exchange).capitalize()
+
+    def _names(self) -> dict[str, str]:
+        return {e.name: e.display for e in self._settings.exchanges}
 
     def _mode_name(self) -> str:
         return self._settings.mode().value.upper()
@@ -410,24 +396,27 @@ class TelegramNotifier:
         return True
 
     def format_alert(self, opp: Opportunity, now_mono: float) -> str:
-        """The spec card (HTML; ``<b>`` on the header, the pair and NET only)."""
-        e = opp.econ
-        pair = html.escape((opp.target_symbol or "").split(":")[0] or opp.asset)
-        target = html.escape(self._display(opp.target_exchange))
-        quote = opp.quote or getattr(opp.signal, "target_quote", "") or split_symbol(opp.target_symbol or "")[1]
+        """The Russian trading plan (``build_plan``) as the alert card (HTML;
+        ``<b>`` on the header and the BUY line only), then a short
+        ``HUMAN 🟡 ~7 с · BOT 🟢 0.4 с`` line and the update time.  The plan
+        is rebuilt here so "держится" is current at every edit."""
+        plan = build_plan(opp, self._settings, self._names(), now_mono, self._clock.wall())
+        esc = html.escape
+        lights = (
+            f"HUMAN {_LIGHT.get(opp.human.light, '')} ~{opp.human.est_execution_s:.0f} с · "
+            f"BOT {_LIGHT.get(opp.bot.light, '')} {opp.bot.est_execution_s:.1f} с"
+        )
         lines = [
-            "🔥 <b>REAL OPPORTUNITY</b>",
-            f"<b>{pair}  {self._side(opp.direction)}</b>",
-            f"TARGET: {target}",
-            f"NET: <b>{e.net_pct:+.2f}%</b>",
-            f"BUY: {_money(e.buy_price, quote)}",
-            f"SELL: {_money(e.sell_price, quote)}",
-            f"CAPITAL: {_money(e.executable_quote, quote)}",
-            f"EXPECTED PROFIT: {_money(e.net_quote, quote, signed=True)}",
-            f"WINDOW: ~{int(round(opp.remaining_s(now_mono)))} sec",
-            f"HUMAN: {_LIGHT.get(opp.human.light, '')} {opp.human.label}   BOT: {_LIGHT.get(opp.bot.light, '')} {opp.bot.label}",
+            f"<b>{esc(plan['header'])}</b>",
+            esc(plan["movers"]),
+            f"<b>{esc(plan['buy'])}</b>",
+            esc(plan["sell"]),
+            esc(plan["timing"]),
+            esc(plan["caveat"]),
+            lights,
+            esc(plan["updated"]),
         ]
-        return "\n".join(lines)
+        return "\n".join(line for line in lines if line)
 
     def _buttons(self, opp: Opportunity, final: bool = False) -> list[list[dict[str, Any]]]:
         rows: list[list[dict[str, Any]]] = []
@@ -514,11 +503,12 @@ class TelegramNotifier:
                 dur = opp.actual_duration_s
                 if dur is None:
                     dur = opp.age_s(self._clock.mono())
-                await self._final_edit(opp, f"… EXPIRED after {dur:.1f} s")
+                await self._final_edit(opp, f"… истекла через {dur:.1f} с")
             elif to in (OppState.CANCELLED.value, OppState.FAILED.value):
-                await self._final_edit(opp, f"… {to}: {html.escape(reason)}" if reason else f"… {to}")
+                word = "отменена" if to == OppState.CANCELLED.value else "не удалась"
+                await self._final_edit(opp, f"… {word}: {html.escape(reason)}" if reason else f"… {word}")
             elif to == OppState.CLOSED.value and not opp.execution_id:
-                await self._final_edit(opp, "… CLOSED")
+                await self._final_edit(opp, "… закрыта")
         except Exception:  # noqa: BLE001
             log.exception("telegram OPP_STATE handling failed")
 
@@ -555,7 +545,7 @@ class TelegramNotifier:
             await self.send(f"{icon} Сделка закрыта: {where}, NET {net_s} ({_money(pnl, quote, signed=True)}) ({mode})")
             if opp is not None:
                 realized = f"{net:+.1f}%" if net is not None else _money(pnl, quote, signed=True)
-                await self._final_edit(opp, f"… CLOSED: realized {realized}")
+                await self._final_edit(opp, f"… закрыта: факт {realized}")
         elif state is OppState.FAILED:
             if seen == "failed":
                 return
@@ -563,7 +553,7 @@ class TelegramNotifier:
             err = html.escape(str(trade.error or "неизвестная ошибка"))
             await self.send(f"❌ Сделка не удалась: {where}: {err} ({mode})")
             if opp is not None:
-                await self._final_edit(opp, f"… FAILED: {err}")
+                await self._final_edit(opp, f"… не удалась: {err}")
         elif state is OppState.CANCELLED:
             if seen == "cancelled":
                 return

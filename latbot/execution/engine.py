@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 from .. import events
 from ..clock import Clock
 from ..config import Settings
+from ..engine.explain import cap_price
 from ..exchanges.base import ExchangeAdapter, ExchangeError, OrderRejected, RateLimited
 from ..links import split_symbol
 from ..logging_setup import redact
@@ -671,6 +672,8 @@ class ExecutionEngine:
             "quote": "",
             "pair_url": "",
             "fresh": False,
+            "entry_cap_price": None,
+            "plan": {},
         }
         if opp is not None:
             d.update(
@@ -685,6 +688,8 @@ class ExecutionEngine:
                 net_now_pct=opp.econ.net_pct,
                 capital=opp.econ.executable_quote,
                 base_amount=opp.econ.base_amount,
+                entry_cap_price=cap_price(opp.econ, self._settings) or None,
+                plan=dict(opp.plan),  # the last plan built on real data (carries its own "обновлено" time)
             )
         return d
 
@@ -697,6 +702,8 @@ class ExecutionEngine:
             entry_price_now=None,
             exit_target_now=None,
             net_now_pct=None,
+            entry_cap_price=None,  # a buy limit from a stale book is not a limit
+            plan={},
             remaining_s=round(opp.remaining_s(self._clock.mono()), 2),
             trade_id=manual.id if manual is not None else None,
             entry_price=manual.actual_entry_price if manual is not None else None,
@@ -837,6 +844,9 @@ class ExecutionEngine:
             "pair_url": opp.pair_url,
             "buy_price": econ.buy_price,
             "sell_price": econ.sell_price,
+            # the manual trader's limit ("купить <= X") and the Russian plan built on this fresh book
+            "entry_cap_price": cap_price(econ, s),
+            "plan": dict(fresh.plan),
             "fresh": True,
             "trade_id": manual.id if manual is not None else None,
             # what a fresh client (page reload / another tab) needs to rebuild the exit step of an open position

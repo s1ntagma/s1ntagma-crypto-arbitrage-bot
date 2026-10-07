@@ -452,6 +452,10 @@ class ExecutionEconomics:
     book_age_ms: float = 0.0
     bid_depth_quote: float = 0.0  # within MAX_SLIPPAGE
     ask_depth_quote: float = 0.0
+    # Worst entry price at which NET is still >= settings.min_net_pct_show
+    # (LONG: the highest buy price, SHORT: the lowest sell price).  The manual
+    # trader's limit: "купить <= X".  0.0 when the book is empty / invalid.
+    entry_cap_price: float = 0.0
 
     # --- display helpers: what the human actually does ----------------------
     @property
@@ -512,6 +516,16 @@ class Opportunity:
     caught_up: bool | None = None  # set at expiry: did the target actually catch up?
     human_would_make_it: bool | None = None  # set at expiry: window >= human time AND caught_up
     max_net_pct: float = 0.0  # best NET seen during the opportunity's life
+    # Learned history of this (asset, target) copied from StatsStore on every
+    # update (the trading PLAN quotes them): median opportunity duration, how
+    # often the target caught up, how often a human had time.
+    typical_window_s: float | None = None
+    caught_up_ok: int = 0
+    caught_up_total: int = 0
+    human_ok: int = 0
+    human_total: int = 0
+    last_update_ts: float = 0.0  # wall clock of the last upsert / refresh
+    plan: dict = field(default_factory=dict)  # Russian trading plan (explain.build_plan), key -> line
 
     def age_s(self, now_mono: float) -> float:
         return max(0.0, now_mono - self.first_seen_mono)
@@ -541,6 +555,7 @@ class Opportunity:
         d["side"] = "LONG" if self.direction > 0 else "SHORT"
         d["buy_price"] = self.econ.buy_price
         d["sell_price"] = self.econ.sell_price
+        d["plan"] = dict(self.plan)  # as built by explain.build_plan (asdict already copied it; keep it plain)
         return d
 
 
