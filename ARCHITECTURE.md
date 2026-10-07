@@ -279,6 +279,25 @@ class CcxtAdapter(ExchangeAdapter):
 * `fetch_order` fills `Order.fills` from `order['trades']` if present else from
   `filled/average/fee`.
 
+Cross-module conventions settled during integration (all adapters + engine):
+* An IOC limit order that fills only partially ends with status `CANCELLED` and
+  `filled > 0` (`fills` kept) - callers branch on `order.filled`, never on the
+  status alone (the execution engine does).
+* `place_order(req, *, reduce_only=False)` on every adapter; the engine passes
+  `reduce_only=True` only for swap exits and only when the signature accepts it.
+* `fetch_order(order_id, symbol, *, client_id=None)` exists on `CcxtAdapter`
+  only; the engine's timeout reconcile inspects the signature.
+* `Database` stores `Mode.value` / `OppState.value`; callers pass `.value`
+  (`Pipeline.dashboard`, `RiskManager.daily_pnl`) and the db also accepts enums.
+* `confirm_auto(opp_id, wait=True)`: the HTTP route passes `wait=False` (the UI
+  follows `TRADE_UPDATE` over the WebSocket); engine business refusals are
+  HTTP 200 `{ok: false, reason}`.
+* Risk cap: `max_risk_per_trade_pct × total_capital_quote` is a hard position
+  cap - with the defaults (2 % × 1000) every AUTO trade is downsized to $20;
+  raise either value in `config.json` for larger trades.
+* `exchange X: no market data yet` (INFO) is logged on the first sweep for
+  exchanges that have not connected; `stale` (WARNING) only after a real drop.
+
 ### exchanges/paper.py — `PaperAdapter(ExchangeAdapter)`
 ```python
 class PaperAdapter(ExchangeAdapter):
@@ -488,6 +507,47 @@ single-instance lock (`logs/bot.lock`, msvcrt/fcntl), `logs/bot.pid`,
 `logs/stop.flag` polling, restart loop with backoff on crash, Windows
 `WindowsSelectorEventLoopPolicy`, UTF-8 stdout; `python -m latbot` and `run.py`.
 
+Integration decisions (implemented):
+* `AppContext` fields: `settings, secrets, bus, clock, db, state, stats, detector,
+  duration, opps, adapters` (market adapters, name → adapter), `pipeline,
+  exec_adapters` (`{Mode: {name: adapter}}`), `risk, execution, notifier, recorder,
+  app` (FastAPI), `config_path, stop_flag, stop_flag_poll_s, watchlist, poll_assets,
+  poller, server, server_port, stop_reason, request_stop`.
+* `build_context(settings, secrets, *, bus=None, clock=None, db=None,
+  adapter_factory=None, config_path="config.json", stop_flag=None)` wires
+  Database → StatsStore → MarketState → MoveDetector → DurationEstimator →
+  OpportunityManager → market adapters (registry, `adapter_factory(cfg, creds)`
+  lets tests inject `FakeAdapter`s) → Pipeline → execution adapters → RiskManager
+  → ExecutionEngine → TelegramNotifier → MarketRecorder → TickerPoller →
+  `api.create_app`.  No network is touched; optional components that fail to
+  build are logged and set to `None` (the app still runs).
+* `run_app(ctx, seconds=None, *, serve=True) -> int`: `resolve_watchlist` (20 s
+  bound, falls back to `settings.watchlist`, never empty) → every market adapter
+  (and LIVE execution adapter) is started in a **background task with retry**
+  (5 → 60 s backoff; a dead exchange never blocks the UI) → `pipeline.start()`,
+  recorder, Telegram, ticker poller (watchlist first, the common universe is
+  added in the background once `resolve_universe` succeeds) → uvicorn
+  `Server.serve()` **inside the same event loop** (signals are owned by the app,
+  not by uvicorn; a bind failure is logged and the bot keeps running without the
+  UI; `ctx.server_port` holds the bound port, `port=0` → OS-assigned).  Stop
+  conditions: `seconds`, `stop.flag` (polled every `ctx.stop_flag_poll_s`, removed
+  when seen), SIGINT/SIGTERM, or `ctx.request_stop(reason)`.  Shutdown order:
+  helper tasks → server (10 s, then forced) → Telegram → poller → recorder →
+  pipeline → adapters → `stats.save()` → `db.close()`.  Returns 0.
+* `main(argv)`: `[SECONDS] [--seconds N] [--config PATH] [--env PATH]
+  [--no-server]`.  Order: platform setup → secrets → settings → logging
+  (`settings.log_dir/log_level`) → `config.json` written when missing (all
+  parameters visible) → `logs/bot.lock` (exit **3** when another instance holds
+  it) → `logs/bot.pid` → a stale `stop.flag` is removed (the lock proves the old
+  process is gone) → restart loop: clean return → exit code; crash → `10 s ×
+  failures` (max 120 s) then rebuild with freshly loaded `.env`/`config.json`;
+  with `SECONDS` a crash exits **1** after one try; `stop.flag` after a crash →
+  exit 0.  `KeyboardInterrupt` is a clean stop (0).
+* `start.bat` loops `python -u run.py` with a 5 s pause and ends the loop on exit
+  codes 0 and 3; `stop.bat` writes `logs\stop.flag` and waits (≤ 30 s) for
+  `logs\bot.pid` to disappear; `restart.bat` = stop + start.  All `.bat` files
+  are ASCII with CRLF line endings (guarded by `tests/test_app.py`).
+
 ## Dashboard counters (`OpportunityManager.counters` + `Pipeline.dashboard`)
 `active`, `today`, `green`, `yellow`, `red` (by best of human/bot), `human_executable`
 (human != RED), `bot_executable`, `telegram_alerts`, `paper_pnl`, `live_pnl`,
@@ -551,6 +611,14 @@ opportunities.
   `fetch_tickers()` → `state.on_ticker()` (mid from bid/ask, else last; stores
   volume24h) → `detector.on_ticker(ticker)` → `LagSignal(source="poll")` →
   `pipeline.evaluate(signal)`.  Per-exchange backoff on errors / rate limits.
+  Implemented details: `start(assets=None)` / `stop()` / `set_assets(assets)` /
+  `poll_once() -> int`; **every** polled ticker feeds `state.on_ticker` (WS
+  book/bbo streams carry no 24h volume, so without polling the
+  `min_mover_volume_quote` gate can never pass), but `detector.on_ticker` is
+  skipped for assets the same exchange already streams over WebSocket (they are
+  detected on the live stream; a polled ticker is one interval old).  The app
+  polls the watchlist from the first second and widens to watchlist + common
+  universe once `resolve_universe` succeeds.
 * `Pipeline.evaluate` for `source == "poll"` (or when the target book is older
   than `max_data_age_ms`) and `confirm_with_rest_book`: `await adapters[target].fetch_order_book(symbol)`
   → `state.on_book(book)` → economics on that fresh book.  No book → no opportunity.

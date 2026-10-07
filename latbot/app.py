@@ -67,6 +67,9 @@ EXIT_ALREADY_RUNNING = 3
 
 _WATCHLIST_TIMEOUT_S = 20.0
 _UNIVERSE_TIMEOUT_S = 60.0
+_UNIVERSE_RETRY_MIN_S = 15.0
+_UNIVERSE_RETRY_MAX_S = 120.0
+_UNIVERSE_ATTEMPTS = 20
 _ADAPTER_START_TIMEOUT_S = 120.0
 _ADAPTER_RETRY_MIN_S = 5.0
 _ADAPTER_RETRY_MAX_S = 60.0
@@ -241,7 +244,7 @@ async def _resolve_watchlist(ctx: AppContext) -> list[str]:
 
 
 async def _resolve_poll_assets(ctx: AppContext) -> list[str]:
-    """Phase 2.3 breadth: assets covered by REST ticker polling (best effort)."""
+    """Phase 2.3 breadth: assets covered by REST ticker polling (best effort, [] on failure)."""
     if ctx.poller is None or not ctx.settings.ticker_poll_enabled:
         return []
     try:
@@ -252,6 +255,26 @@ async def _resolve_poll_assets(ctx: AppContext) -> list[str]:
         log.info("poll universe unavailable (%s: %s)", type(exc).__name__, str(exc)[:120])
         return []
     return list(poll)
+
+
+async def _upgrade_poll_universe(ctx: AppContext) -> None:
+    """Background: resolve the common universe (needs the exchanges' REST API)
+    and hand watchlist + universe to the poller.  Retries with backoff for a
+    while; a bot without network keeps polling the watchlist only."""
+    delay = _UNIVERSE_RETRY_MIN_S
+    for _attempt in range(_UNIVERSE_ATTEMPTS):
+        poll = await _resolve_poll_assets(ctx)
+        if poll:
+            ctx.poll_assets = poll
+            assets = list(dict.fromkeys([*ctx.watchlist, *poll]))
+            set_assets = getattr(ctx.poller, "set_assets", None)
+            if callable(set_assets):
+                set_assets(assets)
+            log.info("ticker polling: %d assets (%d watchlist + %d universe)", len(assets), len(ctx.watchlist), len(poll))
+            return
+        await asyncio.sleep(delay)
+        delay = min(_UNIVERSE_RETRY_MAX_S, delay * 2.0)
+    log.info("poll universe not resolved; polling the watchlist only")
 
 
 async def _start_adapter(adapter: ExchangeAdapter, assets: list[str]) -> None:
@@ -472,14 +495,12 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
         if ctx.notifier is not None:
             await _guarded("telegram start", ctx.notifier.start(), timeout_s=30.0)
         if ctx.poller is not None:
+            # Poll the watchlist right away (REST tickers carry the 24h volumes the
+            # Phase-2 gates need); widen to the common universe once exchanges answer.
             try:
-                ctx.poll_assets = await _resolve_poll_assets(ctx)
-                start = getattr(ctx.poller, "start", None)
-                if start is not None:
-                    r = start(ctx.poll_assets) if _accepts_positional(start) else start()
-                    if asyncio.iscoroutine(r):
-                        await r
-                log.info("ticker polling: %d assets", len(ctx.poll_assets))
+                await _maybe_await(ctx.poller.start(list(ctx.watchlist)))
+                if settings.ticker_poll_enabled:
+                    helpers.append(asyncio.create_task(_upgrade_poll_universe(ctx), name="latbot-universe"))
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
@@ -564,19 +585,6 @@ async def _maybe_await(value: Any) -> Any:
     if asyncio.iscoroutine(value) or isinstance(value, asyncio.Future):
         return await value
     return value
-
-
-def _accepts_positional(fn: Callable[..., Any]) -> bool:
-    import inspect
-
-    try:
-        params = inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return False
-    return any(
-        p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
-        for p in params.values()
-    )
 
 
 # --------------------------------------------------------------------------- #

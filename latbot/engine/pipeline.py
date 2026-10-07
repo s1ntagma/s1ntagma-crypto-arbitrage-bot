@@ -351,16 +351,19 @@ class Pipeline:
             except Exception:  # noqa: BLE001
                 log.exception("check_staleness failed for %s", name)
                 continue
-            if self._stale_flags.get(name) != stale:
+            previous = self._stale_flags.get(name)
+            if previous != stale:
                 self._stale_flags[name] = stale
                 health = getattr(adapter, "health", None)
                 if isinstance(health, ExchangeHealth):
                     self._state.on_health(health)
                     await self._bus.publish(events.HEALTH, health)
-                if stale:
-                    log.warning("exchange %s is stale (no messages for > %.0fs)", name, self._settings.stale_exchange_s)
+                if not stale:
+                    log.info("exchange %s is live", name)
+                elif previous is None:
+                    log.info("exchange %s: no market data yet", name)  # not connected so far, not a drop
                 else:
-                    log.info("exchange %s is live again", name)
+                    log.warning("exchange %s is stale (no messages for > %.0fs)", name, self._settings.stale_exchange_s)
         if self._stats is not None and now - self._last_stats_save_mono >= _STATS_SAVE_INTERVAL_S:
             self._last_stats_save_mono = now
             try:
