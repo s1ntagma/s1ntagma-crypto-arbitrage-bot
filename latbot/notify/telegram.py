@@ -6,7 +6,9 @@ Discipline (carried over from the previous bot):
   private chat that sends ``/start`` (persisted in db kv ``telegram_chat_id``);
   every other chat is ignored,
 * one alert per opportunity id - later updates EDIT the message (at most one
-  edit per ``EDIT_THROTTLE_S``), a final edit says EXPIRED / CLOSED,
+  edit per ``EDIT_THROTTLE_S``), a final edit says EXPIRED / CLOSED; the first
+  alert fires on the VALID transition (never while DETECTED / VALIDATING) and
+  moves the opportunity VALID -> NOTIFIED,
 * only important events: alerts with NET >= ``telegram_profit_threshold_pct``
   that are executable, trade open / close, emergency on / off, exchange link
   lost / restored (``LINK_GRACE_S`` grace, once per transition), start / stop,
@@ -51,6 +53,8 @@ MAX_TEXT = 3900
 _KEEP_MESSAGES = 1000
 _KEEP_TRADES = 500
 _LIGHT = {Light.GREEN: "🟢", Light.YELLOW: "🟡", Light.RED: "🔴"}
+# Not yet confirmed on the real book: never alert these (OPP_NEW arrives while DETECTED).
+_NOT_YET_VALIDATED = frozenset({OppState.DETECTED, OppState.VALIDATING})
 _TAG_RE = re.compile(r"<[^>]+>")
 
 HELP_TEXT = (
@@ -390,6 +394,11 @@ class TelegramNotifier:
         s = self._settings
         if not opp.is_active:
             return False
+        if opp.state in _NOT_YET_VALIDATED:
+            # OPP_NEW is published while the opp is still DETECTED; the pipeline
+            # moves it VALIDATING -> VALID right after.  Alert only on a state the
+            # real book has confirmed (the alert then fires from the VALID OPP_STATE).
+            return False
         if opp.econ.net_pct < s.telegram_profit_threshold_pct:
             return False
         if s.telegram_require_executable and opp.bot.light is Light.RED and opp.human.light is Light.RED:
@@ -487,10 +496,19 @@ class TelegramNotifier:
             if not isinstance(payload, dict):
                 return
             opp = payload.get("opportunity")
-            if opp is None or opp.id not in self._messages or opp.id in self._final:
+            if opp is None:
                 return
             to = payload.get("to")
             to = str(getattr(to, "value", to) or "")
+            if to == OppState.VALID.value:
+                # First validation on the real book (DETECTED -> VALIDATING -> VALID
+                # in Pipeline.evaluate): this is where a new opportunity is alerted,
+                # so the VALID -> NOTIFIED transition is recorded in its history.
+                if opp.id not in self._messages:
+                    await self._handle_opp(opp)
+                return
+            if opp.id not in self._messages or opp.id in self._final:
+                return
             reason = str(payload.get("reason") or "")
             if to == OppState.EXPIRED.value:
                 dur = opp.actual_duration_s

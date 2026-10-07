@@ -840,14 +840,12 @@ async def test_exec_only_adapter_shares_the_market_adapters_books_and_health():
 
 
 async def test_exec_only_demo_adapter_asserts_the_demo_host_at_start():
-    class NoRewrite(FakeCcxt):
-        demo_rewrites_url = False
-
+    """A demo adapter whose private REST base stopped being a demo host (e.g. a
+    hostname override) is refused at start - before any order could be sent."""
     h = Harness(spot_cfg(name="bybit", demo=True), CREDS)
-    h.private.demo_rewrites_url = False
+    assert h.private.demo  # construction enabled demo trading on the private instance
     h.private.urls["api"] = {"private": "https://api.bybit.com"}
     with pytest.raises(ExchangeError, match="demo"):
         await h.adapter.start(["BTC"], ws_assets=0)
-    assert h.adapter._tasks == []
+    assert h.adapter._tasks == [] and h.public.loaded == 0
     await h.adapter.stop()
-    assert NoRewrite.demo_rewrites_url is False
