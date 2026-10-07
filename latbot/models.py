@@ -272,6 +272,7 @@ class ExchangeHealth:
     maintenance: bool = False
     stale: bool = False
     reason: str = ""
+    last_poll_mono: float | None = None  # last successful REST ticker poll (breadth coverage)
 
     def is_usable(self, now_mono: float) -> bool:
         if self.maintenance or self.stale or not self.ws_connected:

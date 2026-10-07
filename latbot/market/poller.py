@@ -202,6 +202,12 @@ class TickerPoller:
             return {}
         self._backoff.pop(name, None)
         self._next_allowed.pop(name, None)
+        health = getattr(adapter, "health", None)
+        if health is not None and res:
+            try:
+                health.last_poll_mono = now
+            except Exception:  # noqa: BLE001
+                pass
         if name in self._failing:
             self._failing.discard(name)
             log.info("%s: tickers available again", name)

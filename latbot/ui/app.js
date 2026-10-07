@@ -527,8 +527,9 @@
     }
     names.forEach(function (name) {
       var hh = state.health[name];
-      var cls = !hh.ws_connected ? 'red' : (hh.usable === false || hh.stale || hh.maintenance) ? 'yellow' : 'green';
-      var word = cls === 'red' ? 'offline' : cls === 'yellow' ? 'degraded' : 'ok';
+      var pollOnly = !hh.ws_connected && hh.polling;
+      var cls = pollOnly ? 'yellow' : !hh.ws_connected ? 'red' : (hh.usable === false || hh.stale || hh.maintenance) ? 'yellow' : 'green';
+      var word = pollOnly ? 'poll' : cls === 'red' ? 'offline' : cls === 'yellow' ? 'degraded' : 'ok';
       var chip = h('span', { class: 'chip-health', title: hh.reason || '' },
         h('span', { class: 'dot ' + cls, 'aria-hidden': 'true' }),
         h('span', { text: hh.label || exchangeLabel(name) }),
@@ -536,7 +537,8 @@
         h('span', { class: 'lat', text: 'ws ' + fmtMs(hh.ws_latency_ms) }));
       if (Number.isFinite(num(hh.order_latency_ms))) chip.appendChild(h('span', { class: 'lat', text: 'order ' + fmtMs(hh.order_latency_ms) }));
       if (hh.role === 'execution') chip.appendChild(h('span', { class: 'tag accent', text: 'target' }));
-      if (hh.stale) chip.appendChild(h('span', { class: 'tag yellow', text: 'stale' }));
+      if (hh.stale && !pollOnly) chip.appendChild(h('span', { class: 'tag yellow', text: 'stale' }));
+      if (pollOnly) chip.title = 'WebSocket down; covered by REST ticker polling';
       if (hh.maintenance) chip.appendChild(h('span', { class: 'tag red', text: 'maint' }));
       if (hh.rate_limited_until_mono) chip.appendChild(h('span', { class: 'tag yellow', text: 'rate-limited' }));
       box.appendChild(chip);

@@ -774,3 +774,62 @@ async def test_plain_adapters_without_ws_assets_support_still_start(tmp_path: Pa
     rc = await asyncio.wait_for(run_app(ctx, seconds=0.2, serve=False), 10.0)
     assert rc == 0
     assert b.fakes["kraken"].supported_symbols() == {"BTC/EUR"}
+
+
+# --------------------------------------------------------------------------- #
+# Restart: a MANUAL position survives (restore_from_db) and its exit is still reportable
+# --------------------------------------------------------------------------- #
+def test_restart_restores_manual_position_and_its_exit_is_reportable(tmp_path: Path) -> None:
+    """The owner bought by hand, the process died before the exit was reported.
+    The next process restores the position (risk exposure included) although
+    the opportunity itself is gone, and the manual API routes still let the
+    owner report the exit through the real wiring - otherwise the position
+    would sit in EXECUTING forever, holding a simultaneous-trade slot."""
+    holder: dict[str, Any] = {}
+
+    async def prepare() -> None:
+        b = build(tmp_path)
+        opp = await detect(b)
+        await b.ctx.execution.select_manual(opp.id)
+        entered = await b.ctx.execution.manual_entered(opp.id, price=100.01, quote_amount=100.0)
+        assert entered["ok"] is True and b.ctx.risk.open_trades() == 1
+        await b.ctx.pipeline.stop()  # "crash": no manual_exited, the database is reopened by the next process
+        holder["db"], holder["opp"], holder["trade_id"] = b.ctx.db, opp, entered["trade_id"]
+
+    asyncio.run(prepare())
+    db: Database = holder["db"]
+    opp: Opportunity = holder["opp"]
+    trade_id: str = holder["trade_id"]
+    try:
+        bus, clock = EventBus(), SimClock()
+
+        def factory(cfg: ExchangeConfig, creds: Any) -> FakeAdapter:
+            return FakeAdapter(cfg, bus, clock, symbols={"BTC": SYMBOLS[cfg.name]})
+
+        ctx2 = build_context(make_settings(tmp_path), Secrets(), bus=bus, clock=clock, db=db, adapter_factory=factory,
+                             config_path=tmp_path / "config.json", stop_flag=tmp_path / "stop.flag")
+        assert ctx2.opps.get(opp.id) is None  # the card is gone ...
+        assert ctx2.risk.open_trades() == 1 and ctx2.risk.exposure(exchange="kraken") == pytest.approx(100.0)  # ... the position is not
+        restored = ctx2.execution.active_trade(opp.id)
+        assert restored is not None and restored.id == trade_id and restored.state is OppState.EXECUTING and restored.entry_order is None
+        with TestClient(ctx2.app) as c:
+            assert c.get(f"/api/opportunities/{opp.id}").status_code == 404
+            trades = c.get("/api/trades").json()
+            assert [t["id"] for t in trades] == [trade_id] and trades[0]["state"] == "EXECUTING" and trades[0]["entry_order"] is None
+            r = c.post(f"/api/opportunities/{opp.id}/manual")
+            assert r.status_code == 200, r.text
+            d = r.json()
+            assert d["status"] == "in_position" and d["valid"] is True and d["expired"] is False and d["trade_id"] == trade_id
+            assert d["entry_price"] == pytest.approx(100.01) and d["quote_amount"] == 100.0 and d["exit_side"] == "SELL"
+            assert d["exchange"] == "kraken" and d["symbol"] == "BTC/EUR" and d["quote"] == "EUR"
+            assert d["entry_price_now"] is None and d["net_now_pct"] is None  # nothing live is invented
+            assert c.get(f"/api/opportunities/{opp.id}/manual/support").json()["status"] == "in_position"
+            assert c.post(f"/api/opportunities/{opp.id}/manual/entered", json={"price": 100.0, "quote_amount": 10.0}).status_code == 404
+            r = c.post(f"/api/opportunities/{opp.id}/manual/exited", json={"price": 101.5})
+            assert r.status_code == 200, r.text
+            assert r.json()["id"] == trade_id and r.json()["state"] == "CLOSED" and r.json()["realized_pnl_quote"] > 1.0
+            assert c.post(f"/api/opportunities/{opp.id}/manual").status_code == 404
+        assert ctx2.risk.open_trades() == 0 and ctx2.execution.active_trade(opp.id) is None
+        assert db.get_trade(trade_id)["state"] == "CLOSED"
+    finally:
+        db.close()
