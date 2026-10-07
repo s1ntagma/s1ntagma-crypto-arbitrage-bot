@@ -10,6 +10,7 @@ from typing import Any
 from latbot import events
 from latbot.clock import SimClock
 from latbot.config import ExchangeConfig, Secrets, Settings
+from latbot.engine.opportunity import OpportunityManager
 from latbot.events import EventBus
 from latbot.models import (
     ExchangeHealth,
@@ -289,12 +290,13 @@ def make_trade(opp: Opportunity, state: OppState, **over: Any) -> TradeRecord:
 
 
 class Env:
-    def __init__(self, chat_id: str = OWNER, db: KvDb | None = None, token: str = TOKEN, config_path: str = "config.json", **settings_over: Any) -> None:
+    def __init__(self, chat_id: str = OWNER, db: KvDb | None = None, token: str = TOKEN, config_path: str = "config.json", real_opps: bool = False, **settings_over: Any) -> None:
         self.settings = make_settings(**settings_over)
         self.secrets = Secrets(telegram_bot_token=token, telegram_chat_id=chat_id)
         self.bus = EventBus()
         self.clock = SimClock(wall=1_700_000_000.0, mono=1000.0)
-        self.opps = StubOpps(self.clock)
+        # ``real_opps``: the production OpportunityManager (state machine enforced) instead of StubOpps
+        self.opps: Any = OpportunityManager(self.settings, self.bus, self.clock) if real_opps else StubOpps(self.clock)
         self.risk = StubRisk(self.bus)
         self.execution = StubExec(self.risk)
         self.session = FakeSession()
@@ -384,6 +386,9 @@ def test_should_alert_rules():
     # inactive / already notified
     assert not n.should_alert(make_opp(env.clock, state=OppState.EXPIRED))
     assert not n.should_alert(make_opp(env.clock, telegram_message_id=5))
+    # not yet validated on the real book (OPP_NEW is published while DETECTED)
+    assert not n.should_alert(make_opp(env.clock, state=OppState.DETECTED))
+    assert not n.should_alert(make_opp(env.clock, state=OppState.VALIDATING))
 
 
 # --------------------------------------------------------------------------- #
@@ -407,6 +412,55 @@ async def test_alert_once_per_id_with_buttons_and_message_id():
     assert env.notifier.message_id_for(opp.id) == 101
     assert env.opps.transitions == [(opp.id, OppState.NOTIFIED, "telegram alert sent")]
     assert opp.state is OppState.NOTIFIED
+
+
+async def test_alert_through_real_state_machine_reaches_notified():
+    """Pipeline.evaluate: upsert (OPP_NEW while DETECTED) -> VALIDATING -> VALID.
+    The alert must fire once the opp is VALID and leave it NOTIFIED."""
+    env = await Env(real_opps=True).start()
+    opps: OpportunityManager = env.opps
+    proto = make_opp(env.clock)
+
+    def alerts() -> list[dict[str, Any]]:
+        return [p for p in env.session.of("sendMessage") if "REAL OPPORTUNITY" in p["text"]]
+
+    opp, is_new = await opps.upsert(proto.signal, proto.econ, proto.human, proto.bot, proto.why, proto.estimated_duration_s, Mode.PAPER)
+    assert is_new and opp.state is OppState.DETECTED
+    assert alerts() == []  # nothing is validated on the real book yet
+    await opps.transition(opp.id, OppState.VALIDATING, "economics computed")
+    assert alerts() == []
+    await opps.transition(opp.id, OppState.VALID, "net +4.82% on real book")
+    assert len(alerts()) == 1
+    assert opp.state is OppState.NOTIFIED
+    assert [s for _, s, _ in opp.state_history] == ["DETECTED", "VALIDATING", "VALID", "NOTIFIED"]
+    assert opp.telegram_message_id == 101 and opp.notified_ts == env.clock.wall()
+    assert env.notifier.message_id_for(opp.id) == 101
+    # a following update (OPP_UPDATE) edits, never re-sends
+    env.clock.advance(EDIT_THROTTLE_S + 0.1)
+    same, is_new = await opps.upsert(proto.signal, make_econ(net_pct=4.5, net_quote=4.5), proto.human, proto.bot, proto.why, 11.0, Mode.PAPER)
+    assert same is opp and not is_new
+    assert len(alerts()) == 1
+    assert len(env.session.of("editMessageText")) == 1
+    assert opp.state is OppState.NOTIFIED
+
+
+async def test_below_threshold_at_valid_then_rises_alerts_once_and_notifies():
+    """An opp validated at NET 2 % that later climbs over the Telegram
+    threshold is alerted from the OPP_UPDATE (and still reaches NOTIFIED)."""
+    env = await Env(real_opps=True).start()
+    opps: OpportunityManager = env.opps
+    proto = make_opp(env.clock)
+    opp, _ = await opps.upsert(proto.signal, make_econ(net_pct=2.0, net_quote=2.0), proto.human, proto.bot, proto.why, 11.0, Mode.PAPER)
+    await opps.transition(opp.id, OppState.VALIDATING, "economics computed")
+    await opps.transition(opp.id, OppState.VALID, "net +2.00% on real book")
+    assert [p for p in env.session.of("sendMessage") if "REAL OPPORTUNITY" in p["text"]] == []
+    assert opp.state is OppState.VALID
+    env.clock.advance(0.5)
+    await opps.upsert(proto.signal, make_econ(net_pct=3.4, net_quote=3.4), proto.human, proto.bot, proto.why, 11.0, Mode.PAPER)
+    sent = [p for p in env.session.of("sendMessage") if "REAL OPPORTUNITY" in p["text"]]
+    assert len(sent) == 1 and "NET: <b>+3.40%</b>" in sent[0]["text"]
+    assert opp.state is OppState.NOTIFIED
+    assert [s for _, s, _ in opp.state_history] == ["DETECTED", "VALIDATING", "VALID", "NOTIFIED"]
 
 
 async def test_public_url_used_for_deep_link_and_managed_object_updated():

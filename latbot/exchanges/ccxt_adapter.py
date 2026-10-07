@@ -9,6 +9,12 @@ Two ccxt instances per exchange:
   configured adapter (``cfg.demo``) enables Bybit Demo Trading on the private
   instance and refuses to send an order through a non-demo host.
 
+An execution-only adapter (the LIVE adapter, or the Bybit demo paper venue)
+is started with ``ws_assets=0`` and shares the market adapter's books and
+health through ``market_source`` (set by ``registry.build_execution_adapters``):
+one WebSocket stream set per exchange, one health object, one IP budget.  Its
+own ``public`` instance is kept for REST snapshots (revalidation fallback).
+
 Tests inject a fake ccxt instance through ``exchange_factory`` so nothing here
 needs the network.
 """
@@ -31,6 +37,7 @@ from ..links import split_symbol
 from ..models import (
     Balance,
     BookLevel,
+    ExchangeHealth,
     ExchangeRole,
     Fees,
     Fill,
@@ -245,6 +252,7 @@ class CcxtAdapter(ExchangeAdapter):
         self._fee_fetched: set[str] = set()
         self._markets_loaded = False
         self._universe_resolved = False  # resolve_assets(None) ran on the current markets
+        self._market_source: ExchangeAdapter | None = None  # see the ``market_source`` property
 
     # ---- construction helpers ---------------------------------------------------
     def _build_opts(self) -> dict[str, Any]:
@@ -304,6 +312,22 @@ class CcxtAdapter(ExchangeAdapter):
             ok = any(m in base for m in _DEMO_MARKERS)
         if not ok:
             raise ExchangeError(f"{self.name}: demo mode configured but REST host is not a demo endpoint ({base or 'unknown'})")
+
+    # ---- market source (execution-only adapters) -----------------------------------
+    @property
+    def market_source(self) -> ExchangeAdapter | None:
+        """The market-data adapter of the same exchange whose cached books and
+        health this (execution-only) adapter shares; None when it streams itself."""
+        return self._market_source
+
+    @market_source.setter
+    def market_source(self, adapter: ExchangeAdapter | None) -> None:
+        self._market_source = adapter
+        health = getattr(adapter, "health", None) if adapter is not None else None
+        if isinstance(health, ExchangeHealth):
+            # One health per exchange: ws liveness / staleness come from the market
+            # stream, order and REST latency EWMAs from this adapter's calls.
+            self.health = health
 
     # ---- identity ------------------------------------------------------------------
     def symbol_for(self, asset: str) -> str | None:
@@ -390,15 +414,24 @@ class CcxtAdapter(ExchangeAdapter):
 
     # ---- lifecycle --------------------------------------------------------------------
     async def start(self, assets: Iterable[str], ws_assets: int | None = None) -> None:  # noqa: D401
-        """Load markets, resolve ``assets`` and start one WS task per streamed symbol."""
+        """Load markets, resolve ``assets`` and start one WS task per streamed symbol.
+
+        ``ws_assets=0`` (execution-only adapter): markets are loaded, symbols
+        resolved and the demo host asserted, but no stream and no health loop
+        are started - the market adapter of the same exchange (``market_source``)
+        owns the data and the health object."""
         wanted = [self._asset_key(a) for a in assets]
         wanted = list(dict.fromkeys(a for a in wanted if a))
+        self._assert_demo_host()
         await self._load_markets()
         resolved = self.resolve_assets(wanted)
         limit = self.settings.ws_assets if ws_assets is None else int(ws_assets)
         if self.cfg.max_ws_subscriptions and self.cfg.max_ws_subscriptions > 0:
             limit = min(limit, self.cfg.max_ws_subscriptions)
         streamed = [a for a in wanted if a in resolved][: max(0, limit)]
+        if limit <= 0:
+            log.info("%s: execution-only (markets resolved for %d/%d assets, no streams)", self.name, len(resolved), len(wanted))
+            return
         has = getattr(self.public, "has", None) or {}
         for asset in streamed:
             symbol = resolved[asset]
@@ -411,7 +444,7 @@ class CcxtAdapter(ExchangeAdapter):
                 self._tasks.append(asyncio.create_task(self._book_loop(asset, symbol), name=f"{self.name}:book:{symbol}"))
                 if has.get("watchTrades"):
                     self._tasks.append(asyncio.create_task(self._trades_loop(asset, symbol), name=f"{self.name}:trades:{symbol}"))
-        if not any(t.get_name() == f"{self.name}:health" for t in self._tasks):
+        if self._market_source is None and not any(t.get_name() == f"{self.name}:health" for t in self._tasks):
             self._tasks.append(asyncio.create_task(self._health_loop(), name=f"{self.name}:health"))
         log.info("%s: streaming %d/%d assets (%s)", self.name, len(streamed), len(wanted), self.cfg.stream)
 
@@ -421,7 +454,8 @@ class CcxtAdapter(ExchangeAdapter):
             t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self.health.ws_connected = False
+        if self._market_source is None:  # a shared health object is the market adapter's to flip
+            self.health.ws_connected = False
         for inst in (self.public, self.private):
             if inst is None:
                 continue
@@ -620,7 +654,10 @@ class CcxtAdapter(ExchangeAdapter):
 
     def order_book(self, symbol: str) -> OrderBook | None:
         _, asset = self._symbol_arg(symbol)
-        return self._books.get(asset)
+        book = self._books.get(asset)
+        if book is None and self._market_source is not None:
+            return self._market_source.order_book(symbol)
+        return book
 
     async def _public_call(self, fn: Callable[..., Any], *args: Any) -> Any:
         t0 = self.clock.mono()

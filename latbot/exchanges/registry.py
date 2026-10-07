@@ -4,6 +4,10 @@
 * ``build_execution_adapters`` - PAPER: ``PaperAdapter`` wrapping the market adapter
   (or the real Bybit Demo adapter when ``paper_engine == "bybit_demo"``);
   LIVE: real adapters with credentials for execution exchanges (others omitted).
+  A real execution adapter gets ``market_source = <market adapter>`` (when the
+  adapter class has that attribute) so it shares the exchange's books and health
+  instead of opening a second stream set; ``app.run_app`` starts it with
+  ``ws_assets=0``.
 * ``resolve_watchlist``        - ``settings.watchlist`` or, with ``watchlist_auto``,
   the most liquid assets on ``settings.watchlist_exchange`` (BTC always first).
 * ``resolve_universe``         - (ws_assets, poll_assets) for Phase 2 coverage.
@@ -62,6 +66,17 @@ def build_market_adapters(
     return out
 
 
+def _share_market_data(adapter: ExchangeAdapter, inner: ExchangeAdapter | None) -> None:
+    """Point an execution-only adapter at the market adapter of its exchange
+    (``CcxtAdapter.market_source``); adapters without the attribute are left alone."""
+    if inner is None or inner is adapter or not hasattr(adapter, "market_source"):
+        return
+    try:
+        adapter.market_source = inner  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("%s: market data not shared with the execution adapter: %s", adapter.name, type(exc).__name__)
+
+
 def build_execution_adapters(
     settings: Settings,
     secrets: Secrets,
@@ -85,6 +100,7 @@ def build_execution_adapters(
         if name == "bybit" and settings.paper_engine == "bybit_demo" and cfg.demo and creds.present:
             try:
                 paper = factory(cfg, creds)
+                _share_market_data(paper, inner)
                 log.info("paper venue for bybit: Bybit Demo Trading (real adapter)")
             except Exception as exc:  # noqa: BLE001
                 log.error("bybit demo adapter not created (%s: %s); falling back to internal paper", type(exc).__name__, str(exc)[:200])
@@ -102,9 +118,12 @@ def build_execution_adapters(
             log.info("%s: demo-configured; no LIVE adapter (set demo=false for real trading)", name)
             continue
         try:
-            result[Mode.LIVE][name] = factory(cfg, creds)
+            live = factory(cfg, creds)
         except Exception as exc:  # noqa: BLE001
             log.error("live adapter %s not created: %s: %s", name, type(exc).__name__, str(exc)[:200])
+            continue
+        _share_market_data(live, inner)
+        result[Mode.LIVE][name] = live
     return result
 
 

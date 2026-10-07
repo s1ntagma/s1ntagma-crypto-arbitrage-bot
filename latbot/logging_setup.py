@@ -14,8 +14,11 @@ from pathlib import Path
 _SECRET_VALUES: set[str] = set()
 _PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|api[_-]?secret|secret|passphrase|token)(\s*[=:]\s*)([^\s,;'\"]{6,})"),
-    re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"),  # telegram bot token
+    # telegram bot token - also inside the API URL (".../bot<id>:<hash>/sendMessage"):
+    # there is no word boundary between "bot" and the digits, so none is required.
+    re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}"),
 ]
+_EXC_FORMATTER = logging.Formatter()  # stateless; renders exc_info the way every handler would
 
 
 def register_secret(value: str | None) -> None:
@@ -33,6 +36,16 @@ def redact(text: str) -> str:
 
 
 class RedactFilter(logging.Filter):
+    """Scrub secrets from the message, the traceback and the stack of a record.
+
+    ``Handler.handle`` runs filters BEFORE ``Formatter.format``, and the
+    formatter renders ``exc_info`` into ``record.exc_text`` only then - so the
+    traceback is rendered (and redacted) here, up front.  ``Formatter.format``
+    reuses a pre-set ``exc_text``, hence every handler - the console first,
+    the file second - prints the redacted text and the output format is
+    unchanged.  ``exc_info`` is left in place for consumers that inspect it.
+    """
+
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             msg = record.getMessage()
@@ -42,8 +55,15 @@ class RedactFilter(logging.Filter):
         if red != msg:
             record.msg = red
             record.args = ()
+        if record.exc_info and not record.exc_text:
+            try:
+                record.exc_text = _EXC_FORMATTER.formatException(record.exc_info)
+            except Exception:  # noqa: BLE001
+                record.exc_text = None
         if record.exc_text:
             record.exc_text = redact(record.exc_text)
+        if record.stack_info:
+            record.stack_info = redact(record.stack_info)
         return True
 
 

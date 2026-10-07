@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import contextlib
 import importlib
+import inspect
 import logging
 import os
 import signal
@@ -285,13 +286,27 @@ async def _upgrade_poll_universe(ctx: AppContext) -> None:
     log.info("poll universe not resolved; polling the watchlist only")
 
 
-async def _start_adapter(adapter: ExchangeAdapter, assets: list[str]) -> None:
+def _accepts_kwarg(func: Any, name: str) -> bool:
+    """True when ``func`` has a parameter ``name`` or ``**kwargs``."""
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD or p.name == name for p in sig.parameters.values())
+
+
+async def _start_adapter(adapter: ExchangeAdapter, assets: list[str], ws_assets: int | None = None) -> None:
     """Start one adapter; on failure log and retry with backoff (5 -> 60 s).
-    Never raises (except on cancellation) so a dead exchange cannot stop the app."""
+    Never raises (except on cancellation) so a dead exchange cannot stop the app.
+    ``ws_assets`` (0 = execution-only, no streams) is passed only to adapters whose
+    ``start`` takes it (``CcxtAdapter``); the base signature is ``start(symbols)``."""
     delay = _ADAPTER_RETRY_MIN_S
+    kwargs: dict[str, Any] = {}
+    if ws_assets is not None and _accepts_kwarg(adapter.start, "ws_assets"):
+        kwargs["ws_assets"] = int(ws_assets)
     while True:
         try:
-            await asyncio.wait_for(adapter.start(list(assets)), _ADAPTER_START_TIMEOUT_S)
+            await asyncio.wait_for(adapter.start(list(assets), **kwargs), _ADAPTER_START_TIMEOUT_S)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -304,25 +319,33 @@ async def _start_adapter(adapter: ExchangeAdapter, assets: list[str]) -> None:
             await asyncio.sleep(delay)
             delay = min(_ADAPTER_RETRY_MAX_S, delay * 2.0)
             continue
-        log.info("%s: started (%d assets)", adapter.name, len(assets))
+        log.info("%s: started (%d assets%s)", adapter.name, len(assets), ", execution-only" if ws_assets == 0 else "")
         return
 
 
-def _adapters_to_start(ctx: AppContext) -> list[ExchangeAdapter]:
-    """Market adapters plus LIVE execution adapters (paper adapters wrap the
-    market ones and need no start of their own)."""
-    out: list[ExchangeAdapter] = list(ctx.adapters.values())
-    seen = {id(a) for a in out}
+def _adapters_to_start(ctx: AppContext) -> list[tuple[ExchangeAdapter, int | None]]:
+    """``(adapter, ws_assets)`` for every adapter ``run_app`` starts and stops.
+
+    Market adapters stream the watchlist (``None`` = the full ``settings.ws_assets``
+    budget).  Real execution adapters - LIVE, and the Bybit demo adapter used as
+    the paper venue - are started **execution-only** (``0``): they load markets,
+    resolve symbols and assert the demo host, but open no streams of their own;
+    their books and health come from the market adapter of the same exchange
+    (``market_source``).  One stream set, one health object, one HEALTH/BOOK
+    publisher per exchange.  ``PaperAdapter`` wraps the market adapter and needs
+    no start of its own."""
+    out: list[tuple[ExchangeAdapter, int | None]] = [(a, None) for a in ctx.adapters.values()]
+    seen = {id(a) for a, _ in out}
     for adapter in ctx.exec_adapters.get(Mode.LIVE, {}).values():
         if id(adapter) not in seen:
-            out.append(adapter)
+            out.append((adapter, 0))
             seen.add(id(adapter))
     # a real demo adapter used as the paper venue (paper_engine == "bybit_demo")
     for name, adapter in ctx.exec_adapters.get(Mode.PAPER, {}).items():
         if id(adapter) in seen or getattr(adapter, "inner", None) is not None:
             continue
         if isinstance(adapter, ExchangeAdapter):
-            out.append(adapter)
+            out.append((adapter, 0))
             seen.add(id(adapter))
     return out
 
@@ -493,8 +516,10 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
         log.info("watchlist: %s", ", ".join(ctx.watchlist))
 
         # ---- adapters (background, never block the UI) -------------------
-        for adapter in _adapters_to_start(ctx):
-            helpers.append(asyncio.create_task(_start_adapter(adapter, ctx.watchlist), name=f"start-{adapter.name}"))
+        for adapter, ws_assets in _adapters_to_start(ctx):
+            helpers.append(
+                asyncio.create_task(_start_adapter(adapter, ctx.watchlist, ws_assets), name=f"start-{adapter.name}")
+            )
 
         # ---- engine ------------------------------------------------------
         await ctx.pipeline.start()
@@ -569,7 +594,7 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
         if ctx.recorder is not None:
             await _guarded("recorder stop", ctx.recorder.stop())
         await _guarded("pipeline stop", ctx.pipeline.stop())
-        stops = [_guarded(f"{a.name} stop", a.stop(), timeout_s=_SERVER_STOP_S) for a in _adapters_to_start(ctx)]
+        stops = [_guarded(f"{a.name} stop", a.stop(), timeout_s=_SERVER_STOP_S) for a, _ in _adapters_to_start(ctx)]
         if stops:
             await asyncio.gather(*stops, return_exceptions=True)
         try:

@@ -285,6 +285,14 @@ class CcxtAdapter(ExchangeAdapter):
 ```
 * Two ccxt.pro instances: **public** (no keys) for market data, **private**
   (keys) only when `creds.present` and `cfg.role == EXECUTION`.
+* `market_source: ExchangeAdapter | None` (set by `registry.build_execution_adapters`
+  on the LIVE adapter and on the Bybit demo paper adapter): the market adapter of
+  the same exchange.  When set, `health` **is** the market adapter's object (one
+  per exchange: stream liveness / `stale` from the market stream, order / REST
+  latency EWMAs and rate-limit back-off from both) and `order_book()` falls back
+  to its cached book, so `revalidate` reads the live book without a second stream.
+  `start(assets, ws_assets=0)` = execution-only (no `_book_loop` / `_trades_loop`
+  / `_health_loop`; `fetch_order_book` on the own public instance still works).
 * `cfg.demo` + bybit → `exchange.enable_demo_trading(True)` on the private
   instance; assert the resulting REST base contains `api-demo` or raise.  Never
   send a live order from a demo-configured adapter to a non-demo host.
@@ -578,8 +586,12 @@ Integration decisions (implemented):
   build are logged and set to `None` (the app still runs).
 * `run_app(ctx, seconds=None, *, serve=True) -> int`: `resolve_watchlist` (20 s
   bound, falls back to `settings.watchlist`, never empty) → every market adapter
-  (and LIVE execution adapter) is started in a **background task with retry**
-  (5 → 60 s backoff; a dead exchange never blocks the UI) → `pipeline.start()`,
+  is started in a **background task with retry** (5 → 60 s backoff; a dead
+  exchange never blocks the UI); real execution adapters (LIVE, and the Bybit
+  demo adapter used as the paper venue) are started the same way but
+  **execution-only** (`start(assets, ws_assets=0)`: markets loaded, symbols
+  resolved, demo host asserted, no streams and no health loop of their own -
+  `_adapters_to_start(ctx)` yields `(adapter, ws_assets)` pairs) → `pipeline.start()`,
   recorder, Telegram, ticker poller (watchlist first, the common universe is
   added in the background once `resolve_universe` succeeds) → uvicorn
   `Server.serve()` **inside the same event loop** (signals are owned by the app,
