@@ -2,9 +2,13 @@
 
 ``PaperAdapter`` wraps a market-data adapter (``inner``: usually a
 ``CcxtAdapter`` without credentials) and shares its books and health.  Orders
-are filled against the inner adapter's CURRENT order book after a simulated
+are filled against the inner adapter's LATEST order book after a simulated
 network latency (inner order-latency EWMA or ``settings.default_api_latency_ms``
-with +-20 % jitter from a seeded RNG).
+with +-20 % jitter from a seeded RNG) - and only while that book is no older
+than ``settings.max_data_age_ms``.  A real venue has no price when the feed is
+down, so neither has the paper venue (hard rule 1): on a missing or stale
+book MARKET / IOC / FOK orders are rejected (``OrderRejected``) before any
+balance moves, and a resting GTC simply waits for fresh data.
 
 * LIMIT IOC  - fills the levels within the limit price, the rest is CANCELLED
   (``filled`` and ``fills`` are kept; a PARTIALLY_FILLED update is published first).
@@ -29,9 +33,9 @@ from .. import events
 from ..clock import Clock
 from ..config import Settings
 from ..events import EventBus
-from ..models import Balance, ExchangeHealth, Fees, Order, OrderBook, OrderRequest, OrderStatus, Ticker
+from ..models import Balance, ExchangeHealth, Fees, Order, OrderBook, OrderRequest, OrderStatus, OrderType, Ticker, TimeInForce
 from ._fill import Ledger, PositionBook, SimBroker
-from .base import ExchangeAdapter
+from .base import ExchangeAdapter, OrderRejected
 
 log = logging.getLogger(__name__)
 
@@ -194,15 +198,35 @@ class PaperAdapter(ExchangeAdapter):
         base_ms = self.inner.health.order_latency_ms or self.settings.default_api_latency_ms
         return max(0.0, float(base_ms)) / 1000.0 * self._rng.uniform(0.8, 1.2)
 
+    def _fresh_book(self, symbol: str) -> OrderBook | None:
+        """The inner book for ``symbol`` when it is no older than
+        ``settings.max_data_age_ms``; None when missing or stale."""
+        book = self.inner.order_book(symbol)
+        if book is None or book.age_ms(self.clock.mono()) > float(self.settings.max_data_age_ms):
+            return None
+        return book
+
+    def _no_fresh_book(self, symbol: str) -> OrderRejected:
+        cached = self.inner.order_book(symbol)
+        age = f"{cached.age_ms(self.clock.mono()):.0f} ms old" if cached is not None else "missing"
+        return OrderRejected(
+            f"{self.name}: no fresh order book for {symbol} ({age}, max {float(self.settings.max_data_age_ms):.0f} ms)"
+        )
+
     async def place_order(self, req: OrderRequest, *, reduce_only: bool = False) -> Order:
-        """Simulate ``req`` against the current inner book after a simulated
-        latency.  ``reduce_only`` (swap only) closes a position without flipping."""
+        """Simulate ``req`` against the latest fresh inner book after a
+        simulated latency (see module doc for stale books).  ``reduce_only``
+        (swap only) closes a position without flipping."""
         sent_mono, sent_ts = self.clock.mono(), self.clock.wall()
         latency = self._latency_s()
         if latency > 0:
             await asyncio.sleep(latency)
         self._mark_order_latency(latency * 1000.0)
-        book = self.inner.order_book(req.symbol)
+        book = self._fresh_book(req.symbol)
+        if book is None and not (req.type == OrderType.LIMIT and req.tif == TimeInForce.GTC):
+            err = self._no_fresh_book(req.symbol)
+            log.warning("%s paper %s %s %s rejected: %s", self.name, req.type.value, req.side.value, req.symbol, err)
+            raise err
         fee = (await self.inner.fees(req.symbol)).taker
         order, statuses = self._broker.place(
             req, book, fee, reduce_only=reduce_only, sent_mono=sent_mono, sent_ts=sent_ts
@@ -219,8 +243,9 @@ class PaperAdapter(ExchangeAdapter):
         return order
 
     async def fetch_order(self, order_id: str, symbol: str) -> Order:
-        """Resting GTC orders are re-checked against the latest inner book."""
-        order, changed = self._broker.refresh(order_id, self.inner.order_book(symbol))
+        """Resting GTC orders are re-checked against the latest FRESH inner
+        book (a stale book never fills anything)."""
+        order, changed = self._broker.refresh(order_id, self._fresh_book(symbol))
         if changed:
             if order.first_fill_mono is not None and order.sent_mono is not None:
                 self._mark_fill_latency(max(0.0, (order.first_fill_mono - order.sent_mono) * 1000.0))

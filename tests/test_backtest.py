@@ -25,11 +25,14 @@ def rec(t: float, ex: str, mid: float, size: float = 50.0) -> dict[str, Any]:
     return {"t": T0 + t, "ex": ex, "asset": "BTC", "symbol": SYMS[ex], "ets": T0 + t - 0.05, "b": bids, "a": asks}
 
 
-def scenario(catch_up: bool = True, kraken_gap: bool = False) -> list[dict[str, Any]]:
+def scenario(catch_up: bool = True, kraken_gap: bool = False, until: float = 12.1) -> list[dict[str, Any]]:
     """binance + kucoin jump +2 % at t=5; kraken (target) lags at 100.0, ticks
     to 100.2 at t=5.2, drifts to 100.5 and catches up to 101.5 at t=8 (or
     never, when ``catch_up`` is False).  ``kraken_gap`` removes the kraken
-    books between t=4.5 and t=8 (stale target at entry time)."""
+    books between t=4.5 and t=8 (stale target at entry time).  After t=12 the
+    movers go quiet while kraken keeps streaming every 0.5 s until ``until``
+    (a timeout exit needs a fresh target book; stale movers are a silent
+    reset of the episode, not a reversion)."""
     out: list[dict[str, Any]] = []
     t = 0.0
     while t < 4.6:
@@ -51,6 +54,9 @@ def scenario(catch_up: bool = True, kraken_gap: bool = False) -> list[dict[str, 
     while t < 12.1:
         out.append(rec(t, "binance", 102.0))
         out.append(rec(t, "kucoin", 102.0))
+        out.append(rec(t, "kraken", 101.5 if catch_up else 100.2))
+        t += 0.5
+    while t < until:
         out.append(rec(t, "kraken", 101.5 if catch_up else 100.2))
         t += 0.5
     return out
@@ -115,26 +121,44 @@ async def test_end_to_end_entry_at_t_plus_latency_and_limit_exit(tmp_path: Path)
 
 
 def test_timeout_path_exits_at_market_with_negative_net(tmp_path: Path):
-    records = scenario(catch_up=False)
+    records = scenario(catch_up=False, until=46.1)
     path = write(tmp_path / "flat.jsonl", records)
     report = run_backtest([str(path)], make_settings(sell_timeout_s=20.0))
     assert report["opportunities"] == 1 and report["executed"] == 1 and report["closed"] == 1
     trade = report["trades"][0]
     assert trade["exit_type"] == "market" and trade["state"] == "CLOSED"
-    assert trade["execution_time_s"] == pytest.approx(20.0)
-    assert trade["exit_price"] == pytest.approx(100.2 * (1 - 0.0001))  # the last kraken book
+    # entry at t=5.35; the timeout is processed on the first tick after t=25.35 (books every 0.5 s)
+    assert trade["execution_time_s"] == pytest.approx(20.0, abs=0.5)
+    assert trade["exit_price"] == pytest.approx(100.2 * (1 - 0.0001))  # the kraken book at that moment
     assert report["realized_net_mean"] < 0 and report["pnl_quote"] < 0
     assert report["expected_net_mean"] > 0
-    assert report["false_signals"] >= 1  # the movers reverted and kraken never caught up
+    # the movers held +2 % until the data ended and kraken never caught up: a move that
+    # merely outlives the window is not a reversion, so it is NOT a false signal
+    assert report["false_signals"] == 0
     assert report["expired"] == 0  # the opportunity was executed, not expired
 
 
 def test_hold_policy_waits_until_max_hold(tmp_path: Path):
-    path = write(tmp_path / "flat.jsonl", scenario(catch_up=False))
+    path = write(tmp_path / "flat.jsonl", scenario(catch_up=False, until=46.1))
     report = run_backtest([str(path)], make_settings(sell_timeout_s=20.0, exit_on_timeout="hold", max_hold_s=40.0))
     assert report["closed"] == 1
-    assert report["trades"][0]["execution_time_s"] == pytest.approx(40.0)
+    assert report["trades"][0]["execution_time_s"] == pytest.approx(40.0, abs=0.5)
     assert report["trades"][0]["exit_type"] == "market"
+
+
+def test_timeout_exit_without_a_fresh_book_fails_with_the_position_open(tmp_path: Path):
+    """The recording ends at t=12 while the exit is due at t~25: there is no
+    book younger than max_data_age_ms to fill a market exit on, so the paper
+    venue refuses (as a real venue outage would) and the trade ends FAILED
+    with the position open - never CLOSED at a 13 s old price."""
+    path = write(tmp_path / "flat.jsonl", scenario(catch_up=False))
+    report = run_backtest([str(path)], make_settings(sell_timeout_s=20.0))
+    assert report["opportunities"] == 1 and report["executed"] == 1
+    assert report["closed"] == 0 and report["failed"] == 1
+    trade = report["trades"][0]
+    assert trade["state"] == "FAILED" and trade["exit_type"] is None
+    assert "exit incomplete" in (trade.get("error") or "")
+    assert report["realized_net_mean"] is None
 
 
 def test_stale_target_book_at_entry_is_not_executed(tmp_path: Path):

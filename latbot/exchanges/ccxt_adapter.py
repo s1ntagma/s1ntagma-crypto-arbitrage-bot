@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Iterable
 
 import ccxt
@@ -47,10 +49,66 @@ from .base import ExchangeAdapter, ExchangeError, InsufficientBalance, OrderReje
 
 log = logging.getLogger(__name__)
 
+# WebSocket order-book depths each venue accepts (None = do not pass a limit).
+# A wrong value is rejected by the exchange ("limit can be one of: [...]"),
+# so we snap the configured book_depth to the nearest allowed value.
+_WS_BOOK_LIMITS: dict[str, list[int | None]] = {
+    "bybit": [1, 50, 200, 1000],
+    "kraken": [10, 25, 100, 500, 1000],
+    "gate": [5, 10, 20, 50, 100],
+    "gateio": [5, 10, 20, 50, 100],
+    "binance": [5, 10, 20],
+    "cryptocom": [10, 50],
+    "kucoin": [5, 50],
+    "bitget": [1, 5, 15],
+    "okx": [None],
+    "myokx": [None],
+    "coinbase": [None],
+    "bitstamp": [None],
+    "bitvavo": [None],
+    "htx": [None],
+    "mexc": [5, 10, 20],
+}
+_LIMIT_LIST_RE = re.compile(r"\[\s*([0-9]+(?:\s*,\s*[0-9]+)*)\s*\]")
+
+
+def snap_depth(requested: int | None, allowed: list[int | None]) -> int | None:
+    """Smallest allowed depth >= requested, else the largest allowed; None if the venue takes no limit."""
+    if not allowed or allowed == [None]:
+        return None
+    nums = sorted(x for x in allowed if isinstance(x, int))
+    if not nums:
+        return None
+    if not requested:
+        return nums[0]
+    for n in nums:
+        if n >= requested:
+            return n
+    return nums[-1]
+
+
+def allowed_depths_from_error(message: str) -> list[int] | None:
+    """Parse "limit can be one of: [1,50,200,1000]" style messages."""
+    m = _LIMIT_LIST_RE.search(message or "")
+    if not m:
+        return None
+    try:
+        return [int(x) for x in m.group(1).replace(" ", "").split(",")]
+    except ValueError:
+        return None
+
 ExchangeFactory = Callable[[str, dict[str, Any]], Any]
 
 _DEMO_MARKERS = ("api-demo", "demo", "testnet", "sandbox", "test")
 _TRADES_MAX_FAILURES = 3
+
+# Rate limits: floors per response kind, escalation on repeated hits (see _rate_limited)
+_RL_FLOOR_429_S = 1.0  # RateLimitExceeded (HTTP 429 / Binance -1003)
+_RL_FLOOR_DDOS_S = 5.0  # DDoSProtection (Kraken "EAPI:Rate limit exceeded", abuse responses)
+_RL_FLOOR_418_S = 120.0  # HTTP 418 = Binance IP ban: 2 min minimum, escalating to days
+_RL_ESCALATION_WINDOW_S = 60.0  # hits closer than this count as "still knocking"
+_RL_PENALTY_MAX_S = 300.0  # cap of the escalated (heuristic) penalty; a Retry-After header may say more
+_RL_HEADER_MAX_S = 3 * 86400.0  # sanity cap on Retry-After (Binance bans top out at 3 days)
 
 
 def _default_factory(name: str, opts: dict[str, Any]) -> Any:
@@ -85,6 +143,35 @@ def _rest_base(inst: Any) -> str:
             if isinstance(v, str):
                 return v
     return ""
+
+
+def _http_status(inst: Any) -> int | None:
+    """HTTP status of the latest REST response on ``inst`` (recorded by the
+    ``on_rest_response`` hook, see ``_install_status_hook``), else None."""
+    code = getattr(inst, "last_http_status_code", None) if inst is not None else None
+    try:
+        return int(code) if code is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _retry_after_s(inst: Any, now_wall: float) -> float | None:
+    """Seconds from the ``Retry-After`` header of the latest response on
+    ``inst`` (delta-seconds or an HTTP date), capped; None when absent."""
+    headers = getattr(inst, "last_response_headers", None) if inst is not None else None
+    if not isinstance(headers, dict):
+        return None
+    raw = next((v for k, v in headers.items() if str(k).lower() == "retry-after"), None)
+    if raw is None:
+        return None
+    text = str(raw).strip().split(",", 1)[0].strip()
+    value = _num(text)
+    if value is None:
+        try:
+            value = parsedate_to_datetime(text).timestamp() - now_wall
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+    return min(_RL_HEADER_MAX_S, max(0.0, float(value)))
 
 
 def _map_status(status: Any, filled: float, amount: float) -> OrderStatus:
@@ -127,6 +214,9 @@ class CcxtAdapter(ExchangeAdapter):
         self._factory: ExchangeFactory = exchange_factory or _default_factory
         self._backoff_min = backoff_min_s
         self._backoff_max = backoff_max_s
+        self._ws_depth: int | None = snap_depth(cfg.book_depth, _WS_BOOK_LIMITS.get(cfg.ccxt_name, [cfg.book_depth]))
+        self._err_log_mono: dict[str, float] = {}
+        self._err_counts: dict[str, int] = {}
         self._health_interval = health_interval_s
         opts = self._build_opts()
         self.public: Any = self._factory(cfg.ccxt_name, opts)
@@ -140,6 +230,10 @@ class CcxtAdapter(ExchangeAdapter):
             self.private = self._factory(cfg.ccxt_name, popts)
             if cfg.demo:
                 self._enable_demo(self.private)
+        for inst in (self.public, self.private):
+            self._install_status_hook(inst)
+        self._rl_hits = 0  # consecutive rate-limit hits (public + private: one IP budget)
+        self._rl_last_mono: float | None = None
         self._symbols: dict[str, str] = {}  # asset -> symbol
         self._assets: dict[str, str] = {}  # symbol -> asset
         self._books: dict[str, OrderBook] = {}  # by asset
@@ -150,6 +244,7 @@ class CcxtAdapter(ExchangeAdapter):
         self._orders_by_client: dict[str, Order] = {}
         self._fee_fetched: set[str] = set()
         self._markets_loaded = False
+        self._universe_resolved = False  # resolve_assets(None) ran on the current markets
 
     # ---- construction helpers ---------------------------------------------------
     def _build_opts(self) -> dict[str, Any]:
@@ -160,6 +255,32 @@ class CcxtAdapter(ExchangeAdapter):
         if self.cfg.hostname:
             opts["hostname"] = self.cfg.hostname
         return opts
+
+    @staticmethod
+    def _install_status_hook(inst: Any) -> None:
+        """Remember the HTTP status of the latest REST response as
+        ``inst.last_http_status_code``.  ccxt keeps the response headers but
+        not the status, and a Binance IP ban (HTTP 418, body code -1003) is
+        raised as the very same ``RateLimitExceeded`` as a plain 429."""
+        if inst is None:
+            return
+        original = getattr(inst, "on_rest_response", None)
+        if not callable(original):
+            return
+
+        def on_rest_response(code: Any, reason: Any, url: Any, method: Any, response_headers: Any, response_body: Any,
+                             request_headers: Any, request_body: Any) -> Any:
+            try:
+                inst.last_http_status_code = int(code)
+            except (TypeError, ValueError):
+                inst.last_http_status_code = None
+            return original(code, reason, url, method, response_headers, response_body, request_headers, request_body)
+
+        try:
+            inst.last_http_status_code = None
+            inst.on_rest_response = on_rest_response
+        except Exception as exc:  # noqa: BLE001
+            log.debug("status hook not installed: %s", type(exc).__name__)
 
     def _enable_demo(self, inst: Any) -> None:
         name = self.cfg.ccxt_name
@@ -208,6 +329,7 @@ class CcxtAdapter(ExchangeAdapter):
             return
         await self.public.load_markets()
         self._markets_loaded = True
+        self._universe_resolved = False
         if self.private is not None and hasattr(self.private, "set_markets"):
             try:
                 self.private.set_markets(self.public.markets, getattr(self.public, "currencies", None))
@@ -262,6 +384,8 @@ class CcxtAdapter(ExchangeAdapter):
             self._symbols[asset] = sym
             self._assets[sym] = asset
             out[asset] = sym
+        if assets is None:
+            self._universe_resolved = True
         return out
 
     # ---- lifecycle --------------------------------------------------------------------
@@ -343,10 +467,19 @@ class CcxtAdapter(ExchangeAdapter):
         )
 
     def _on_stream_error(self, what: str, symbol: str, exc: BaseException, backoff: float) -> None:
-        log.warning(
-            "%s: %s stream %s failed (%s: %s); retry in %.0f s",
-            self.name, what, symbol, type(exc).__name__, str(exc)[:100], backoff,
-        )
+        """Log one WARNING per (stream kind) per 60 s with a repeat counter; the rest at DEBUG."""
+        key = what
+        now = self.clock.mono()
+        self._err_counts[key] = self._err_counts.get(key, 0) + 1
+        last = self._err_log_mono.get(key)
+        if last is None or now - last >= 60.0:
+            log.warning(
+                "%s: %s stream failed (%s: %s) [%d failures, last %s]; retry in %.0f s",
+                self.name, what, type(exc).__name__, str(exc)[:100], self._err_counts[key], symbol, backoff,
+            )
+            self._err_log_mono[key] = now
+        else:
+            log.debug("%s: %s stream %s failed (%s: %s)", self.name, what, symbol, type(exc).__name__, str(exc)[:100])
         self._mark_error(type(exc).__name__)
         self.health.ws_connected = False
 
@@ -354,7 +487,10 @@ class CcxtAdapter(ExchangeAdapter):
         backoff = self._backoff_min
         while True:
             try:
-                ob = await self.public.watch_order_book(symbol, self.cfg.book_depth)
+                if self._ws_depth is None:
+                    ob = await self.public.watch_order_book(symbol)
+                else:
+                    ob = await self.public.watch_order_book(symbol, self._ws_depth)
                 book = self._normalise_book(asset, symbol, ob)
                 self._books[asset] = book
                 self._mark_msg(book.ts.exchange_ts, book.ts.recv_ts, book.ts.recv_mono)
@@ -363,6 +499,13 @@ class CcxtAdapter(ExchangeAdapter):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
+                allowed = allowed_depths_from_error(str(exc)) if isinstance(exc, ccxt.BadRequest) else None
+                if allowed:
+                    new_depth = snap_depth(self.cfg.book_depth, allowed)
+                    if new_depth != self._ws_depth:
+                        log.info("%s: order book depth %s rejected, using %s", self.name, self._ws_depth, new_depth)
+                        self._ws_depth = new_depth
+                        continue
                 self._on_stream_error("book", symbol, exc, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, self._backoff_max)
@@ -384,6 +527,7 @@ class CcxtAdapter(ExchangeAdapter):
         backoff = self._backoff_min
         has = getattr(self.public, "has", None) or {}
         use_bids_asks = bool(has.get("watchBidsAsks"))
+        failures = 0
         while True:
             try:
                 if use_bids_asks:
@@ -398,10 +542,19 @@ class CcxtAdapter(ExchangeAdapter):
                 ticker = self._ticker_from(asset, symbol, raw)
                 self._mark_msg(ticker.ts.exchange_ts, ticker.ts.recv_ts, ticker.ts.recv_mono)
                 backoff = self._backoff_min
+                failures = 0
                 await self.bus.publish(events.TICKER, ticker)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
+                failures += 1
+                if use_bids_asks and failures >= 3:
+                    use_bids_asks = False  # watchBidsAsks unreliable on this venue: plain ticker stream
+                    log.info("%s: bbo stream %s falling back to watch_ticker", self.name, symbol)
+                if failures >= 8 and self.cfg.poll_tickers:
+                    log.info("%s: bbo stream %s gave up after %d failures; REST ticker polling covers it",
+                             self.name, symbol, failures)
+                    return
                 self._on_stream_error("bbo", symbol, exc, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, self._backoff_max)
@@ -477,7 +630,7 @@ class CcxtAdapter(ExchangeAdapter):
             raise
         except Exception as exc:  # noqa: BLE001
             self._mark_error(type(exc).__name__)
-            raise self._translate(exc) from exc
+            raise self._translate(exc, self.public) from exc
         self._mark_rest_latency((self.clock.mono() - t0) * 1000.0)
         return res
 
@@ -492,12 +645,15 @@ class CcxtAdapter(ExchangeAdapter):
         return self._ticker_from(asset, symbol, raw)
 
     async def fetch_tickers(self, assets: Iterable[str] | None = None) -> dict[str, Ticker]:
-        """asset -> Ticker for every resolved market in ONE REST call."""
+        """asset -> Ticker in ONE REST call: for ``assets``, or (``None``) for
+        EVERY listed market - whatever ``start()`` / earlier calls resolved.
+        ``registry.resolve_universe`` relies on the ``None`` form returning the
+        whole universe after the adapter was started with the watchlist."""
         await self._load_markets()
         if assets is not None:
             wanted = self.resolve_assets(assets)
         else:
-            if not self._symbols:
+            if not self._universe_resolved:
                 self.resolve_assets(None)
             wanted = dict(self._symbols)
         if not wanted:
@@ -564,16 +720,53 @@ class CcxtAdapter(ExchangeAdapter):
         return fees
 
     # ---- error mapping ----------------------------------------------------------------------
-    def _translate(self, exc: BaseException) -> ExchangeError:
-        """Map a ccxt exception to the typed errors of ``base.py``."""
+    def _rate_limited(self, exc: BaseException, inst: Any) -> float:
+        """Record a rate-limit hit; returns how long to stay away (seconds).
+
+        Floors: 1 s for a plain 429 (``RateLimitExceeded``), 5 s for a DDoS /
+        abuse response, 2 min for an HTTP 418 IP ban.  The exchange's
+        ``Retry-After`` header wins when it says more.  Hits closer than
+        ``_RL_ESCALATION_WINDOW_S`` double the penalty (capped at
+        ``_RL_PENALTY_MAX_S``) - the exchanges' own contract: keep knocking
+        and the ban grows - and a quiet period resets it.  The public and
+        the private instance share the counter (one IP budget), and
+        ``health.rate_limited_until_mono`` never moves earlier.
+        """
+        now = self.clock.mono()
+        status = _http_status(inst)
+        header = _retry_after_s(inst, self.clock.wall())
+        floor = _RL_FLOOR_429_S if isinstance(exc, ccxt.RateLimitExceeded) else _RL_FLOOR_DDOS_S
+        if status == 418:
+            floor = max(floor, _RL_FLOOR_418_S)
+        if self._rl_last_mono is not None and now - self._rl_last_mono <= _RL_ESCALATION_WINDOW_S:
+            self._rl_hits += 1
+        else:
+            self._rl_hits = 1
+        self._rl_last_mono = now
+        penalty = min(_RL_PENALTY_MAX_S, floor * (2.0 ** (self._rl_hits - 1)))
+        retry = max(floor, penalty, header or 0.0)
+        until = now + retry
+        prev = self.health.rate_limited_until_mono
+        if prev is not None and prev > until:
+            until = prev
+        self.health.rate_limited_until_mono = until
+        self.health.reason = f"rate limited (HTTP {status or '?'}, hit {self._rl_hits}): backing off {until - now:.0f} s"
+        log.warning(
+            "%s: rate limited (%s, HTTP %s, Retry-After %s, hit %d) - no requests for %.0f s",
+            self.name, type(exc).__name__, status or "?", f"{header:.0f}" if header is not None else "-", self._rl_hits, until - now,
+        )
+        return until - now
+
+    def _translate(self, exc: BaseException, inst: Any = None) -> ExchangeError:
+        """Map a ccxt exception to the typed errors of ``base.py``.  ``inst``
+        is the ccxt instance that raised (for the rate-limit response details)."""
         msg = f"{type(exc).__name__}: {str(exc)[:200]}"
         if isinstance(exc, ExchangeError):
             return exc
         if isinstance(exc, ccxt.InsufficientFunds):
             return InsufficientBalance(msg)
         if isinstance(exc, (ccxt.RateLimitExceeded, ccxt.DDoSProtection)):
-            retry = 1.0 if isinstance(exc, ccxt.RateLimitExceeded) else 5.0
-            self.health.rate_limited_until_mono = self.clock.mono() + retry
+            retry = self._rate_limited(exc, inst)
             return RateLimited(retry_after_s=retry, msg=msg)
         if isinstance(exc, ccxt.InvalidOrder):
             return OrderRejected(msg)
@@ -589,7 +782,7 @@ class CcxtAdapter(ExchangeAdapter):
             raise
         except Exception as exc:  # noqa: BLE001
             self._mark_error(type(exc).__name__)
-            raise self._translate(exc) from exc
+            raise self._translate(exc, self.private) from exc
 
     # ---- orders ---------------------------------------------------------------------------------
     @property
@@ -748,7 +941,7 @@ class CcxtAdapter(ExchangeAdapter):
             return order
         except Exception as exc:  # noqa: BLE001
             self._mark_error(type(exc).__name__)
-            err = self._translate(exc)
+            err = self._translate(exc, priv)
             order.status = OrderStatus.REJECTED if isinstance(err, (OrderRejected, InsufficientBalance)) else OrderStatus.FAILED
             order.error = str(err)[:200]
             order.done_mono = self.clock.mono()
@@ -792,7 +985,7 @@ class CcxtAdapter(ExchangeAdapter):
                 raise OrderRejected(f"{self.name}: order {order_id} not found") from exc
         except Exception as exc:  # noqa: BLE001
             self._mark_error(type(exc).__name__)
-            raise self._translate(exc) from exc
+            raise self._translate(exc, priv) from exc
         raw = raw if isinstance(raw, dict) else {}
         if not raw.get("id"):
             raw = dict(raw, id=order_id)

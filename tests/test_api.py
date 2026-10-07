@@ -222,6 +222,7 @@ class StubExecution:
         self.settings = settings
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self._trades: list[TradeRecord] = [make_trade()]
+        self.manual: dict[str, str] = {}  # opp_id -> trade_id of an open manual position
 
     def _opp(self, opp_id: str) -> Opportunity:
         opp = self.opps.get(opp_id)
@@ -232,12 +233,36 @@ class StubExecution:
     async def select_manual(self, opp_id: str) -> dict[str, Any]:
         self.calls.append(("select_manual", (opp_id,), {}))
         opp = self._opp(opp_id)
-        opp.state = OppState.MANUAL_SELECTED
+        if opp_id not in self.manual:  # like the engine: an open position is reported, not re-selected
+            opp.state = OppState.MANUAL_SELECTED
         return await self.manual_support(opp_id)
 
     async def manual_support(self, opp_id: str) -> dict[str, Any]:
         self.calls.append(("manual_support", (opp_id,), {}))
         opp = self._opp(opp_id)
+        if opp_id in self.manual:
+            return {
+                "opp_id": opp_id,
+                "valid": True,
+                "status": "in_position",
+                "side": "LONG",
+                "exit_side": "SELL",
+                "exchange": opp.target_exchange,
+                "symbol": opp.target_symbol,
+                "entry_price_now": 102_140.0,
+                "exit_target_now": 107_065.0,
+                "net_now_pct": 4.7,
+                "expected_slippage_pct": 0.04,
+                "remaining_s": 2.0,
+                "human": {"light": "yellow", "label": "MEDIUM", "est_execution_s": 7.0},
+                "capital": 100.0,
+                "base_amount": 100.0 / 102_150.0,
+                "expired": False,
+                "message": "🟢 IN POSITION - report your exit price",
+                "trade_id": self.manual[opp_id],
+                "entry_price": 102_150.0,
+                "quote_amount": 100.0,
+            }
         return {
             "opp_id": opp_id,
             "valid": opp.is_active,
@@ -263,23 +288,25 @@ class StubExecution:
             raise ValueError("price must be > 0")
         opp = self._opp(opp_id)
         opp.state = OppState.EXECUTING
-        return {"opp_id": opp_id, "exit_target": 107_065.0, "exit_side": "sell", "base_amount": quote_amount / price, "estimated_fees_quote": 0.2}
+        self.manual[opp_id] = "t_manual"
+        return {"ok": True, "opp_id": opp_id, "trade_id": "t_manual", "exit_target": 107_065.0, "exit_side": "sell", "base_amount": quote_amount / price, "estimated_fees_quote": 0.2}
 
     async def manual_exited(self, opp_id: str, price: float) -> TradeRecord:
         self.calls.append(("manual_exited", (opp_id, price), {}))
         opp = self._opp(opp_id)
+        self.manual.pop(opp_id, None)
         opp.state = OppState.CLOSED
         trade = make_trade("t_manual", opp_id)
         trade.actual_exit_price = price
         self._trades.insert(0, trade)
         return trade
 
-    async def select_auto(self, opp_id: str) -> dict[str, Any]:
-        self.calls.append(("select_auto", (opp_id,), {}))
+    async def select_auto(self, opp_id: str, wait: bool = True) -> dict[str, Any]:
+        self.calls.append(("select_auto", (opp_id,), {"wait": wait}))
         opp = self._opp(opp_id)
         opp.state = OppState.AUTO_SELECTED
         if self.settings.auto_confirm:
-            return await self.confirm_auto(opp_id, wait=False)
+            return await self.confirm_auto(opp_id, wait=wait)
         return {
             "confirmation_required": True,
             "snapshot": {
@@ -305,7 +332,15 @@ class StubExecution:
         opp = self._opp(opp_id)
         opp.state = OppState.EXECUTING
         trade = make_trade("t_auto", opp_id, OppState.EXECUTING)
-        return {"ok": True, "state": "EXECUTING", "reason": "", "trade": trade}
+        return {"ok": True, "started": not wait, "state": "EXECUTING", "reason": "", "trade": trade}
+
+    async def deselect_auto(self, opp_id: str, reason: str = "user backed out of AUTO confirmation") -> dict[str, Any]:
+        self.calls.append(("deselect_auto", (opp_id,), {}))
+        opp = self._opp(opp_id)
+        if opp.state is not OppState.AUTO_SELECTED:
+            return {"ok": False, "opp_id": opp_id, "state": opp.state.value, "reason": f"nothing to deselect in state {opp.state.value}"}
+        opp.state = OppState.VALID
+        return {"ok": True, "opp_id": opp_id, "state": "VALID", "reason": reason}
 
     async def cancel(self, opp_id: str, reason: str = "user") -> dict[str, Any]:
         self.calls.append(("cancel", (opp_id,), {"reason": reason}))
@@ -437,8 +472,15 @@ def test_ui_contains_spec_elements(client):
                    'data-quick="MANUAL"', 'data-quick="AUTO"', 'data-quick="EXPIRED"', "f-exchange", "f-human", "f-bot"):
         assert needle in html, needle
     js = client.get("/static/app.js").text
-    for needle in ("TOO FAST FOR HUMAN", "OPPORTUNITY EXPIRED", "CURRENT NET", "EXPECTED PROFIT", "#opp\\/", "hashchange", "300", "textContent"):
+    for needle in ("TOO FAST FOR HUMAN", "OPPORTUNITY EXPIRED", "CURRENT NET", "EXPECTED PROFIT", "#opp\\/", "hashchange", "300", "textContent",
+                   # SELL step of an open manual position is never "too fast"; it can be resumed after a reload
+                   "IN POSITION", "WINDOW CLOSED", "in_position", "REPORT EXIT",
+                   # backing out of the AUTO confirmation is not a cancel
+                   "auto/deselect",
+                   # unchecked risk / balance is grey, never green
+                   "risk.ok === true", "not checked"):
         assert needle in js, needle
+    assert "risk.ok === false ? '🔴 ' + (risk.reason || 'blocked') : '🟢 OK'" not in js  # anything-not-false-is-green
     assert ".innerHTML" not in js and "insertAdjacentHTML" not in js  # all data reaches the DOM via textContent
 
 
@@ -555,6 +597,29 @@ def test_manual_flow(client, ctx):
     assert t["side"] == "LONG"
 
 
+def test_manual_reselect_returns_open_position(client, ctx):
+    """A page reload / second tab re-posts ``/manual`` for an EXECUTING manual
+    opportunity and must get the open position back (SELL step), not a fresh
+    BUY step and not EXPIRED; the exit can then be reported and closes it."""
+    assert client.post("/api/opportunities/opp_1/manual").status_code == 200
+    r = client.post("/api/opportunities/opp_1/manual/entered", json={"price": 102_150, "quote_amount": 100})
+    assert r.status_code == 200 and r.json()["ok"] is True and r.json()["trade_id"] == "t_manual"
+    assert ctx.opps.get("opp_1").state is OppState.EXECUTING
+
+    r = client.post("/api/opportunities/opp_1/manual")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["valid"] is True and d["expired"] is False and d["status"] == "in_position"
+    assert d["trade_id"] == "t_manual" and d["entry_price"] == 102_150.0 and d["quote_amount"] == 100.0 and d["exit_side"] == "SELL"
+    assert ctx.opps.get("opp_1").state is OppState.EXECUTING  # re-selecting never disturbs the open position
+    assert client.get("/api/opportunities/opp_1/manual/support").json()["status"] == "in_position"
+
+    r = client.post("/api/opportunities/opp_1/manual/exited", json={"price": 106_000})
+    assert r.status_code == 200 and r.json()["id"] == "t_manual" and r.json()["state"] == "CLOSED"
+    assert ctx.opps.get("opp_1").state is OppState.CLOSED and ctx.execution.manual == {}
+    assert client.get("/api/opportunities/opp_1/manual/support").json()["status"] != "in_position"
+
+
 def test_manual_validation_errors(client):
     r = client.post("/api/opportunities/opp_1/manual/entered", json={"quote_amount": 100})
     assert r.status_code == 400 and "price" in r.json()["error"]
@@ -607,8 +672,36 @@ def test_auto_flow(client, ctx):
 
 def test_auto_with_auto_confirm_executes_immediately(client, ctx):
     ctx.settings.auto_confirm = True
-    d = client.post("/api/opportunities/opp_1/auto").json()
+    r = client.post("/api/opportunities/opp_1/auto")
+    assert r.status_code == 200
+    d = r.json()
     assert "confirmation_required" not in d and d["state"] == "EXECUTING"
+    # the route never long-polls the whole trade: it starts it in the background like /auto/confirm
+    assert d["ok"] is True and d["started"] is True
+    assert ("select_auto", ("opp_1",), {"wait": False}) in ctx.execution.calls
+    assert ("confirm_auto", ("opp_1",), {"wait": False}) in ctx.execution.calls
+
+
+def test_auto_deselect_backs_out_without_cancelling(client, ctx):
+    """[BACK] / Escape on the AUTO confirmation returns the opportunity to VALID
+    (still on the board, MANUAL possible) - it must never go through ``cancel``."""
+    d = client.post("/api/opportunities/opp_1/auto").json()
+    assert d["confirmation_required"] is True and ctx.opps.get("opp_1").state is OppState.AUTO_SELECTED
+    r = client.post("/api/opportunities/opp_1/auto/deselect")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True and r.json()["state"] == "VALID" and r.json()["opp_id"] == "opp_1"
+    assert ctx.opps.get("opp_1").state is OppState.VALID
+    assert ("deselect_auto", ("opp_1",), {}) in ctx.execution.calls
+    assert not any(c[0] == "cancel" for c in ctx.execution.calls)
+    # nothing selected: business refusal passes through as 200 + ok False, state untouched
+    r = client.post("/api/opportunities/opp_1/auto/deselect")
+    assert r.status_code == 200 and r.json()["ok"] is False and ctx.opps.get("opp_1").state is OppState.VALID
+    assert client.post("/api/opportunities/nope/auto/deselect").status_code == 404
+    # an engine without the method answers 501, never a cancel
+    ctx.execution.deselect_auto = None
+    r = client.post("/api/opportunities/opp_1/auto/deselect")
+    assert r.status_code == 501 and "deselect" in r.json()["error"]
+    assert not any(c[0] == "cancel" for c in ctx.execution.calls)
 
 
 def test_engine_business_refusal_passes_through_as_200(client, ctx):

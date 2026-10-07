@@ -334,9 +334,6 @@ async def test_dashboard_merges_db_counters():
     class StubDb:
         def __init__(self) -> None:
             self.calls: list[str] = []
-
-        def __init__(self) -> None:
-            self.calls: list[str] = []
             # 4 trades today: 2 CLOSED (1 win, 1 loser), 1 FAILED, 1 still EXECUTING / CANCELLED
             self.row = {"opportunities_today": 5, "trades": 4, "failed": 1, "closed": 2, "wins": 1, "expired": 3}
 

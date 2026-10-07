@@ -569,6 +569,37 @@ async def test_select_auto_with_auto_confirm_executes_immediately() -> None:
     assert opp.state == OppState.CLOSED
 
 
+async def test_select_auto_with_auto_confirm_can_start_in_background() -> None:
+    """``wait=False`` (what the HTTP route passes) must not hold the caller for the
+    whole round trip: the trade runs as a tracked task and finishes on its own."""
+    env = make_env(make_settings(auto_confirm=True))
+    opp = env.opps.add(make_opp(env.clock))
+    res = await env.engine.select_auto(opp.id, wait=False)
+    assert "confirmation_required" not in res
+    assert res["ok"] is True and res["started"] is True and res["state"] == "EXECUTING"
+    assert opp.id in env.engine._tasks and not opp.is_terminal  # scheduled as a tracked task, caller not held
+    await wait_until(lambda: opp.state == OppState.CLOSED and opp.id not in env.engine._tasks)
+    trade = env.engine.trades()[0]
+    assert trade.state == OppState.CLOSED and opp.execution_id == trade.id
+    assert env.risk.open_trades() == 0
+
+
+async def test_select_auto_stale_book_snapshot_marks_risk_unchecked() -> None:
+    """Revalidation that fails before ``RiskManager.check`` leaves ``risk.ok`` None
+    (not checked) - never True.  The UI must not paint that green."""
+    env = make_env()
+    a = env.adapter()
+    a.books["BTC/USDT"] = make_book("BTC/USDT", env.clock, recv_mono=env.clock.mono() - 2.4)
+    a.rest_fail = True
+    opp = env.opps.add(make_opp(env.clock))
+    sel = await env.engine.select_auto(opp.id)
+    assert sel["ok"] is True and sel["confirmation_required"] is True
+    snap = sel["snapshot"]
+    assert snap["valid"] is False and "stale" in snap["reason"]
+    assert snap["risk"]["ok"] is None and snap["risk"]["allowed"] is None
+    assert snap["balance"]["free"] is None
+
+
 async def test_no_fill_cancelled() -> None:
     env = make_env(entry_fill_ratio=0.0)
     opp = env.opps.add(make_opp(env.clock))
@@ -883,6 +914,34 @@ async def test_cancel_selected_opportunity() -> None:
     assert (await env.engine.cancel("nope"))["ok"] is False
 
 
+async def test_deselect_auto_returns_to_valid_without_cancelling() -> None:
+    """Backing out of the AUTO confirmation is not a cancel: the opportunity goes
+    back to VALID, stays on the board and can be traded MANUAL (or AUTO) again."""
+    env = make_env()
+    opp = env.opps.add(make_opp(env.clock))
+    sel = await env.engine.select_auto(opp.id)
+    assert sel["confirmation_required"] is True and opp.state == OppState.AUTO_SELECTED
+    res = await env.engine.deselect_auto(opp.id)
+    assert res["ok"] is True and res["opp_id"] == opp.id and res["state"] == "VALID"
+    assert opp.state == OppState.VALID and opp.is_active
+    assert env.opps.states(opp.id) == [OppState.AUTO_SELECTED, OppState.VALID]
+    assert env.engine.trades() == [] and env.adapter().placed() == []
+    assert opp.id not in env.engine._plan and opp.id not in env.engine._expected
+    # the lag is still live: MANUAL on the same id works
+    support = await env.engine.select_manual(opp.id)
+    assert support["valid"] is True and opp.state == OppState.MANUAL_SELECTED
+    # any other state is left untouched
+    r = await env.engine.deselect_auto(opp.id)
+    assert r["ok"] is False and r["state"] == "MANUAL_SELECTED" and opp.state == OppState.MANUAL_SELECTED
+    assert (await env.engine.manual_entered(opp.id, 100.0, 50.0))["ok"] is True and opp.state == OppState.EXECUTING
+    r = await env.engine.deselect_auto(opp.id)
+    assert r["ok"] is False and opp.state == OppState.EXECUTING and env.risk.open_trades() == 1
+    closed = env.opps.add(make_opp(env.clock, state=OppState.CLOSED))
+    r = await env.engine.deselect_auto(closed.id)
+    assert r["ok"] is False and r["state"] == "CLOSED" and closed.state == OppState.CLOSED
+    assert (await env.engine.deselect_auto("nope"))["ok"] is False
+
+
 async def test_cancel_before_entry_aborts() -> None:
     env = make_env()
     opp = env.opps.add(make_opp(env.clock))
@@ -981,6 +1040,12 @@ async def test_manual_flow_to_closed() -> None:
     assert trade.actual_entry_price == 100.2
     in_pos = await env.engine.manual_support(opp.id)
     assert in_pos["valid"] is True and in_pos["status"] == "in_position" and in_pos["trade_id"] == trade.id
+    # everything a fresh client needs to rebuild the SELL step after a page reload / in another tab
+    assert in_pos["entry_price"] == 100.2 and in_pos["quote_amount"] == 100.0 and in_pos["exit_side"] == "SELL"
+    again = await env.engine.select_manual(opp.id)  # re-selecting MANUAL on the EXECUTING opp returns the open position
+    assert again["valid"] is True and again["expired"] is False and again["status"] == "in_position"
+    assert again["trade_id"] == trade.id and again["entry_price"] == 100.2 and again["quote_amount"] == 100.0
+    assert opp.state == OppState.EXECUTING and opp.execution_id == trade.id
     assert (await env.engine.cancel(opp.id))["ok"] is False  # position open: report the exit instead
     assert (await env.engine.manual_entered(opp.id, 100.0, 10.0))["ok"] is False  # once
 
@@ -1019,6 +1084,21 @@ async def test_manual_support_expired_and_too_fast_and_no_data() -> None:
     env.pipeline.fail = True
     p = await env.engine.manual_support(fast.id)
     assert p["valid"] is False and p["fresh"] is False and p["status"] == "no_data" and p["expired"] is False
+
+
+async def test_manual_support_stays_in_position_after_window_closes() -> None:
+    """Server contract the client must honour: an open manual position is never
+    'too fast' or 'expired' - only the remaining window shrinks to zero."""
+    env = make_env(make_settings(human_execution_time_s=7.0))
+    opp = env.opps.add(make_opp(env.clock, duration_s=10.0))
+    assert (await env.engine.manual_entered(opp.id, 100.2, 100.0))["ok"] is True
+    env.clock.advance(12.0)  # window closed, remaining 0 < human execution time
+    p = await env.engine.manual_support(opp.id)
+    assert p["fresh"] is True and p["valid"] is True and p["expired"] is False
+    assert p["status"] == "in_position" and p["remaining_s"] == 0.0
+    assert p["message"] == "🟢 IN POSITION - report your exit price"
+    assert p["human"]["est_execution_s"] == 7.0
+    assert opp.state == OppState.EXECUTING
 
 
 async def test_manual_entered_validation() -> None:
@@ -1181,6 +1261,69 @@ class OutageAdapter(StubAdapter):
             self.calls.append(("cancel-fail", order_id))
             raise RateLimited(retry_after_s=0.001, msg="rate limited")
         return await super().cancel_order(order_id, symbol)
+
+
+class RateLimitedOnceAdapter(StubAdapter):
+    """The first ``fetch_order`` of the GTC exit raises ``RateLimited``
+    (``retry_after_s``); every call is stamped with the loop time."""
+
+    def __init__(self, *args: Any, retry_after_s: float = 0.3, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.retry_after_s = retry_after_s
+        self.times: list[tuple[str, float]] = []
+        self.limited_at: float | None = None
+
+    def _stamp(self, what: str) -> None:
+        self.times.append((what, asyncio.get_running_loop().time()))
+
+    async def place_order(self, req: OrderRequest, *, reduce_only: bool = False) -> Order:
+        self._stamp("place-market" if req.type == OrderType.MARKET else "place-limit")
+        return await super().place_order(req, reduce_only=reduce_only)
+
+    async def fetch_order(self, order_id: str, symbol: str) -> Order:
+        order = self.orders[order_id]
+        if self.limited_at is None and order.type == OrderType.LIMIT and order.side == Side.SELL:  # the GTC exit
+            self.limited_at = asyncio.get_running_loop().time()
+            self._stamp("fetch-limited")
+            raise RateLimited(retry_after_s=self.retry_after_s, msg="rate limited")
+        self._stamp("fetch")
+        return await super().fetch_order(order_id, symbol)
+
+    async def cancel_order(self, order_id: str, symbol: str) -> Order:
+        self._stamp("cancel")
+        return await super().cancel_order(order_id, symbol)
+
+    def after_limit(self) -> list[tuple[str, float]]:
+        assert self.limited_at is not None
+        return [(w, t - self.limited_at) for w, t in self.times if t > self.limited_at and w != "fetch-limited"]
+
+
+async def test_wait_fill_backs_off_for_retry_after_instead_of_hammering_fetch_order() -> None:
+    env = make_env(make_settings(sell_timeout_s=1.0), adapter_cls=RateLimitedOnceAdapter, exit_mode="after_polls",
+                   exit_after_polls=2, retry_after_s=0.3)
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    a = env.adapter()
+    assert res["ok"] is True and trade.state == OppState.CLOSED, res
+    after = a.after_limit()
+    assert after and all(dt >= 0.3 - 0.02 for _, dt in after), after  # nothing sent during the retry window
+    assert [w for w, _ in after] == ["fetch", "fetch"]  # resumed polling, filled by the limit (no market exit)
+    assert after[0][1] < 1.0  # and resumed as soon as the window was over, inside sell_timeout_s
+
+
+async def test_closing_orders_wait_for_the_rate_limit_window() -> None:
+    env = make_env(make_settings(sell_timeout_s=0.05), adapter_cls=RateLimitedOnceAdapter, exit_mode="never",
+                   market_price=101.0, retry_after_s=0.3)
+    opp = env.opps.add(make_opp(env.clock))
+    res, trade = await run_auto(env, opp)
+    a = env.adapter()
+    assert trade.state == OppState.CLOSED, res
+    after = a.after_limit()
+    assert [w for w, _ in after] == ["cancel", "fetch", "place-market", "fetch"] or [w for w, _ in after] == ["cancel", "fetch", "place-market"], after
+    assert all(dt >= 0.3 - 0.02 for _, dt in after), after  # the cancel and the market exit waited for the window
+    assert after[0][1] < 0.6
+    assert [r.type for r in a.placed()] == [OrderType.LIMIT, OrderType.LIMIT, OrderType.MARKET]
+    assert env.risk.open_trades() == 0
 
 
 @pytest.mark.parametrize("raise_ccxt", [False, True])
@@ -1429,14 +1572,14 @@ async def test_exit_is_repriced_from_the_fresh_book() -> None:
 
     async def hook(o: Opportunity) -> None:
         n["calls"] += 1
-        if n["calls"] == 2:  # the refresh right before the exit order
+        if n["calls"] == 3:  # select_auto + confirm_auto revalidate; the 3rd refresh is right before the exit order
             o.econ = make_econ(net=2.0)
 
     env = make_env(pipeline=StubPipeline(on_refresh=hook))
     opp = env.opps.add(make_opp(env.clock))
     res, trade = await run_auto(env, opp)
     assert trade.state == OppState.CLOSED, res
-    assert len(env.pipeline.calls) == 2
+    assert len(env.pipeline.calls) == 3
     reqs = env.adapter().placed()
     assert reqs[1].tif == TimeInForce.GTC and reqs[1].price == pytest.approx(102.25)
     assert any("exit revalidated" in m for _, m in trade.events)
@@ -1449,7 +1592,7 @@ async def test_exit_markets_out_when_the_fresh_edge_is_gone() -> None:
 
     async def hook(o: Opportunity) -> None:
         n["calls"] += 1
-        if n["calls"] == 2:
+        if n["calls"] == 3:
             o.econ = dataclasses.replace(make_econ(), exit_vwap_now=99.0, exit_target=99.0)
 
     env = make_env(pipeline=StubPipeline(on_refresh=hook), exit_mode="never", market_price=99.0)
@@ -1468,7 +1611,7 @@ async def test_exit_falls_back_to_the_planned_target_when_refresh_fails() -> Non
 
     async def hook(o: Opportunity) -> None:
         n["calls"] += 1
-        if n["calls"] == 2:
+        if n["calls"] == 3:
             raise RuntimeError("book gone")
 
     env = make_env(pipeline=StubPipeline(on_refresh=hook))

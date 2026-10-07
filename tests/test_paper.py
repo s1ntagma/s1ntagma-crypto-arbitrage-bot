@@ -320,6 +320,63 @@ async def test_fills_use_current_book_not_detection_book():
     assert order.status is OrderStatus.CANCELLED and order.filled == 0
 
 
+async def test_market_and_ioc_orders_are_rejected_on_a_stale_book():
+    """A WS drop freezes the inner cache; the paper venue must not keep
+    'filling' at prices older than max_data_age_ms (hard rule 1: no data, no outcome)."""
+    e = Env()
+    await e.book([(99, 5)], [(100, 5)])
+    entry = await e.paper.place_order(e.req(Side.BUY, 1, type_=OrderType.MARKET))
+    assert entry.status is OrderStatus.FILLED
+    e.clock.advance(e.settings.max_data_age_ms / 1000.0 + 0.1)
+    before = {a: (b.free, b.total) for a, b in (await e.paper.fetch_balances()).items()}
+    e.events.clear()
+    with pytest.raises(OrderRejected, match="fresh"):
+        await e.paper.place_order(e.req(Side.SELL, 1, type_=OrderType.MARKET))
+    with pytest.raises(OrderRejected, match="fresh"):
+        await e.paper.place_order(e.req(Side.SELL, 1, price=99))  # IOC
+    with pytest.raises(OrderRejected, match="fresh"):
+        await e.paper.place_order(e.req(Side.SELL, 1, price=99, tif=TimeInForce.FOK))
+    assert {a: (b.free, b.total) for a, b in (await e.paper.fetch_balances()).items()} == before
+    assert e.of(events.ORDER_UPDATE) == [] and await e.paper.open_orders() == []
+    assert e.paper.order_book(SPOT) is not None  # still cached, just too old to trade on
+    assert e.paper.health.order_latency_ms is not None  # the round trip was still simulated
+    # fresh data: trading resumes
+    await e.book([(99, 5)], [(100, 5)])
+    done = await e.paper.place_order(e.req(Side.SELL, 1, type_=OrderType.MARKET))
+    assert done.status is OrderStatus.FILLED and done.fills[0].price == 99
+
+
+async def test_resting_gtc_is_not_filled_from_a_stale_book():
+    e = Env()
+    await e.book([(99, 5)], [(100, 5)])
+    await e.paper.place_order(e.req(Side.BUY, 1, type_=OrderType.MARKET))
+    exit_order = await e.paper.place_order(e.req(Side.SELL, 1, price=105, tif=TimeInForce.GTC))
+    assert exit_order.status is OrderStatus.ACKNOWLEDGED
+    await e.book([(106, 5)], [(107, 5)])  # the market crosses the limit ...
+    e.clock.advance(e.settings.max_data_age_ms / 1000.0 + 0.1)  # ... but nobody looked before the feed went silent
+    e.events.clear()
+    same = await e.paper.fetch_order(exit_order.id, SPOT)
+    assert same is exit_order and same.status is OrderStatus.ACKNOWLEDGED and same.filled == 0 and e.events == []
+    assert await e.paper.open_orders(SPOT) == [exit_order]
+    await e.book([(106, 5)], [(107, 5)])
+    done = await e.paper.fetch_order(exit_order.id, SPOT)
+    assert done.status is OrderStatus.FILLED and done.filled == pytest.approx(1) and done.avg_price == 106
+
+
+async def test_gtc_placed_on_a_stale_book_rests_until_fresh_data():
+    e = Env()
+    await e.book([(99, 5)], [(100, 5)])
+    await e.paper.place_order(e.req(Side.BUY, 1, type_=OrderType.MARKET))
+    e.clock.advance(2.0)
+    exit_order = await e.paper.place_order(e.req(Side.SELL, 1, price=99, tif=TimeInForce.GTC))  # crosses the OLD bid
+    assert exit_order.status is OrderStatus.ACKNOWLEDGED and exit_order.filled == 0
+    btc = await e.balance("BTC")
+    assert btc.free == 0 and btc.total == pytest.approx(1)  # reserved while resting
+    await e.book([(99, 5)], [(100, 5)])
+    done = await e.paper.fetch_order(exit_order.id, SPOT)
+    assert done.status is OrderStatus.FILLED and done.fills[0].price == 99
+
+
 # helper used by the persistence test
 async def _balance_dict(self: Env) -> dict[str, Any]:
     return await self.paper.fetch_balances()

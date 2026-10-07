@@ -20,7 +20,8 @@ call per exchange), then:
 
 A round never blocks the event loop for long: it yields every few hundred
 tickers, and it does not wait for REST book confirmations.  Per-exchange
-backoff on errors (interval -> 60 s, ``RateLimited.retry_after_s`` honoured).
+backoff on errors (interval -> 60 s, ``RateLimited.retry_after_s`` honoured,
+an exchange inside its ``health.rate_limited_until_mono`` window is skipped).
 ``set_assets`` narrows the polled universe at runtime (the app starts with the
 watchlist and upgrades to ``registry.resolve_universe`` once the exchanges
 answer).
@@ -166,8 +167,15 @@ class TickerPoller:
         return out
 
     async def _fetch(self, name: str, adapter: Any) -> dict[str, Ticker]:
-        """fetch_tickers with per-exchange backoff; never raises."""
+        """fetch_tickers with per-exchange backoff; never raises.  An exchange
+        inside its rate-limit window (``health.rate_limited_until_mono``, set
+        by any call on that exchange - same IP budget) is left alone."""
         now = self._clock.mono()
+        until = getattr(getattr(adapter, "health", None), "rate_limited_until_mono", None)
+        if until and float(until) > now:
+            self._next_allowed[name] = max(self._next_allowed.get(name, 0.0), float(until))
+            log.info("%s: tickers skipped; rate-limit window for %.0f s more", name, float(until) - now)
+            return {}
         try:
             fetch = adapter.fetch_tickers
             if self._assets is not None and _accepts_argument(fetch):

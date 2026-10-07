@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Any
 from .. import events
 from ..clock import Clock
 from ..config import Settings
-from ..exchanges.base import ExchangeAdapter, ExchangeError, OrderRejected
+from ..exchanges.base import ExchangeAdapter, ExchangeError, OrderRejected, RateLimited
 from ..links import split_symbol
 from ..logging_setup import redact
 from ..models import (
@@ -79,6 +79,7 @@ log = logging.getLogger(__name__)
 _EPS = 1e-9
 _CANCEL_REFRESH_ATTEMPTS = 3  # fetch_order attempts after a failed cancel before the state counts as unknown
 _MAX_RETRY_SLEEP_S = 5.0
+_RL_MAX_CLOSE_WAIT_S = 300.0  # longest a closing order / cancel waits for an exchange rate-limit window
 _GONE_GRACE_S = 10.0  # "order not found" resolves an order only this long after it was sent (propagation lag)
 _RESTORE_MAX_AGE_S = 3 * 86400.0  # older rows are not restored as positions (logged instead)
 _NOTE_TIMEOUT_S = 2.0
@@ -176,6 +177,7 @@ class ExecutionEngine:
         self._manual: dict[str, TradeRecord] = {}
         self._manual_entry_mono: dict[str, float] = {}
         self._rest_book_mono: dict[tuple[str, str], float] = {}  # (exchange, symbol) -> last REST book attempt
+        self._rate_limited_until: dict[str, float] = {}  # exchange -> loop time a RateLimited told us to stay away until
         self._restored: list[TradeRecord] = []
 
     # ------------------------------------------------------------------ #
@@ -339,6 +341,9 @@ class ExecutionEngine:
         kwargs: dict[str, Any] = {}
         if reduce_only and _accepts_kwarg(adapter.place_order, "reduce_only"):
             kwargs["reduce_only"] = True
+        if closing:
+            # a closing order may go out during an emergency, but never into an active rate-limit ban
+            await self._await_rate_limit(adapter, f"{req.type.value} {req.side.value} {req.symbol}")
         sent_mono, sent_ts = self._clock.mono(), self._clock.wall()
         failed.sent_mono, failed.sent_ts = sent_mono, sent_ts
         log.info(
@@ -352,6 +357,8 @@ class ExecutionEngine:
             log.error("order %s timed out -> status unknown, reconciling once", req.client_id)
             order = await self._reconcile_unknown(adapter, req, failed)
         except ExchangeError as exc:
+            if isinstance(exc, RateLimited):
+                self._note_rate_limit(adapter, exc)
             failed.error = redact(str(exc))
             log.error("order %s rejected by %s: %s", req.client_id, adapter.name, exc)
             order = failed
@@ -416,6 +423,10 @@ class ExecutionEngine:
         except OrderRejected as exc:
             log.warning("fetch_order %s on %s: not found (%s)", ident, adapter.name, exc)
             return None, "gone"
+        except RateLimited as exc:
+            retry = self._note_rate_limit(adapter, exc)
+            log.warning("fetch_order %s on %s rate limited: no request for %.1f s", ident, adapter.name, retry)
+            return None, "rate_limited"
         except Exception as exc:  # noqa: BLE001
             log.warning("fetch_order %s on %s failed: %s", ident, adapter.name, exc)
             return None, "error"
@@ -426,6 +437,33 @@ class ExecutionEngine:
     async def _refresh(self, adapter: ExchangeAdapter, order: Order) -> Order:
         fresh, _why = await self._fetch_state(adapter, order)
         return fresh if fresh is not None else order
+
+    # ---- rate limits: never knock on an exchange inside its back-off window ----
+    def _note_rate_limit(self, adapter: ExchangeAdapter, exc: BaseException) -> float:
+        """Remember a ``RateLimited`` from ``adapter``; returns its retry delay."""
+        retry = max(0.0, float(getattr(exc, "retry_after_s", 0.0) or 0.0))
+        until = asyncio.get_running_loop().time() + retry
+        if until > self._rate_limited_until.get(adapter.name, 0.0):
+            self._rate_limited_until[adapter.name] = until
+        return retry
+
+    def _rate_limit_wait_s(self, adapter: ExchangeAdapter) -> float:
+        """Seconds until ``adapter`` may be called again (0 = now): the longer
+        of the last ``RateLimited.retry_after_s`` and the adapter's health window."""
+        wait = self._rate_limited_until.get(adapter.name, 0.0) - asyncio.get_running_loop().time()
+        until = getattr(getattr(adapter, "health", None), "rate_limited_until_mono", None)
+        if until:
+            wait = max(wait, float(until) - self._clock.mono())
+        return max(0.0, wait)
+
+    async def _await_rate_limit(self, adapter: ExchangeAdapter, what: str, max_wait_s: float = _RL_MAX_CLOSE_WAIT_S) -> None:
+        """Wait out the exchange's rate-limit window (bounded) before ``what``
+        - a request sent into an active ban only extends the ban."""
+        wait = min(self._rate_limit_wait_s(adapter), max(0.0, max_wait_s))
+        if wait <= 0.0:
+            return
+        log.warning("%s on %s delayed %.1f s: inside the exchange's rate-limit window", what, adapter.name, wait)
+        await asyncio.sleep(wait)
 
     async def _wait_fill(
         self, adapter: ExchangeAdapter, order: Order, timeout_s: float, opp_id: str, *, closing: bool = False
@@ -447,7 +485,10 @@ class ExecutionEngine:
             interrupted = not closing and (self._risk.emergency or opp_id in self._abort)
             if interrupted or loop.time() >= deadline:
                 return order
-            await asyncio.sleep(max(0.0, self.poll_interval_s))
+            wait = max(self.poll_interval_s, self._rate_limit_wait_s(adapter))
+            await asyncio.sleep(max(0.0, min(wait, deadline - loop.time())))
+            if self._rate_limit_wait_s(adapter) > 0.0:
+                continue  # window not over (the deadline cut the sleep short): no request into an active ban
             order = await self._refresh(adapter, order)
 
     async def _cancel(self, adapter: ExchangeAdapter, order: Order) -> Order:
@@ -470,6 +511,7 @@ class ExecutionEngine:
                 return order
         confirmed = False
         retry_after = 0.0
+        await self._await_rate_limit(adapter, f"cancel of {order.id}")
         try:
             res = await adapter.cancel_order(order.id, order.symbol)
             confirmed = True
@@ -479,9 +521,12 @@ class ExecutionEngine:
             raise
         except Exception as exc:  # noqa: BLE001
             retry_after = float(getattr(exc, "retry_after_s", 0.0) or 0.0)
+            if isinstance(exc, RateLimited):
+                self._note_rate_limit(adapter, exc)
             log.warning("cancel_order %s on %s failed: %s", order.id, adapter.name, exc)
         attempts = 1 if confirmed else _CANCEL_REFRESH_ATTEMPTS
         for i in range(attempts):
+            await self._await_rate_limit(adapter, f"fetch_order {order.id}")
             fresh, _why = await self._fetch_state(adapter, order)
             if fresh is not None:
                 order = fresh
@@ -627,6 +672,9 @@ class ExecutionEngine:
             net_now_pct=None,
             remaining_s=round(opp.remaining_s(self._clock.mono()), 2),
             trade_id=manual.id if manual is not None else None,
+            entry_price=manual.actual_entry_price if manual is not None else None,
+            quote_amount=manual.capital_quote if manual is not None else None,
+            exit_side="SELL" if opp.direction > 0 else "BUY",
         )
         return d
 
@@ -735,6 +783,10 @@ class ExecutionEngine:
             "sell_price": econ.sell_price,
             "fresh": True,
             "trade_id": manual.id if manual is not None else None,
+            # what a fresh client (page reload / another tab) needs to rebuild the exit step of an open position
+            "entry_price": manual.actual_entry_price if manual is not None else None,
+            "quote_amount": manual.capital_quote if manual is not None else None,
+            "exit_side": "SELL" if opp.direction > 0 else "BUY",
         }
 
     async def manual_entered(self, opp_id: str, price: float, quote_amount: float) -> dict[str, Any]:
@@ -909,8 +961,12 @@ class ExecutionEngine:
         self._snapshot_expected(opp)
         return None
 
-    async def select_auto(self, opp_id: str) -> dict[str, Any]:
-        """AUTO_SELECTED; execute now when ``settings.auto_confirm`` else return a confirmation snapshot."""
+    async def select_auto(self, opp_id: str, wait: bool = True) -> dict[str, Any]:
+        """AUTO_SELECTED; execute now when ``settings.auto_confirm`` else return a confirmation snapshot.
+
+        ``wait=False`` (what the HTTP route passes) starts the auto-confirmed trade
+        in the background exactly like ``confirm_auto(wait=False)`` instead of
+        holding the caller for the whole round trip."""
         opp = self._opps.get(opp_id)
         if opp is None:
             return {"ok": False, "reason": "unknown opportunity", "opp_id": opp_id}
@@ -918,7 +974,7 @@ class ExecutionEngine:
         if reason is not None:
             return {"ok": False, "reason": reason, "opp_id": opp_id, "state": opp.state.value}
         if self._settings.auto_confirm:
-            return await self.confirm_auto(opp_id)
+            return await self.confirm_auto(opp_id, wait=wait)
         ok, why, _econ = await self.revalidate(opp)
         return {
             "ok": True,
@@ -984,6 +1040,26 @@ class ExecutionEngine:
             "trade_id": trade.id,
             "trade": trade.to_dict(),
         }
+
+    async def deselect_auto(self, opp_id: str, reason: str = "user backed out of AUTO confirmation") -> dict[str, Any]:
+        """Back out of the AUTO confirmation: AUTO_SELECTED -> VALID, nothing cancelled.
+
+        The opportunity stays on the board (MANUAL or AUTO can be selected again).
+        Any other state - a running trade, an open manual position, a terminal
+        opportunity - is left untouched and reported with ``ok: False``."""
+        opp = self._opps.get(opp_id)
+        if opp is None:
+            return {"ok": False, "opp_id": opp_id, "reason": "unknown opportunity"}
+        task = self._tasks.get(opp_id)
+        if (task is not None and not task.done()) or opp_id in self._active:
+            return {"ok": False, "opp_id": opp_id, "state": opp.state.value, "reason": "AUTO execution already in progress; use cancel to abort"}
+        if opp.state != OppState.AUTO_SELECTED:
+            return {"ok": False, "opp_id": opp_id, "state": opp.state.value, "reason": f"nothing to deselect in state {opp.state.value}"}
+        if not await self._transition(opp, OppState.VALID, reason):
+            return {"ok": False, "opp_id": opp_id, "state": opp.state.value, "reason": "state transition refused"}
+        self._plan.pop(opp_id, None)
+        self._expected.pop(opp_id, None)
+        return {"ok": True, "opp_id": opp_id, "state": opp.state.value, "reason": reason}
 
     async def cancel(self, opp_id: str, reason: str = "user") -> dict[str, Any]:
         """Abort a running AUTO trade or cancel a selected opportunity."""
@@ -1385,7 +1461,7 @@ class ExecutionEngine:
                 trade.exit_order = combined
                 await self._fail(opp, adapter, trade, "emergency stop during exit: position left open", registered=registered, position_open=remaining)
                 return registered, remaining
-            why = "cancel requested" if opp.id in self._abort else "exit timeout"
+            why = f"cancel requested ({self._abort[opp.id]})" if opp.id in self._abort else "exit timeout"
             await self._note(trade, f"{why}: exiting {remaining:.8g} at market")
             market = await self._exit_market(adapter, trade, remaining)
             orders.append(market)

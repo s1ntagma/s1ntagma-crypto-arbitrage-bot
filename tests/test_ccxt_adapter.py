@@ -436,6 +436,29 @@ async def test_fetch_tickers_keyed_by_asset():
     assert h.public.loaded == 1
 
 
+async def test_fetch_tickers_returns_the_whole_universe_after_start():
+    """The app starts the adapter with the watchlist first; a later
+    ``fetch_tickers()`` (registry.resolve_universe) must still see every
+    listed market, not just the watchlist (ticker breadth, ARCHITECTURE 2.3)."""
+    h = Harness(spot_cfg())
+    h.public.tickers = {
+        "BTC/EUR": {"symbol": "BTC/EUR", "bid": 1, "ask": 2, "last": 1.5, "quoteVolume": 100.0},
+        "ETH/USDC": {"symbol": "ETH/USDC", "bid": 1, "ask": 2, "last": 1.5, "quoteVolume": 50.0},
+    }
+    await h.adapter.start(["BTC"])
+    try:
+        assert h.adapter.supported_symbols() == {"BTC/EUR"}
+        assert set(await h.adapter.fetch_tickers(["BTC"])) == {"BTC"}  # the poller's watchlist round
+        assert set(await h.adapter.fetch_tickers()) == {"BTC", "ETH"}
+        assert h.adapter.symbol_for("ETH") == "ETH/USDC"
+        assert set(await h.adapter.fetch_tickers(["BTC"])) == {"BTC"}
+        assert set(await h.adapter.fetch_tickers()) == {"BTC", "ETH"}  # still the universe
+        assert h.adapter.supported_symbols() == {"BTC/EUR"}  # streaming untouched
+        assert h.public.loaded == 1
+    finally:
+        await h.adapter.stop()
+
+
 async def test_rest_errors_are_translated():
     h = Harness(spot_cfg())
 
@@ -591,6 +614,100 @@ async def test_place_order_error_mapping(exc, expected):
         assert h.adapter.health.maintenance is False
     cached = h.adapter._orders_by_client["cid-1"]
     assert cached.is_done and cached.error
+
+
+class StatusCcxt(FakeCcxt):
+    """A ccxt instance with the ``on_rest_response`` hook (as ccxt.pro has)."""
+
+    def on_rest_response(self, code, reason, url, method, response_headers, response_body, request_headers, request_body):
+        return response_body.strip()
+
+
+async def test_rate_limit_retry_after_header_and_418_floor():
+    h = Harness(spot_cfg(), CREDS)
+    h.clock.set(mono=100.0)
+    h.private.create_result = ccxt.RateLimitExceeded("binance {\"code\":-1003,\"msg\":\"Way too much request weight\"}")
+    h.private.last_response_headers = {"Retry-After": "45"}
+    with pytest.raises(RateLimited) as info:
+        await h.adapter.place_order(limit_req())
+    assert info.value.retry_after_s >= 45.0
+    assert h.adapter.health.rate_limited_until_mono >= 100.0 + 45.0
+    assert "rate limit" in h.adapter.health.reason.lower()
+    # an IP ban (HTTP 418) is never retried before 2 minutes, header or not
+    h2 = Harness(spot_cfg(), CREDS)
+    h2.clock.set(mono=100.0)
+    h2.private.create_result = ccxt.DDoSProtection("banned")
+    h2.private.last_http_status_code = 418
+    h2.private.last_response_headers = {}
+    with pytest.raises(RateLimited) as info2:
+        await h2.adapter.place_order(limit_req())
+    assert info2.value.retry_after_s >= 120.0
+    assert h2.adapter.health.rate_limited_until_mono >= 100.0 + 120.0
+    h3 = Harness(spot_cfg(), CREDS)
+    h3.private.create_result = ccxt.DDoSProtection("banned")
+    h3.private.last_http_status_code = 418
+    h3.private.last_response_headers = {"Retry-After": "600"}
+    with pytest.raises(RateLimited) as info3:
+        await h3.adapter.place_order(limit_req())
+    assert info3.value.retry_after_s >= 600.0
+
+
+async def test_rate_limit_escalates_on_repeated_hits_and_resets_after_a_quiet_period():
+    h = Harness(spot_cfg(), CREDS)
+    h.clock.set(mono=0.0)
+    h.private.create_result = ccxt.RateLimitExceeded("slow")
+    retries: list[float] = []
+    for i in range(4):
+        h.clock.set(mono=float(i))  # one hit per second
+        with pytest.raises(RateLimited) as info:
+            await h.adapter.place_order(limit_req(client_id=f"cid-{i}"))
+        retries.append(info.value.retry_after_s)
+    assert retries[0] >= 1.0 and retries[1] > retries[0] and retries[2] > retries[1] and retries[3] > retries[2]
+    assert h.adapter.health.rate_limited_until_mono == pytest.approx(3.0 + retries[3])
+    # the public instance shares the penalty (same IP budget)
+    h.public.fetch_order_book = _raise(ccxt.RateLimitExceeded("slow"))  # type: ignore[assignment]
+    h.clock.set(mono=4.0)
+    with pytest.raises(RateLimited) as pub:
+        await h.adapter.fetch_order_book("BTC/EUR")
+    assert pub.value.retry_after_s > retries[3]
+    # a quiet period resets the escalation
+    h.clock.set(mono=4.0 + 600.0)
+    with pytest.raises(RateLimited) as fresh:
+        await h.adapter.place_order(limit_req(client_id="cid-x"))
+    assert fresh.value.retry_after_s == pytest.approx(retries[0])
+    # the penalty is capped
+    for i in range(20):
+        h.clock.set(mono=700.0 + i)
+        with pytest.raises(RateLimited) as capped:
+            await h.adapter.place_order(limit_req(client_id=f"cid-c{i}"))
+    assert capped.value.retry_after_s <= 300.0
+    # the window never shrinks: a later, smaller penalty keeps the earlier deadline
+    until = h.adapter.health.rate_limited_until_mono
+    assert until >= 719.0 + 300.0 - 1e-9
+    h.clock.set(mono=720.0)
+    with pytest.raises(RateLimited) as again:
+        await h.adapter.place_order(limit_req(client_id="cid-z"))
+    assert h.adapter.health.rate_limited_until_mono >= until
+    assert again.value.retry_after_s == pytest.approx(h.adapter.health.rate_limited_until_mono - 720.0)
+
+
+def _raise(exc: BaseException):
+    async def boom(*a, **k):
+        raise exc
+
+    return boom
+
+
+async def test_http_status_is_recorded_through_the_ccxt_hook():
+    h = Harness(spot_cfg(), CREDS, fake_cls=StatusCcxt)
+    assert h.private.on_rest_response(418, "I'm a teapot", "https://x", "GET", {}, "  body ", {}, None) == "body"
+    assert h.private.last_http_status_code == 418
+    h.private.create_result = ccxt.RateLimitExceeded("binance {\"code\":-1003}")  # Binance maps -1003 before the 418
+    with pytest.raises(RateLimited) as info:
+        await h.adapter.place_order(limit_req())
+    assert info.value.retry_after_s >= 120.0
+    assert h.public.on_rest_response(200, "OK", "https://x", "GET", {}, "ok", {}, None) == "ok"
+    assert h.public.last_http_status_code == 200
 
 
 async def test_place_order_timeout_returns_unknown_status_order():

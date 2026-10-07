@@ -113,9 +113,19 @@ Algorithm (per asset, on every book):
    `move_over_window(mid_series, now, settings.move_window_s)` → move_pct.
 2. Track a per-(exchange, asset) *crossing* state with hysteresis: when
    `|move| >= move_threshold_pct` and not crossed → crossed, record
-   `cross_mono = now`, direction = sign, publish `MoveEvent` on bus (topic MOVE)
-   and `stats.record_first_mover` only for the earliest crosser; reset when
-   `|move| < move_threshold_pct / 2`.
+   `cross_mono = now`, direction = sign, the *anchor* (pre-move price = start
+   of the window), publish `MoveEvent` on bus (topic MOVE) and
+   `stats.record_first_mover` only for the earliest crosser.  From then on the
+   exchange is measured against its anchor, so a genuine move keeps its
+   crossing after the window slid past the jump; reset when the anchored move
+   falls below `move_threshold_pct / 2` (a reversion — the anchor is kept for
+   one more window so the reversion is not read as a move the other way),
+   silently when the data go stale, or when the episode outlives
+   `max_opp_duration_s` (a timeout, not a reversion).  Exchanges that have not
+   crossed are measured from their price at the episode's anchor moment (a
+   slow catch-up ≥ threshold since the move began also counts as a cross).
+   `current_moves(asset, now, max_age_ms)` exposes these effective moves; the
+   pipeline refreshes opportunities with them, so refresh and detection agree.
 3. Movers = crossed exchanges with the same direction.  If none → `[]`.
    First mover = earliest `cross_mono`.  `movers_count` = len(movers).
 4. For each **execution** exchange T ≠ first mover, fresh, `allowed_direction`:
@@ -127,7 +137,8 @@ Algorithm (per asset, on every book):
 5. Learning: when T later crosses in the same direction, record
    `reaction delay = T.cross_mono − first.cross_mono` and
    `catchup_ratio = (move_T·dir) / first_move_pct` (clamp 0..1.5).  When the
-   first mover's crossing resets without T crossing → `record_false_signal`.
+   movers' crossings reset by *reversion* without T crossing →
+   `record_false_signal` (a stale clear or a timed-out episode is not one).
 Return one `LagSignal` per lagging target (the pipeline evaluates each; the
 best by NET is shown on top — dynamic target selection).
 
@@ -170,13 +181,17 @@ spanning ≥ 1 s, fit a linear decay of net_pct; if decaying, `remaining = net_n
 
 ### engine/executability.py
 ```python
-def assess_human(remaining_s: float, net_pct: float, settings: Settings) -> ExecAssessment
+def assess_human(remaining_s: float, net_pct: float, settings: Settings, stats: ReactionStats | None = None,
+                 econ: ExecutionEconomics | None = None) -> ExecAssessment
 def assess_bot(remaining_s: float, econ: ExecutionEconomics, health: ExchangeHealth | None,
                stats: ReactionStats | None, settings: Settings, now_mono: float) -> ExecAssessment
 ```
 Human: `est = settings.human_execution_time_s`; GREEN if `remaining ≥ est*human_green_margin`,
 YELLOW if `remaining ≥ est`, else RED ("too fast for human").  Labels:
 GREEN→"HIGH", YELLOW→"MEDIUM"/"LOW" (≥ est*1.2 → MEDIUM), RED→"NOT EXECUTABLE".
+With `econ`: `executable_quote < min_trade_quote` → RED "NOT EXECUTABLE"
+("not executable at size …") whatever the window — a size nobody would trade
+is not an opportunity (other `liquidity_ok=False` cases keep the time light).
 Bot: `est_s = (ws_latency + order_latency(default settings.default_api_latency_ms)
 + fill_latency(if known) + bot_fixed_overhead_ms)/1000`.  RED when: health
 missing/not usable, `econ.book_age_ms > max_data_age_ms`, order latency
@@ -217,9 +232,10 @@ class OpportunityManager:
     def history(self, limit: int = 200) -> list[Opportunity]       # terminal, newest first (in-memory ring + db)
     def best(self, now_mono: float) -> Opportunity | None          # highest net among active where bot or human light != RED
     def counters(self, now_mono: float) -> dict                    # dashboard numbers (see §Dashboard)
+    async def relabel_mode(self, mode: Mode) -> list[Opportunity]  # PAPER/LIVE switch: active cards show the mode that would execute
 ```
 New opp: id `new_id("opp_")`, state DETECTED → (pipeline moves it) VALIDATING → VALID.
-Update: replace econ/human/bot/why/estimated_duration, `last_update_mono`,
+Update: replace econ/human/bot/why/estimated_duration/mode, `last_update_mono`,
 `last_valid_mono` (if net ≥ min_net_pct_show), append `net_history`, bump
 `update_count`, publish OPP_UPDATE.  Expiry sets `expired_mono`,
 `actual_duration_s`, `expire_reason`, state EXPIRED, publishes OPP_STATE, and
@@ -237,15 +253,27 @@ class Pipeline:
     async def stop(self) -> None
     async def on_book(self, book: OrderBook) -> list[Opportunity]
     async def evaluate(self, signal: LagSignal, capital_quote: float | None = None) -> Opportunity | None
-    async def refresh(self, opp: Opportunity, capital_quote: float | None = None) -> Opportunity   # recompute from latest book
+    async def refresh(self, opp: Opportunity, capital_quote: float | None = None) -> Opportunity | None   # recompute from the latest FRESH book; None = no fresh data
     def dashboard(self) -> dict
 ```
-`evaluate`: book = state.book(target) (must be fresh else None) → fees =
-`await adapters[target].fees(symbol)` (cache) → `compute_economics` → if
-`econ.net_pct < settings.min_net_pct_show` and no active opp → None (no fake
-signals) → duration → human/bot → why → `opps.upsert` → transitions
-DETECTED→VALIDATING→VALID for new opps → return.  Sweep loop: `opps.sweep`,
-`adapter.check_staleness`, publish DASHBOARD.
+`evaluate`: book = state.book(target) (must be younger than `max_data_age_ms`;
+a missing / stale book is confirmed through REST in a bounded background task
+— single-flight per (exchange, symbol), ≤ 2 requests per exchange,
+`rest_book_timeout_s` each — and `evaluate` returns None until that task
+re-measures the signal on live data and evaluates it on the fresh snapshot;
+the BOOK handler never waits on REST) → fees = `await adapters[target].fees(symbol)`
+(cache) → `compute_economics` → if no active opp and (`econ.net_pct <
+settings.min_net_pct_show` or `econ.executable_quote < min_trade_quote`) → None
+(no fake signals) → duration → human/bot → why → `opps.upsert(…, settings.mode())`
+→ transitions DETECTED→VALIDATING→VALID for new opps → return.
+`refresh`: same freshness rule, but inline (the single-flight fetch is awaited,
+so the 300 ms MANUAL poll cannot hammer the API); the first mover is
+re-measured with the freshness bound of the signal's source (poll signals get
+`+ ticker_poll_interval_s`); None when there is no fresh book.  Sweep loop:
+`opps.relabel_mode(settings.mode())`, expire active opps whose target book is
+older than 2× their freshness bound ("target book stale"), `opps.sweep`,
+`adapter.check_staleness`, publish DASHBOARD.  `pending_confirmations` /
+`wait_confirmations()` expose the background confirmations (tests, shutdown).
 
 ### exchanges/ccxt_adapter.py — `CcxtAdapter(ExchangeAdapter)`
 ```python
@@ -378,8 +406,9 @@ class ExecutionEngine:
     async def manual_support(self, opp_id: str) -> dict                      # live payload (see below)
     async def manual_entered(self, opp_id: str, price: float, quote_amount: float) -> dict   # user did the entry by hand → TradeRecord(mode) with entry filled; returns exit target info
     async def manual_exited(self, opp_id: str, price: float) -> TradeRecord  # realized P&L, CLOSED
-    async def select_auto(self, opp_id: str) -> dict                         # → AUTO_SELECTED; if settings.auto_confirm: execute now; else {"confirmation_required": True, "snapshot": {...}}
-    async def confirm_auto(self, opp_id: str) -> dict                        # revalidate + execute
+    async def select_auto(self, opp_id: str, wait: bool = True) -> dict      # → AUTO_SELECTED; if settings.auto_confirm: execute now (wait=False: start in the background like confirm_auto); else {"confirmation_required": True, "snapshot": {...}}
+    async def confirm_auto(self, opp_id: str, wait: bool = True) -> dict     # revalidate + execute (wait=False → {"ok": True, "started": True, "state": "EXECUTING"}; follow TRADE_UPDATE)
+    async def deselect_auto(self, opp_id: str, reason: str = "...") -> dict  # back out of the confirmation: AUTO_SELECTED → VALID, nothing cancelled; any other state → ok False, untouched
     async def cancel(self, opp_id: str, reason: str = "user") -> dict
     async def revalidate(self, opp: Opportunity) -> tuple[bool, str, ExecutionEconomics | None]
     async def execute(self, opp: Opportunity) -> TradeRecord
@@ -396,7 +425,10 @@ class ExecutionEngine:
   remaining_s, human: {light,label,est_execution_s}, capital, base_amount,
   expired: bool, message}` — recomputed from the **latest** book via
   `pipeline.refresh`.  If the opp is no longer active → `valid=False,
-  message="⚠️ OPPORTUNITY EXPIRED"`.
+  message="⚠️ OPPORTUNITY EXPIRED"`.  While a manual position is open the
+  payload is `status="in_position"` with `trade_id, entry_price, quote_amount,
+  exit_side` (also from `select_manual`), so a reloaded page / second tab can
+  resume the exit step instead of starting a new entry.
 * `revalidate`: book age ≤ max_data_age_ms (else `fetch_order_book` REST once);
   recompute econ with the current catch-up; require `econ.net_pct ≥ max(settings.min_net_pct_auto,
   opp.econ.net_pct * settings.revalidate_tolerance)`, `liquidity_ok`, bot light
@@ -479,7 +511,10 @@ Routes (JSON):
 * `POST /api/opportunities/{id}/manual` → `execution.select_manual`
 * `GET  /api/opportunities/{id}/manual/support` → `execution.manual_support`
 * `POST /api/opportunities/{id}/manual/entered {price, quote_amount}`; `POST …/manual/exited {price}`
-* `POST /api/opportunities/{id}/auto` → `select_auto`; `POST …/auto/confirm`; `POST …/cancel`
+* `POST /api/opportunities/{id}/auto` → `select_auto`; `POST …/auto/confirm`; `POST …/auto/deselect`
+  (back out of the confirmation: AUTO_SELECTED → VALID, nothing cancelled); `POST …/cancel`.
+  Both `/auto` routes pass `wait=False`: an auto-confirmed trade starts in the background and the
+  response is `{ok, started, state: "EXECUTING"}` - the HTTP request never waits for the trade.
 * `POST /api/emergency/stop {reason?}`, `POST /api/emergency/close`, `POST /api/emergency/resume`
 * `GET /api/settings`; `PUT /api/settings {patch}` → `settings.update` + `save_settings` + publish SETTINGS (reject keys not in Settings; never secrets)
 * `GET /api/trades?limit=`, `GET /api/stats`, `GET /api/balances`
@@ -574,7 +609,9 @@ Integration decisions (implemented):
 `active`, `today`, `green`, `yellow`, `red` (by best of human/bot), `human_executable`
 (human != RED), `bot_executable`, `telegram_alerts`, `paper_pnl`, `live_pnl`,
 `realized_pnl`, `failed_trades`, `expired`, `avg_latency_ms` (mean of exec
-adapters' order latency), `avg_execution_time_s`, `success_rate`.
+adapters' order latency), `avg_execution_time_s`, `success_rate` =
+wins / (closed + failed) of today's trades in the current mode (`None` when
+nothing finished; EXECUTING / CANCELLED rows do not count).
 
 ## Tests
 `tests/` with pytest; `pytest.ini`: `asyncio_mode = auto`.  Everything offline:
@@ -636,16 +673,24 @@ opportunities.
   Implemented details: `start(assets=None)` / `stop()` / `set_assets(assets)` /
   `poll_once() -> int`; **every** polled ticker feeds `state.on_ticker` (WS
   book/bbo streams carry no 24h volume, so without polling the
-  `min_mover_volume_quote` gate can never pass), but `detector.on_ticker` is
-  skipped for assets the same exchange already streams over WebSocket (they are
-  detected on the live stream; a polled ticker is one interval old).  The app
-  polls the watchlist from the first second and widens to watchlist + common
-  universe once `resolve_universe` succeeds.
-* `Pipeline.evaluate` for `source == "poll"` (or when the target book is older
-  than `max_data_age_ms`) and `confirm_with_rest_book`: `await adapters[target].fetch_order_book(symbol)`
-  → `state.on_book(book)` → economics on that fresh book.  No book → no opportunity.
-* `MarketState.on_ticker` appends to the same mid series as books; appends are
-  throttled per stream to one per `price_sample_min_interval_ms`.
+  `min_mover_volume_quote` gate can never pass) — with `append_mid=False` for
+  assets the same exchange streams over WebSocket (volume / ticker / liveness
+  only: a REST price is one interval old and must never become the newest
+  point of the live series).  `detector.on_ticker` runs once per asset per
+  round (detection is asset-wide) and only for assets some polled exchange does
+  not stream (streamed assets are detected on the live stream).  A round yields
+  to the event loop every ~200 tickers and never waits for REST confirmations.
+  The app polls the watchlist from the first second and widens to watchlist +
+  common universe once `resolve_universe` succeeds.
+* `Pipeline.evaluate` when the target book is missing or older than
+  `max_data_age_ms` (any source; a younger book is reused as is) and
+  `confirm_with_rest_book`: `adapters[target].fetch_order_book(symbol)` in a
+  bounded background task (single-flight, ≤ 2 per exchange, `rest_book_timeout_s`)
+  → `state.on_book(book)` → the re-measured signal is evaluated on that fresh
+  book.  No book → no opportunity.
+* `MarketState.on_ticker(ticker, *, append_mid=True)` appends to the same mid
+  series as books; appends are throttled per stream to one per
+  `price_sample_min_interval_ms`.
 * Universe: `registry.resolve_universe(settings, adapters) -> (ws_assets: list[str], poll_assets: list[str])`:
   ws = settings.watchlist (or auto top-N by volume on watchlist_exchange);
   poll = assets listed on ≥ 2 enabled exchanges with ≥ 1 EXECUTION venue,

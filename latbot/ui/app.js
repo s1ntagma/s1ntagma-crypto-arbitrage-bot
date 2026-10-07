@@ -332,6 +332,15 @@
   function isTerminal(st) { return !!TERMINAL[st]; }
   function isExecuting(st) { return !!EXECUTING[st]; }
 
+  function hasOpenManualPosition(o) {
+    // EXECUTING with a trade that has no entry order = the owner reported the entry by hand (MANUAL).
+    // When the trade record is not loaded yet the server decides: /manual answers status 'in_position' or not.
+    if (!o || !isExecuting(o.state) || !o.execution_id) return false;
+    var t = state.trades.get(o.execution_id);
+    if (t && (t.entry_order || isTerminal(t.state))) return false;
+    return true;
+  }
+
   function putOpp(o) {
     if (!o || !o.id) return;
     o._recvAt = performance.now();
@@ -738,14 +747,16 @@
     }
     foot.appendChild(h('span', { class: 'card-meta' }, h('span', { text: 'seen ' + fmtTime(o.detected_ts) })));
     var manualMine = state.manual && state.manual.id === o.id && state.manual.phase !== 'done';
+    // An open MANUAL position this tab does not own (page reload, another tab, WS reconnect): the exit must stay reportable.
+    var manualOpen = !manualMine && hasOpenManualPosition(o);
     var humanRed = lightOf(o, 'human') === 'red';
     var botRed = lightOf(o, 'bot') === 'red';
-    var manualDisabled = term || (exec && !manualMine) || (humanRed && !manualMine);
+    var manualDisabled = term || (exec && !manualMine && !manualOpen) || (humanRed && !manualMine && !manualOpen);
     var autoDisabled = term || exec || botRed || state.emergency || manualMine;
     var manualBtn = h('button', {
       class: 'btn btn-manual', type: 'button', disabled: manualDisabled,
-      title: term ? 'opportunity is over' : humanRed ? 'too fast for a human' : exec ? 'already executing' : 'trade it by hand with live support',
-      text: manualMine ? (state.manual.phase === 'sell' ? 'MANUAL · SELL ▸' : 'MANUAL ▸') : 'MANUAL',
+      title: term ? 'opportunity is over' : manualOpen ? 'open manual position: report your exit price' : humanRed ? 'too fast for a human' : exec ? 'already executing' : 'trade it by hand with live support',
+      text: manualMine ? (state.manual.phase === 'sell' ? 'MANUAL · SELL ▸' : 'MANUAL ▸') : manualOpen ? 'MANUAL · SELL ▸' : 'MANUAL',
       onclick: function () { openManual(o.id); }
     });
     var autoBtn = h('button', {
@@ -766,6 +777,14 @@
     list.forEach(function (t) {
       var q = quoteOf({ target_symbol: t.symbol });
       var pnl = num(t.realized_pnl_quote);
+      var stateCell = h('td', null, h('span', { class: 'state-badge', text: t.state || '' }));
+      if (isExecuting(t.state) && !t.entry_order && t.opportunity_id) {
+        // Open MANUAL position (no entry order = bought by hand): second entry point to report the exit.
+        stateCell.appendChild(h('button', {
+          class: 'btn btn-manual btn-sm', type: 'button', text: 'REPORT EXIT', title: 'open manual position: report your exit price',
+          onclick: function () { openManual(t.opportunity_id); }
+        }));
+      }
       var tr = h('tr', null,
         h('td', { class: 'mono', text: fmtTime(t.started_ts) }),
         h('td', null, h('span', { class: 'tag ' + (t.mode === 'live' ? 'live' : 'paper'), text: String(t.mode || '').toUpperCase() })),
@@ -778,7 +797,7 @@
         h('td', { class: 'num ' + (pnl > 0 ? 'pos' : pnl < 0 ? 'neg' : ''), text: fmtMoney(t.realized_pnl_quote, q, { sign: true }) }),
         h('td', { class: 'num', text: fmtPct(t.actual_slippage_pct) }),
         h('td', { class: 'num', text: fmtSecs(t.execution_time_s) }),
-        h('td', null, h('span', { class: 'state-badge', text: t.state || '' })),
+        stateCell,
         h('td', { class: 'wrap', text: t.diff_reason || t.error || '' }));
       body.appendChild(tr);
     });
@@ -877,7 +896,7 @@
   // ------------------------------------------------------------------ MANUAL modal
   function openManual(id) {
     var o = getOpp(id);
-    if (!o) return;
+    if (!o) { toast('Opportunity ' + id + ' is not loaded.', 'warn'); return; }
     var m = state.manual;
     if (m && m.id === id && m.phase !== 'done') {
       showModal('manual');
@@ -892,12 +911,36 @@
     stopManualPoll();
     api('POST', oppPath(id, '/manual')).then(function (r) {
       if (!r.ok) { toast('MANUAL: ' + r.error, 'err'); return; }
-      state.manual = { id: id, phase: 'buy', support: r.data || {}, supportAt: performance.now(), entered: null, trade: null, timer: null, polling: false, busy: false, error: '', rendered: '' };
+      var d = r.data || {};
+      var fresh = { id: id, phase: 'buy', support: d, supportAt: performance.now(), entered: null, trade: null, timer: null, polling: false, busy: false, error: '', rendered: '' };
+      if (d.status === 'in_position' || d.trade_id) {
+        // The entry was already reported (page reload, another tab, WS reconnect): resume at the SELL step.
+        fresh.phase = 'sell';
+        fresh.entered = manualEntryFrom(o, d);
+      }
+      state.manual = fresh;
       showModal('manual');
       renderManual(true);
       startManualPoll();
       scheduleRender('cards');
     });
+  }
+
+  function manualEntryFrom(o, d) {
+    // Rebuild what submitEntered() keeps, from the support payload (+ the trade record when it is loaded).
+    var t = (d.trade_id && state.trades.get(d.trade_id)) || {};
+    var entry = num(d.entry_price);
+    if (!Number.isFinite(entry)) entry = num(t.actual_entry_price);
+    var quote = num(d.quote_amount);
+    if (!Number.isFinite(quote)) quote = num(t.capital_quote);
+    if (!Number.isFinite(quote)) quote = num(d.capital);
+    var base = (entry > 0 && Number.isFinite(quote)) ? quote / entry : num(d.base_amount);
+    return {
+      resumed: true, trade_id: d.trade_id || t.id || null, entry_price: entry, quote_amount: quote, base_amount: base,
+      exit_side: d.exit_side || entrySide(o, d).exit, exit_target: num(t.expected_exit_price), exit_target_now: d.exit_target_now,
+      expected_net_pct: d.expected_net_pct !== undefined ? d.expected_net_pct : t.expected_net_pct,
+      symbol: d.symbol || t.symbol, exchange: d.exchange || t.exchange
+    };
   }
 
   function startManualPoll() {
@@ -945,8 +988,14 @@
 
   function manualStatus(m) {
     var s = m.support || {};
-    if (manualExpired(m)) return { cls: 'red', text: '⚠️ OPPORTUNITY EXPIRED' };
     var rem = manualRemaining(m);
+    if (m.phase === 'sell' || s.status === 'in_position') {
+      // A position already held is never "too fast": only the window can close (and no fresh data is said so).
+      if (s.status === 'no_data') return { cls: 'yellow', text: '⚠️ NO FRESH DATA — exit at best price' };
+      if (s.expired || rem <= 0) return { cls: 'yellow', text: '⏱ WINDOW CLOSED — exit at best price' };
+      return { cls: 'green', text: '🟢 IN POSITION' };
+    }
+    if (manualExpired(m)) return { cls: 'red', text: '⚠️ OPPORTUNITY EXPIRED' };
     var est = num(s.human && s.human.est_execution_s);
     if (!Number.isFinite(est)) est = num(state.settings.human_execution_time_s);
     if (s.status === 'too_fast' || (Number.isFinite(est) && rem < est)) return { cls: 'red', text: '🔴 TOO FAST FOR HUMAN' };
@@ -1022,7 +1071,7 @@
       m.refs.form = form;
     } else if (m.phase === 'sell') {
       var e = m.entered || {};
-      body.appendChild(h('div', { class: 'alert ok', text: 'Entry recorded: ' + sides.entry + ' ' + fmtAmount(e.base_amount || s.base_amount) + ' at ' + fmtMoney(e.entry_price, q) + '. Now the exit leg.' }));
+      body.appendChild(h('div', { class: 'alert ok', text: (e.resumed ? 'Open position restored' + (e.trade_id ? ' (' + e.trade_id + ')' : '') + ': ' : 'Entry recorded: ') + sides.entry + ' ' + fmtAmount(e.base_amount || s.base_amount) + ' at ' + fmtMoney(e.entry_price, q) + '. Now the exit leg.' }));
       m.refs.banner = h('div', { class: 'alert hidden', role: 'status' });
       body.appendChild(m.refs.banner);
       body.appendChild(h('div', { class: 'block' },
@@ -1097,10 +1146,15 @@
     if (r.banner) {
       var text = '';
       var cls = 'alert hidden';
-      if (expired) { text = s.message || '⚠️ OPPORTUNITY EXPIRED'; cls = 'alert danger'; }
+      if (m.phase === 'sell') {
+        // SELL step: the position is held - never the red TOO FAST warning here, only window / data notices.
+        if (m.error) { text = 'support unavailable: ' + m.error + ' — the position is yours until you record the exit.'; cls = 'alert warn'; }
+        else if (s.status === 'no_data') { text = (s.message || '⚠️ NO FRESH DATA') + ' — exit at the best price the book gives you.'; cls = 'alert warn'; }
+        else if (expired || rem <= 0) { text = '⚠️ OPPORTUNITY EXPIRED — window closed. Exit at the best price the book gives you.'; cls = 'alert warn'; }
+      }
+      else if (expired) { text = s.message || '⚠️ OPPORTUNITY EXPIRED'; cls = 'alert danger'; }
       else if (m.error) { text = 'support unavailable: ' + m.error; cls = 'alert warn'; }
       else if (st.cls === 'red') { text = st.text + (s.message && s.message !== st.text ? ' · ' + s.message : ''); cls = 'alert warn'; }
-      if (m.phase === 'sell' && expired) { text = '⚠️ OPPORTUNITY EXPIRED — window closed. Exit at the best price the book gives you.'; cls = 'alert warn'; }
       r.banner.textContent = text;
       r.banner.className = cls;
     }
@@ -1194,14 +1248,19 @@
     var o = getOpp(id);
     if (!o) return;
     if (state.emergency) { toast('EMERGENCY STOP is active: AUTO is blocked.', 'warn'); return; }
-    state.auto = { id: id, phase: 'loading', snapshot: null, result: null, trade: null, error: '', busy: false };
+    var a = { id: id, phase: 'loading', snapshot: null, result: null, trade: null, error: '', busy: false, abandoned: false };
+    state.auto = a;
     showModal('auto');
     renderAuto();
     api('POST', oppPath(id, '/auto')).then(function (r) {
-      var a = state.auto;
-      if (!a || a.id !== id) return;
-      if (!r.ok) { a.phase = 'error'; a.error = r.error; renderAuto(); return; }
       var d = r.data || {};
+      if (a.abandoned) {
+        // Dialog closed while selecting: undo the selection the server made meanwhile (nothing cancelled).
+        if (r.ok && d.confirmation_required) deselectAuto(a).then(function () { scheduleRender('cards'); });
+        return;
+      }
+      if (state.auto !== a) return;
+      if (!r.ok) { a.phase = 'error'; a.error = r.error; renderAuto(); return; }
       if (d.confirmation_required) {
         a.phase = 'confirm';
         a.snapshot = d.snapshot || {};
@@ -1239,20 +1298,41 @@
     });
   }
 
-  function cancelAuto() {
+  function deselectAuto(a) {
+    // Back out of the confirmation: AUTO_SELECTED -> VALID. Nothing is cancelled - the lag may still be live.
+    return api('POST', oppPath(a.id, '/auto/deselect')).then(function (r) {
+      if (!r.ok && r.status !== 404) toast('AUTO: ' + r.error, 'warn');
+      return r;
+    });
+  }
+
+  function abortAuto() {
+    // Executing phase only: abort the running trade (cancelled before the entry; an open position is exited at market).
     var a = state.auto;
-    if (!a) { hideModal('auto'); return; }
-    api('POST', oppPath(a.id, '/cancel'), { reason: 'user cancelled AUTO' }).then(function (r) {
-      if (!r.ok) toast('Cancel: ' + r.error, 'err');
-      hideModal('auto');
-      state.auto = null;
-      scheduleRender('cards');
+    if (!a || a.phase !== 'executing') return;
+    confirmDialog({ title: 'Abort the running AUTO trade?', body: 'Before the entry it is cancelled; an open position is exited at market.', okLabel: 'Abort trade', okClass: 'btn-warn' }).then(function (ok) {
+      if (!ok || state.auto !== a) return;
+      api('POST', oppPath(a.id, '/cancel'), { reason: 'user aborted AUTO' }).then(function (r) {
+        if (!r.ok) toast('Abort: ' + r.error, 'err');
+        else if (r.data && r.data.ok === false) toast('Abort: ' + (r.data.reason || 'refused'), 'warn');
+        if (!modalHidden('auto')) renderAuto();
+      });
     });
   }
 
   function closeAuto() {
+    var a = state.auto;
     hideModal('auto');
-    if (state.auto && (state.auto.phase === 'done' || state.auto.phase === 'error')) state.auto = null;
+    if (!a) return;
+    if (a.phase === 'confirm' && a.busy) return;  // EXECUTE in flight: hide only, the dialog follows TRADE_UPDATE
+    if (a.phase === 'confirm' || a.phase === 'loading') {
+      // CANCEL, ✕, backdrop and Escape all back out the same way - never through /cancel (that would kill a live lag).
+      a.abandoned = true;
+      state.auto = null;
+      if (a.phase === 'confirm') deselectAuto(a).then(function () { scheduleRender('cards'); });
+      return;
+    }
+    if (a.phase === 'done' || a.phase === 'error') state.auto = null;
   }
 
   function onTradeUpdate(t) {
@@ -1309,8 +1389,12 @@
       row('EXPECTED NET (card)', fmtPct(snap.expected_net_pct));
       row('EXPECTED PROFIT', fmtMoney(snap.expected_profit_quote, q, { sign: true }));
       row('CAPITAL', fmtMoney(snap.capital, q));
-      row('RISK', risk.ok === false ? '🔴 ' + (risk.reason || 'blocked') : '🟢 OK' + (Number.isFinite(num(risk.allowed)) ? ' · allowed ' + fmtMoney(risk.allowed, q) : ''), risk.ok === false ? 'neg' : 'pos');
-      row('BALANCE', Number.isFinite(num(bal.free)) ? fmtMoney(bal.free, bal.quote || q) + ' free' : '–');
+      // risk.ok stays null until RiskManager.check actually ran (revalidation can fail earlier): only true is green.
+      if (risk.ok === true) row('RISK', '🟢 OK' + (Number.isFinite(num(risk.allowed)) ? ' · allowed ' + fmtMoney(risk.allowed, q) : ''), 'pos');
+      else if (risk.ok === false) row('RISK', '🔴 ' + (risk.reason || 'blocked'), 'neg');
+      else row('RISK', '⚪ not checked' + (snap.valid === false ? ' (revalidation failed first)' : ''), 'muted');
+      if (Number.isFinite(num(bal.free))) row('BALANCE', fmtMoney(bal.free, bal.quote || q) + ' free');
+      else row('BALANCE', '⚪ not checked', 'muted');
       if (snap.entry_price !== undefined) row('ENTRY', fmtMoney(snap.entry_price, q));
       if (snap.exit_target !== undefined) row('EXIT TARGET', fmtMoney(snap.exit_target, q));
       if (snap.remaining_s !== undefined) row('WINDOW', fmtSecs(snap.remaining_s));
@@ -1320,7 +1404,7 @@
       body.appendChild(h('p', { class: 'hint', text: 'The bot revalidates on the latest book right before the entry and before the exit. If the edge is gone it cancels instead of executing a stale snapshot.' }));
       var invalid = snap.valid === false;
       body.appendChild(h('div', { class: 'modal-actions' },
-        h('button', { class: 'btn btn-ghost', type: 'button', text: 'CANCEL', disabled: a.busy, onclick: cancelAuto }),
+        h('button', { class: 'btn btn-ghost', type: 'button', text: 'CANCEL', title: 'close without executing — nothing is cancelled, the opportunity stays on the board', disabled: a.busy, onclick: closeAuto }),
         h('button', { class: 'btn btn-ghost', type: 'button', text: 'RE-CHECK', disabled: a.busy, onclick: function () { openAuto(a.id); } }),
         h('button', { class: 'btn btn-auto', type: 'button', text: a.busy ? 'EXECUTING…' : 'EXECUTE', disabled: a.busy || invalid, onclick: confirmAuto })));
       return;
@@ -1354,8 +1438,12 @@
         h('div', { class: 'block-title', text: 'Timeline' }),
         h('ul', { class: 'muted' }, t.events.slice(-8).map(function (e) { return h('li', { text: fmtTime(e[0]) + ' · ' + e[1] }); }))));
     }
-    body.appendChild(h('div', { class: 'modal-actions' },
-      h('button', { class: 'btn btn-ghost', type: 'button', text: a.phase === 'done' ? 'Close' : 'Hide (keeps running)', onclick: closeAuto })));
+    var actions = h('div', { class: 'modal-actions' },
+      h('button', { class: 'btn btn-ghost', type: 'button', text: a.phase === 'done' ? 'Close' : 'Hide (keeps running)', onclick: closeAuto }));
+    if (a.phase === 'executing') {
+      actions.appendChild(h('button', { class: 'btn btn-warn', type: 'button', text: 'ABORT', title: 'cancel before the entry / market-exit an open position', onclick: abortAuto }));
+    }
+    body.appendChild(actions);
   }
 
   // ------------------------------------------------------------------ emergency

@@ -210,6 +210,20 @@ async def test_backoff_on_errors_and_rate_limits(tmp_path: Path) -> None:
     env.ctx.db.close()
 
 
+async def test_rate_limited_health_pauses_polling_of_that_exchange(tmp_path: Path) -> None:
+    """A ban discovered by another call on the same exchange (e.g. the private
+    instance, same IP budget) keeps the poller away until it is over."""
+    env = Env(tmp_path)
+    env.books({"binance": 100.0, "kucoin": 100.0, "kraken": 100.0})
+    env.fakes["kucoin"].health.rate_limited_until_mono = env.clock.mono() + 30.0
+    assert await env.poller.poll_once() == 2
+    env.clock.advance(10.0)
+    assert await env.poller.poll_once() == 2
+    env.clock.advance(21.0)
+    assert await env.poller.poll_once() == 3
+    env.ctx.db.close()
+
+
 async def test_disabled_exchange_and_poll_tickers_flag_are_respected(tmp_path: Path) -> None:
     env = Env(tmp_path)
     env.books({"binance": 100.0, "kucoin": 100.0, "kraken": 100.0})

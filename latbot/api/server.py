@@ -794,7 +794,13 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
     async def api_auto_select(opp_id: str) -> JSONResponse:
         _require_opp(opp_id)
         execution = _require_execution()
-        return _json(_result(await _call(execution.select_auto, opp_id), _now(ctx)))
+        kwargs: dict[str, Any] = {}
+        # With AUTO_CONFIRM the engine executes right away: never hold the HTTP
+        # response for the whole trade (entry + exit + hold can take minutes).
+        # The trade runs as a tracked task and the UI follows TRADE_UPDATE.
+        if _supports_kwarg(execution.select_auto, "wait"):
+            kwargs["wait"] = False
+        return _json(_result(await _call(execution.select_auto, opp_id, **kwargs), _now(ctx)))
 
     @app.post("/api/opportunities/{opp_id}/auto/confirm")
     async def api_auto_confirm(opp_id: str) -> JSONResponse:
@@ -806,6 +812,17 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
         if _supports_kwarg(execution.confirm_auto, "wait"):
             kwargs["wait"] = False
         return _json(_result(await _call(execution.confirm_auto, opp_id, **kwargs), _now(ctx)))
+
+    @app.post("/api/opportunities/{opp_id}/auto/deselect")
+    async def api_auto_deselect(opp_id: str) -> JSONResponse:
+        """Back out of the AUTO confirmation: AUTO_SELECTED -> VALID.  Nothing is
+        cancelled - the opportunity stays on the board (distinct from /cancel)."""
+        _require_opp(opp_id)
+        execution = _require_execution()
+        deselect = getattr(execution, "deselect_auto", None)
+        if not callable(deselect):
+            raise HTTPException(status_code=501, detail="auto/deselect is not supported by this execution engine")
+        return _json(_result(await _call(deselect, opp_id), _now(ctx)))
 
     @app.post("/api/opportunities/{opp_id}/cancel")
     async def api_cancel(opp_id: str, body: CancelBody | None = None) -> JSONResponse:

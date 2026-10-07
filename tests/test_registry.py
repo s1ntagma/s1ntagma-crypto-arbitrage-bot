@@ -267,3 +267,30 @@ async def test_resolve_universe_ws_and_poll():
     adapters["kraken"].fail_fetch_tickers = True
     ws, poll = await resolve_universe(s, adapters)
     assert set(poll) == {"ADA", "SOL"}  # only okx remains as execution venue
+
+
+async def test_resolve_universe_with_started_ccxt_adapters():
+    """Production path: adapters are started with the watchlist before the
+    universe is resolved; the non-watchlist assets must still be polled."""
+    from tests.test_ccxt_adapter import Harness, spot_cfg
+
+    s = settings(watchlist=["BTC"], ws_assets=1, poll_assets_max=10, watchlist_auto=False)
+    tickers = {
+        "BTC/EUR": {"symbol": "BTC/EUR", "bid": 1, "ask": 2, "last": 1.5, "quoteVolume": 100.0},
+        "ETH/USDC": {"symbol": "ETH/USDC", "bid": 1, "ask": 2, "last": 1.5, "quoteVolume": 50.0},
+    }
+    adapters = {}
+    for name in ("kraken", "okx"):
+        h = Harness(spot_cfg(name), settings=s)
+        h.public.tickers = dict(tickers)
+        adapters[name] = h.adapter
+    s.exchanges = [ExchangeConfig(name="kraken", role=ExchangeRole.EXECUTION), ExchangeConfig(name="okx", role=ExchangeRole.EXECUTION)]
+    try:
+        for a in adapters.values():
+            await a.start(["BTC"])
+            await a.fetch_tickers(["BTC"])  # the poller's first (watchlist) round
+        ws, poll = await resolve_universe(s, adapters)
+        assert ws == ["BTC"] and poll == ["ETH"]
+    finally:
+        for a in adapters.values():
+            await a.stop()
