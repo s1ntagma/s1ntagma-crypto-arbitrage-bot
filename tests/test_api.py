@@ -230,25 +230,29 @@ class StubExecution:
             raise KeyError(opp_id)
         return opp
 
+    def active_trade(self, opp_id: str) -> TradeRecord | None:
+        # like the engine: the open MANUAL position outlives its opportunity (restart)
+        tid = self.manual.get(opp_id)
+        return make_trade(tid, opp_id, OppState.EXECUTING) if tid else None
+
     async def select_manual(self, opp_id: str) -> dict[str, Any]:
         self.calls.append(("select_manual", (opp_id,), {}))
-        opp = self._opp(opp_id)
         if opp_id not in self.manual:  # like the engine: an open position is reported, not re-selected
-            opp.state = OppState.MANUAL_SELECTED
+            self._opp(opp_id).state = OppState.MANUAL_SELECTED
         return await self.manual_support(opp_id)
 
     async def manual_support(self, opp_id: str) -> dict[str, Any]:
         self.calls.append(("manual_support", (opp_id,), {}))
-        opp = self._opp(opp_id)
         if opp_id in self.manual:
+            opp = self.opps.get(opp_id)
             return {
                 "opp_id": opp_id,
                 "valid": True,
                 "status": "in_position",
                 "side": "LONG",
                 "exit_side": "SELL",
-                "exchange": opp.target_exchange,
-                "symbol": opp.target_symbol,
+                "exchange": opp.target_exchange if opp is not None else "bybit",
+                "symbol": opp.target_symbol if opp is not None else "BTC/USDT",
                 "entry_price_now": 102_140.0,
                 "exit_target_now": 107_065.0,
                 "net_now_pct": 4.7,
@@ -263,6 +267,7 @@ class StubExecution:
                 "entry_price": 102_150.0,
                 "quote_amount": 100.0,
             }
+        opp = self._opp(opp_id)
         return {
             "opp_id": opp_id,
             "valid": opp.is_active,
@@ -293,10 +298,13 @@ class StubExecution:
 
     async def manual_exited(self, opp_id: str, price: float) -> TradeRecord:
         self.calls.append(("manual_exited", (opp_id, price), {}))
-        opp = self._opp(opp_id)
-        self.manual.pop(opp_id, None)
-        opp.state = OppState.CLOSED
-        trade = make_trade("t_manual", opp_id)
+        if opp_id not in self.manual:
+            raise KeyError(f"no open manual trade for opportunity {opp_id}")
+        opp = self.opps.get(opp_id)
+        tid = self.manual.pop(opp_id)
+        if opp is not None:
+            opp.state = OppState.CLOSED
+        trade = make_trade(tid, opp_id)
         trade.actual_exit_price = price
         self._trades.insert(0, trade)
         return trade
@@ -618,6 +626,33 @@ def test_manual_reselect_returns_open_position(client, ctx):
     assert r.status_code == 200 and r.json()["id"] == "t_manual" and r.json()["state"] == "CLOSED"
     assert ctx.opps.get("opp_1").state is OppState.CLOSED and ctx.execution.manual == {}
     assert client.get("/api/opportunities/opp_1/manual/support").json()["status"] != "in_position"
+
+
+def test_manual_exit_of_restored_position_without_opportunity(client, ctx):
+    """After a restart the opportunity is gone (OpportunityManager starts empty)
+    but the engine restored the owner's open MANUAL position: the manual routes
+    must still serve that id (no 404) so the exit can be reported and the risk
+    exposure released.  A NEW entry still needs a live opportunity."""
+    ctx.execution.manual["opp_restored"] = "t_restored"
+    assert ctx.opps.get("opp_restored") is None
+    assert client.get("/api/opportunities/opp_restored").status_code == 404  # the card really is gone
+    r = client.post("/api/opportunities/opp_restored/manual")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "in_position" and r.json()["trade_id"] == "t_restored"
+    r = client.get("/api/opportunities/opp_restored/manual/support")
+    assert r.status_code == 200 and r.json()["status"] == "in_position"
+    r = client.post("/api/opportunities/opp_restored/manual/entered", json={"price": 1, "quote_amount": 1})
+    assert r.status_code == 404
+    r = client.post("/api/opportunities/opp_restored/manual/exited", json={"price": 106_000})
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == "t_restored" and r.json()["state"] == "CLOSED"
+    assert ctx.execution.manual == {}
+    # once closed the id is unknown again: nothing to exit twice
+    assert client.post("/api/opportunities/opp_restored/manual/exited", json={"price": 106_000}).status_code == 404
+    assert client.post("/api/opportunities/opp_restored/manual").status_code == 404
+    # the AUTO routes never accept an id without a live opportunity
+    assert client.post("/api/opportunities/opp_restored/auto").status_code == 404
+    assert client.post("/api/opportunities/opp_restored/cancel").status_code == 404
 
 
 def test_manual_validation_errors(client):

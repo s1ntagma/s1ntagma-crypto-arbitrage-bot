@@ -894,9 +894,16 @@
   }
 
   // ------------------------------------------------------------------ MANUAL modal
+  function openManualTrade(id) {
+    // A MANUAL position restored after a restart: the card is gone, the trade (EXECUTING, no entry order) is not.
+    var found = null;
+    state.trades.forEach(function (t) { if (t && t.opportunity_id === id && isExecuting(t.state) && !t.entry_order) found = t; });
+    return found;
+  }
+
   function openManual(id) {
     var o = getOpp(id);
-    if (!o) { toast('Opportunity ' + id + ' is not loaded.', 'warn'); return; }
+    if (!o && !openManualTrade(id)) { toast('Opportunity ' + id + ' is not loaded.', 'warn'); return; }
     var m = state.manual;
     if (m && m.id === id && m.phase !== 'done') {
       showModal('manual');
@@ -995,6 +1002,8 @@
       if (s.expired || rem <= 0) return { cls: 'yellow', text: '⏱ WINDOW CLOSED — exit at best price' };
       return { cls: 'green', text: '🟢 IN POSITION' };
     }
+    if (s.status === 'no_data') return { cls: 'yellow', text: '⚠️ NO FRESH DATA' };
+    if (s.status === 'mode_changed') return { cls: 'red', text: '⚠️ MODE CHANGED' };
     if (manualExpired(m)) return { cls: 'red', text: '⚠️ OPPORTUNITY EXPIRED' };
     var est = num(s.human && s.human.est_execution_s);
     if (!Number.isFinite(est)) est = num(state.settings.human_execution_time_s);
@@ -1022,7 +1031,7 @@
     var q = o.quote || s.quote || quoteOf(o);
     var sides = entrySide(o, s);
     var exch = exchangeLabel(s.exchange || o.target_exchange);
-    $('manual-title').textContent = 'MANUAL · ' + (s.symbol || pairName(o)) + ' ' + (o.side || '') + ' · ' + exch;
+    $('manual-title').textContent = 'MANUAL · ' + (s.symbol || pairName(o)) + ' ' + (o.side || s.side || '') + ' · ' + exch;
     m.refs = {};
 
     if (m.phase === 'buy') {

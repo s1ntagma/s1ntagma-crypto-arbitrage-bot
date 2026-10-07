@@ -1734,3 +1734,44 @@ async def test_restore_open_trades_from_db() -> None:
     assert a.placed()[-1].type == OrderType.MARKET and a.placed()[-1].amount == pytest.approx(1.0)
     assert trade.realized_pnl_quote == pytest.approx((101.0 - 100.2) - (100.2 + 101.0) * 0.001)
     assert env.risk.open_trades() == 0 and env.engine.open_positions() == []
+
+
+async def test_restored_manual_position_can_be_exited_without_the_opportunity() -> None:
+    """After a restart the opportunity is gone (OpportunityManager starts empty)
+    but the MANUAL position the owner still holds is restored with its risk
+    exposure: the support payload must report the position (never EXPIRED, no
+    invented live numbers) and the exit must be reportable so the exposure is
+    released - otherwise the position is stuck in EXECUTING forever."""
+    env = make_env()
+    held = TradeRecord(id="tr_manual", opportunity_id="opp_gone", mode=Mode.PAPER, exchange="testex", asset="BTC", symbol="BTC/USDT",
+                       direction=1, capital_quote=100.0, expected_net_pct=4.8, expected_profit_quote=4.8, expected_entry_price=100.0,
+                       expected_exit_price=105.05, state=OppState.EXECUTING, entry_order=None, exit_order=None,
+                       actual_entry_price=100.2, actual_fees_quote=0.1, started_ts=T0)
+    env.db.save_trade(held)
+    restored = env.engine.restore_from_db()
+    assert [t.id for t in restored] == ["tr_manual"]
+    assert env.opps.get("opp_gone") is None  # the card itself is not restored
+    assert env.risk.open_trades() == 1 and env.risk.exposure(exchange="testex") == pytest.approx(100.0)
+    active = env.engine.active_trade("opp_gone")
+    assert active is not None and active.id == "tr_manual"
+    for payload in (await env.engine.manual_support("opp_gone"), await env.engine.select_manual("opp_gone")):
+        assert payload["status"] == "in_position" and payload["valid"] is True and payload["expired"] is False, payload
+        assert payload["trade_id"] == "tr_manual" and payload["entry_price"] == 100.2 and payload["quote_amount"] == 100.0
+        assert payload["exit_side"] == "SELL" and payload["side"] == "LONG"
+        assert payload["exchange"] == "testex" and payload["symbol"] == "BTC/USDT" and payload["quote"] == "USDT"
+        assert payload["capital"] == 100.0 and payload["base_amount"] == pytest.approx(100.0 / 100.2)
+        # no opportunity -> no live price / net is invented (hard rule 1)
+        assert payload["entry_price_now"] is None and payload["exit_target_now"] is None and payload["net_now_pct"] is None
+        assert payload["fresh"] is False and "IN POSITION" in payload["message"]
+    # a new entry needs a live opportunity
+    assert (await env.engine.manual_entered("opp_gone", 100.0, 50.0))["ok"] is False
+    assert env.risk.open_trades() == 1
+    trade = await env.engine.manual_exited("opp_gone", 106.0)
+    assert trade.id == "tr_manual" and trade.state == OppState.CLOSED
+    base = 100.0 / 100.2
+    assert trade.realized_pnl_quote == pytest.approx((106.0 - 100.2) * base - (100.0 + 106.0 * base) * 0.001)
+    assert env.risk.open_trades() == 0 and env.engine.active_trade("opp_gone") is None
+    assert env.db.get_trade("tr_manual")["state"] == "CLOSED"
+    assert (await env.engine.manual_support("opp_gone"))["status"] == "expired"
+    with pytest.raises(KeyError):
+        await env.engine.manual_exited("opp_gone", 106.0)

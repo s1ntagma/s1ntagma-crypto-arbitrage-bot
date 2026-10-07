@@ -436,7 +436,12 @@ class ExecutionEngine:
   message="⚠️ OPPORTUNITY EXPIRED"`.  While a manual position is open the
   payload is `status="in_position"` with `trade_id, entry_price, quote_amount,
   exit_side` (also from `select_manual`), so a reloaded page / second tab can
-  resume the exit step instead of starting a new entry.
+  resume the exit step instead of starting a new entry.  A MANUAL position
+  restored after a restart has no opportunity any more (`OpportunityManager`
+  starts empty): `select_manual` / `manual_support` still answer
+  `in_position` for its id (live numbers `None`, `fresh=False`) and
+  `manual_exited` closes it; the manual API routes accept such an id through
+  `execution.active_trade` (a new entry still needs a live opportunity).
 * `revalidate`: book age ≤ max_data_age_ms (else `fetch_order_book` REST once);
   recompute econ with the current catch-up; require `econ.net_pct ≥ max(settings.min_net_pct_auto,
   opp.econ.net_pct * settings.revalidate_tolerance)`, `liquidity_ok`, bot light

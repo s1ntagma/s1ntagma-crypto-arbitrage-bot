@@ -705,6 +705,30 @@ class ExecutionEngine:
         )
         return d
 
+    def _position_only_payload(self, opp_id: str, manual: TradeRecord) -> dict[str, Any]:
+        """An open MANUAL position whose opportunity no longer exists (restored
+        after a restart): the exit stays reportable, nothing live is invented
+        (hard rule 1) - no price, no net, no window."""
+        d = self._expired_payload(None, opp_id, "🟢 IN POSITION - opportunity no longer tracked; report your exit price")
+        d.update(
+            valid=True,
+            status="in_position",
+            expired=False,
+            side="LONG" if manual.direction > 0 else "SHORT",
+            exchange=manual.exchange,
+            symbol=manual.symbol,
+            state=manual.state.value,
+            quote=split_symbol(manual.symbol)[1],
+            capital=manual.capital_quote,
+            base_amount=(manual.capital_quote / manual.actual_entry_price) if manual.actual_entry_price else None,
+            expected_net_pct=manual.expected_net_pct,
+            trade_id=manual.id,
+            entry_price=manual.actual_entry_price,
+            quote_amount=manual.capital_quote,
+            exit_side="SELL" if manual.direction > 0 else "BUY",
+        )
+        return d
+
     def _mode_mismatch(self, opp: Opportunity) -> str | None:
         """Hard rule 8: the card the owner acts on must show the mode that
         would execute.  After a PAPER/LIVE switch the pipeline re-labels the
@@ -721,6 +745,9 @@ class ExecutionEngine:
         """Mark the opportunity MANUAL_SELECTED and return the live support payload."""
         opp = self._opps.get(opp_id)
         if opp is None:
+            manual = self._manual.get(opp_id)
+            if manual is not None:  # restored after a restart: the card is gone, the position is not
+                return self._position_only_payload(opp_id, manual)
             return self._expired_payload(None, opp_id)
         if opp_id in self._active:
             return self._expired_payload(opp, opp_id, "⚠️ AUTO EXECUTION IN PROGRESS")
@@ -749,6 +776,8 @@ class ExecutionEngine:
         opp = self._opps.get(opp_id)
         manual = self._manual.get(opp_id)
         if opp is None:
+            if manual is not None:  # restored after a restart: the card is gone, the position is not
+                return self._position_only_payload(opp_id, manual)
             return self._expired_payload(None, opp_id)
         if not opp.is_active and manual is None:
             return self._expired_payload(opp, opp_id)

@@ -648,6 +648,27 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
             raise HTTPException(status_code=404, detail="opportunity not found")
         return opp
 
+    def _require_opp_or_manual_position(opp_id: str) -> Any:
+        """Manual routes: the opportunity - or, after a restart, the open MANUAL
+        position the engine restored for an opportunity that no longer exists
+        (``execution.active_trade``), so its exit can still be reported."""
+        opps = getattr(ctx, "opps", None)
+        if opps is None or not hasattr(opps, "get"):
+            return None
+        opp = opps.get(opp_id)
+        if opp is not None:
+            return opp
+        active_trade = getattr(getattr(ctx, "execution", None), "active_trade", None)
+        if callable(active_trade):
+            try:
+                trade = active_trade(opp_id)
+            except Exception:  # noqa: BLE001
+                log.exception("execution.active_trade failed")
+                trade = None
+            if trade is not None and getattr(trade, "entry_order", None) is None:
+                return trade
+        raise HTTPException(status_code=404, detail="opportunity not found")
+
     async def _publish(topic: str, payload: Any) -> None:
         bus = getattr(ctx, "bus", None)
         if bus is None or not hasattr(bus, "publish"):
@@ -765,13 +786,13 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
     # ---- manual flow -----------------------------------------------------
     @app.post("/api/opportunities/{opp_id}/manual")
     async def api_manual_select(opp_id: str) -> JSONResponse:
-        _require_opp(opp_id)
+        _require_opp_or_manual_position(opp_id)
         execution = _require_execution()
         return _json(_result(await _call(execution.select_manual, opp_id), _now(ctx)))
 
     @app.get("/api/opportunities/{opp_id}/manual/support")
     async def api_manual_support(opp_id: str) -> JSONResponse:
-        _require_opp(opp_id)
+        _require_opp_or_manual_position(opp_id)
         execution = _require_execution()
         return _json(_result(await _call(execution.manual_support, opp_id), _now(ctx)))
 
@@ -784,7 +805,7 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
 
     @app.post("/api/opportunities/{opp_id}/manual/exited")
     async def api_manual_exited(opp_id: str, body: ManualExited) -> JSONResponse:
-        _require_opp(opp_id)
+        _require_opp_or_manual_position(opp_id)  # a restored position has no opportunity any more
         execution = _require_execution()
         result = await _call(execution.manual_exited, opp_id, body.price)
         return _json(_result(result, _now(ctx)))
