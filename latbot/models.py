@@ -399,6 +399,9 @@ class LagSignal:
     detected_ts: float
     movers_count: int = 1  # how many exchanges already moved >= threshold
     median_reaction_delay_s: float | None = None  # historical for target
+    source: str = "ws"  # "ws" (order book / bbo stream) | "poll" (REST tickers; needs book confirmation)
+    target_quote: str = ""  # quote currency of the target market (EUR / USDC / USD / USDT)
+    mover_volumes_quote: dict[str, float] = field(default_factory=dict)  # 24h quote volume per mover
 
 
 # --------------------------------------------------------------------------- #
@@ -467,6 +470,8 @@ class ExecAssessment:
     margin_s: float  # remaining_window - est_execution
     probability: float  # 0..1 rough success probability
     reasons: list[str] = field(default_factory=list)
+    stats_rate: float | None = None  # learned success rate for this (asset, exchange) if known
+    stats_n: int = 0  # number of samples behind stats_rate
 
 
 # --------------------------------------------------------------------------- #
@@ -501,6 +506,11 @@ class Opportunity:
     net_history: list[tuple[float, float]] = field(default_factory=list)  # (mono, net_pct)
     update_count: int = 0
     expire_reason: str = ""
+    quote: str = ""  # quote currency of the target market (for display: €, $)
+    pair_url: str = ""  # direct link to the pair page on the target exchange
+    caught_up: bool | None = None  # set at expiry: did the target actually catch up?
+    human_would_make_it: bool | None = None  # set at expiry: window >= human time AND caught_up
+    max_net_pct: float = 0.0  # best NET seen during the opportunity's life
 
     def age_s(self, now_mono: float) -> float:
         return max(0.0, now_mono - self.first_seen_mono)
@@ -607,11 +617,26 @@ class ReactionStats:
     realized_returns_pct: list[float] = field(default_factory=list)
     slippages_pct: list[float] = field(default_factory=list)
     exec_latencies_ms: list[float] = field(default_factory=list)
+    # Learned "would a human have made it": per expired/closed opportunity we
+    # record whether the window lasted >= human_execution_time_s AND the target
+    # actually caught up (so the exit would have been there).
+    human_window_total: int = 0
+    human_window_ok: int = 0
+    caught_up_total: int = 0
+    caught_up_ok: int = 0
 
     @property
     def success_rate(self) -> float | None:
         n = self.success_count + self.fail_count
         return None if n == 0 else self.success_count / n
+
+    @property
+    def human_success_rate(self) -> float | None:
+        return None if self.human_window_total == 0 else self.human_window_ok / self.human_window_total
+
+    @property
+    def catchup_rate(self) -> float | None:
+        return None if self.caught_up_total == 0 else self.caught_up_ok / self.caught_up_total
 
 
 def percentile(values: list[float], p: float) -> float | None:

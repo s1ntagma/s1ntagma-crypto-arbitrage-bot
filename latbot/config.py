@@ -111,30 +111,54 @@ class ExchangeConfig:
     allow_short: bool = False  # SHORT opportunities (direction -1); swap only
     taker_fee: float = 0.001  # fraction; overridden by live fee info when available
     maker_fee: float = 0.001
-    book_depth: int = 20
+    book_depth: int = 10
     demo: bool = False  # use exchange demo/testnet endpoint (Bybit Demo Trading)
     rate_limit_per_s: float = 10.0
     weight: float = 1.0  # tie-breaker for target selection (1 = neutral)
+    # Streaming: "book" = full order book (needed for execution targets),
+    # "bbo" = best bid/ask only (cheap; enough for move detection on signal sources).
+    stream: str = "book"
+    max_ws_subscriptions: int = 0  # 0 = no limit; Coinbase breaks above ~4 book streams
+    poll_tickers: bool = True  # broad coverage via REST fetch_tickers (all common assets)
+    pair_url: str = ""  # override template for the "open pair" button (see market/links.py)
+    label: str = ""  # display name ("OKX EEA", "Bybit EU")
 
     @property
     def ccxt_name(self) -> str:
         return self.ccxt_id or self.name
 
+    @property
+    def display(self) -> str:
+        return self.label or self.name.capitalize()
 
+
+# Manual-first default universe (owner trades by hand on EU-licensed venues):
+#   EXECUTION (targets) = exchanges where the owner has an account.
+#   SIGNAL = fast venues used only to see that "the market already moved".
+# Prices are compared as PERCENT moves per exchange, so EUR / USDC / USD quoted
+# markets are comparable without an FX conversion.
 DEFAULT_EXCHANGES: list[ExchangeConfig] = [
-    # Binance is a signal source only (not MiCA-licensed for EU execution).
-    ExchangeConfig(name="binance", role=ExchangeRole.SIGNAL, market_type="spot", taker_fee=0.001, maker_fee=0.001),
-    # Bybit: USDT linear perpetuals on Demo Trading (api-demo.bybit.com), as in the previous bot.
+    # ---- targets (manual trading venues) ----------------------------------
+    ExchangeConfig(name="kraken", role=ExchangeRole.EXECUTION, taker_fee=0.004, maker_fee=0.0025, label="Kraken"),
     ExchangeConfig(
-        name="bybit", role=ExchangeRole.EXECUTION, market_type="swap", allow_short=True, demo=True,
-        taker_fee=0.00055, maker_fee=0.0002,
+        name="coinbase", role=ExchangeRole.EXECUTION, taker_fee=0.006, maker_fee=0.004, max_ws_subscriptions=4, label="Coinbase"
     ),
-    ExchangeConfig(name="okx", role=ExchangeRole.EXECUTION, market_type="spot", taker_fee=0.001, maker_fee=0.0008),
-    ExchangeConfig(name="kraken", role=ExchangeRole.EXECUTION, market_type="spot", taker_fee=0.004, maker_fee=0.0025),
-    ExchangeConfig(name="coinbase", role=ExchangeRole.EXECUTION, market_type="spot", taker_fee=0.006, maker_fee=0.004),
-    ExchangeConfig(name="gate", role=ExchangeRole.EXECUTION, market_type="spot", taker_fee=0.002, maker_fee=0.002),
-    ExchangeConfig(name="bitstamp", role=ExchangeRole.EXECUTION, enabled=False, taker_fee=0.004, maker_fee=0.003),
-    ExchangeConfig(name="bitvavo", role=ExchangeRole.EXECUTION, enabled=False, taker_fee=0.0025, maker_fee=0.0015),
+    ExchangeConfig(name="bitvavo", role=ExchangeRole.EXECUTION, taker_fee=0.0025, maker_fee=0.0015, label="Bitvavo"),
+    ExchangeConfig(name="bitstamp", role=ExchangeRole.EXECUTION, taker_fee=0.004, maker_fee=0.003, label="Bitstamp"),
+    ExchangeConfig(name="cryptocom", role=ExchangeRole.EXECUTION, taker_fee=0.0075, maker_fee=0.0025, label="Crypto.com"),
+    ExchangeConfig(name="okx", ccxt_id="myokx", role=ExchangeRole.EXECUTION, taker_fee=0.001, maker_fee=0.0008, label="OKX EEA"),
+    # Bybit: Demo Trading (api-demo.bybit.com) is the paper venue carried over from the previous bot.
+    ExchangeConfig(
+        name="bybit", role=ExchangeRole.EXECUTION, market_type="spot", demo=True,
+        taker_fee=0.001, maker_fee=0.001, label="Bybit EU",
+    ),
+    ExchangeConfig(name="gate", role=ExchangeRole.EXECUTION, taker_fee=0.002, maker_fee=0.002, label="Gate EU"),
+    # ---- signal sources only (not MiCA venues; never targets) ----------------
+    ExchangeConfig(name="binance", role=ExchangeRole.SIGNAL, stream="bbo", taker_fee=0.001, maker_fee=0.001, label="Binance"),
+    ExchangeConfig(name="kucoin", role=ExchangeRole.SIGNAL, stream="bbo", taker_fee=0.001, maker_fee=0.001, label="KuCoin"),
+    ExchangeConfig(name="mexc", role=ExchangeRole.SIGNAL, stream="bbo", taker_fee=0.001, maker_fee=0.0, label="MEXC"),
+    ExchangeConfig(name="bitget", role=ExchangeRole.SIGNAL, stream="bbo", taker_fee=0.001, maker_fee=0.001, label="Bitget"),
+    ExchangeConfig(name="htx", role=ExchangeRole.SIGNAL, stream="bbo", taker_fee=0.002, maker_fee=0.002, label="HTX"),
 ]
 
 
@@ -160,9 +184,23 @@ class Settings:
     )
     watchlist_auto: bool = False  # pick most liquid assets on watchlist_exchange at start
     watchlist_size: int = 15  # 3..20 when watchlist_auto
-    watchlist_exchange: str = "bybit"
-    quote_assets: list[str] = field(default_factory=lambda: ["USDT", "USDC", "USD"])
+    watchlist_exchange: str = "kraken"
+    # Quote preference per exchange market resolution.  Moves are compared in
+    # percent, so EUR / USDC / USD / USDT quoted markets are all comparable.
+    quote_assets: list[str] = field(default_factory=lambda: ["EUR", "USDC", "USD", "USDT"])
     exchanges: list[ExchangeConfig] = field(default_factory=lambda: [ExchangeConfig(**asdict(e)) for e in DEFAULT_EXCHANGES])
+    # ---- coverage: WS for the core watchlist, REST ticker polling for breadth --
+    ws_assets: int = 10  # how many watchlist assets get WebSocket streams per exchange
+    ticker_poll_enabled: bool = True  # fetch_tickers on every exchange for ALL common assets
+    ticker_poll_interval_s: float = 2.0
+    poll_assets_max: int = 600  # cap on polled assets (common to >= 2 exchanges)
+    confirm_with_rest_book: bool = True  # for polled assets fetch the target REST book before creating an opportunity
+    price_sample_min_interval_ms: float = 100.0  # throttle mid-price series appends per stream
+    # ---- signal quality --------------------------------------------------
+    min_movers: int = 2  # at least this many exchanges must have moved (single-venue spikes revert)
+    min_mover_volume_quote: float = 1_000_000.0  # 24h quote volume for a mover exchange to count
+    min_target_volume_quote: float = 100_000.0  # 24h quote volume on the target market
+    alert_human_only: bool = True  # Telegram only when HUMAN light != RED (owner trades by hand)
 
     # ---- human / bot execution ------------------------------------------
     human_execution_time_s: float = 7.0  # HUMAN_EXECUTION_TIME
@@ -313,6 +351,12 @@ class Settings:
                 raise ValueError(f"exchange {e.name}: market_type must be spot|swap")
             if e.market_type == "spot":
                 e.allow_short = False
+            if e.stream not in ("book", "bbo"):
+                raise ValueError(f"exchange {e.name}: stream must be book|bbo")
+            if e.role == ExchangeRole.EXECUTION:
+                e.stream = "book"  # targets always need depth
+        self.min_movers = max(1, int(self.min_movers))
+        self.ws_assets = max(1, int(self.ws_assets))
         if self.capital_quote <= 0 or self.max_trade_quote <= 0:
             raise ValueError("capital must be > 0")
         if self.max_slippage_pct < 0 or self.max_slippage_pct > 10:
@@ -388,6 +432,8 @@ _ENV_OVERRIDES = {
     "WATCHLIST": "watchlist",
     "WATCHLIST_SIZE": "watchlist_size",
     "PAPER_BALANCE": "paper_balance_quote",
+    "ALERT_HUMAN_ONLY": "alert_human_only",
+    "MIN_MOVERS": "min_movers",
 }
 
 

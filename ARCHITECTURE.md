@@ -498,3 +498,86 @@ adapters' order latency), `avg_execution_time_s`, `success_rate`.
 `tests/` with pytest; `pytest.ini`: `asyncio_mode = auto`.  Everything offline:
 use `FakeAdapter`, `SimClock`, `Database(":memory:")`.  Each module gets its own
 `tests/test_<module>.py`.  Run: `python -m pytest -q` and `python -m pyflakes latbot tests`.
+
+---
+
+# Phase 2 — manual-first additions (owner trades by hand; no API keys yet)
+
+Findings from the live run of the earlier prototype: (a) 327 of 341 "lag"
+events were single-exchange spikes in an empty book that reverted within ~30 s
+while no other venue followed — a spike on ONE exchange is not "the market
+moved"; (b) 15 assets × 6 full order-book streams overloaded the event loop
+and Coinbase drops connections above ~4 book subscriptions; (c) the owner's
+venues are EU-licensed (Kraken, Coinbase, Bitvavo, Bitstamp, Crypto.com, OKX
+EEA, Bybit EU, Gate EU) with EUR/USDC/USD markets, ~900 assets in common.
+
+Settings/model fields for this phase already exist (see `config.py`:
+`ws_assets`, `ticker_poll_*`, `poll_assets_max`, `confirm_with_rest_book`,
+`price_sample_min_interval_ms`, `min_movers`, `min_mover_volume_quote`,
+`min_target_volume_quote`, `alert_human_only`; `ExchangeConfig.stream`,
+`max_ws_subscriptions`, `poll_tickers`, `pair_url`, `label`;
+`LagSignal.source/target_quote/mover_volumes_quote`;
+`Opportunity.quote/pair_url/caught_up/human_would_make_it/max_net_pct`;
+`ReactionStats.human_window_*`, `caught_up_*`; `ExecAssessment.stats_rate/stats_n`;
+`latbot/links.py`).
+
+## 2.1 Moves are compared in percent, quotes may differ
+Each exchange resolves an asset to ITS market (EUR on Kraken, USDC on Coinbase,
+USDT on Binance).  `MoveDetector` compares `move_pct` per exchange, so no FX is
+needed.  Economics run inside the target's own book and quote; the card shows
+prices/capital with the market's quote (€ / $).  `LagSignal.target_quote` and
+`Opportunity.quote` carry it; `Opportunity.pair_url = links.pair_url(target, target_symbol, cfg.pair_url)`.
+
+## 2.2 Multi-venue confirmation (`min_movers`)
+A `LagSignal` is emitted only when `movers_count >= settings.min_movers`
+(default 2) and every counted mover has 24h quote volume
+`>= min_mover_volume_quote` (volume from `MarketState.volume24h(exchange, asset)`,
+fed by tickers; unknown volume → the mover does not count).  The target market
+needs `volume24h >= min_target_volume_quote` when known.  Single-venue spikes
+are still recorded as `MoveEvent`s (for learning) but never become
+opportunities.
+
+## 2.3 Coverage: WebSocket core + REST polling breadth
+* `CcxtAdapter.start(assets, ws_assets)`: order-book (`stream="book"`) or
+  best-bid/ask (`stream="bbo"`: `watch_bids_asks` if `has['watchBidsAsks']`
+  else `watch_ticker`, publishing `Ticker`) streams for at most
+  `min(ws_assets, cfg.max_ws_subscriptions or ∞)` assets (watchlist order).
+  All other common assets are covered by polling.
+* `CcxtAdapter.fetch_tickers() -> dict[str, Ticker]` (asset → Ticker for every
+  resolved market; one REST call) and `resolve_assets(assets)` for the whole
+  universe.
+* `latbot/market/poller.py — TickerPoller(settings, adapters, state, detector, pipeline, clock)`:
+  every `ticker_poll_interval_s`, for each adapter with `cfg.poll_tickers`,
+  `fetch_tickers()` → `state.on_ticker()` (mid from bid/ask, else last; stores
+  volume24h) → `detector.on_ticker(ticker)` → `LagSignal(source="poll")` →
+  `pipeline.evaluate(signal)`.  Per-exchange backoff on errors / rate limits.
+* `Pipeline.evaluate` for `source == "poll"` (or when the target book is older
+  than `max_data_age_ms`) and `confirm_with_rest_book`: `await adapters[target].fetch_order_book(symbol)`
+  → `state.on_book(book)` → economics on that fresh book.  No book → no opportunity.
+* `MarketState.on_ticker` appends to the same mid series as books; appends are
+  throttled per stream to one per `price_sample_min_interval_ms`.
+* Universe: `registry.resolve_universe(settings, adapters) -> (ws_assets: list[str], poll_assets: list[str])`:
+  ws = settings.watchlist (or auto top-N by volume on watchlist_exchange);
+  poll = assets listed on ≥ 2 enabled exchanges with ≥ 1 EXECUTION venue,
+  sorted by total volume, capped at `poll_assets_max`.
+
+## 2.4 Learned "would a human have made it"
+When an opportunity leaves the active set (EXPIRED or CLOSED):
+`caught_up` = the target crossed in the signal's direction during the
+opportunity's life (`MoveDetector` reports via `opps.mark_caught_up(asset, target)`
+or the pipeline passes the latest target move; either way it ends up on the
+Opportunity), `human_would_make_it = actual_duration_s >= settings.human_execution_time_s and caught_up`.
+`StatsStore.record_human_outcome(asset, target, window_ok: bool, caught_up: bool)`
+updates `human_window_total/ok` and `caught_up_total/ok`.
+`assess_human` receives `stats: ReactionStats | None` (new optional kwarg) and
+fills `stats_rate = stats.human_success_rate`, `stats_n = human_window_total`;
+probability blends the margin-based estimate with `stats_rate` when
+`stats_n >= 5`; the card shows "by stats: 7/10 made it".
+
+## 2.5 Telegram & UI for manual trading
+* `TelegramNotifier.should_alert`: additionally `human.light != RED` when
+  `settings.alert_human_only` (default True).  Buttons: `OPEN ON <Exchange>`
+  (`opp.pair_url`) and `OPEN OPPORTUNITY` (terminal deep link).  Prices and
+  capital formatted with the market quote (€ for EUR, $ otherwise).
+* UI card and MANUAL modal: "Open on Kraken ↗" link, quote-aware formatting,
+  "HUMAN 🟢 7 s needed / ~12 s window · by stats 7/10" line.
