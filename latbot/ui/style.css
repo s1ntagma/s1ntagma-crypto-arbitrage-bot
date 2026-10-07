@@ -133,7 +133,7 @@ a { color: var(--accent); }
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-sm);
   padding: 8px 10px; min-height: 58px;
 }
-.tile-label { color: var(--muted); font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; }
+.tile-label { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; }
 .tile-value { font-family: var(--font-mono); font-size: 1.15rem; font-weight: 700; line-height: 1.3; }
 .tile-lights { display: flex; gap: 10px; }
 
@@ -149,7 +149,7 @@ a { color: var(--accent); }
 }
 .chip-health .lat { font-family: var(--font-mono); color: var(--muted); }
 .tag {
-  display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700;
+  display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: 700;
   letter-spacing: 0.06em; text-transform: uppercase; border: 1px solid currentColor;
 }
 .tag.red { color: var(--red); }
@@ -203,7 +203,7 @@ a { color: var(--accent); }
 .chip.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
 .filter-selects { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
 .field { display: flex; flex-direction: column; gap: 3px; min-width: 120px; flex: 1 1 120px; }
-.field-label { color: var(--muted); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; }
+.field-label { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; }
 .field input, .field select {
   min-height: 36px; padding: 6px 8px; border-radius: var(--radius-sm);
   border: 1px solid var(--border-strong); background: var(--panel-2); color: var(--text);
@@ -232,13 +232,13 @@ a { color: var(--accent); }
 .card-target { margin-left: auto; font-size: 0.8rem; color: var(--muted); }
 .card-target b { color: var(--text); }
 .card-net { display: flex; align-items: baseline; gap: 10px; }
-.card-net-label { color: var(--muted); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; }
+.card-net-label { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; }
 .card-net-value { font-family: var(--font-mono); font-size: 1.9rem; font-weight: 800; line-height: 1.1; }
 .card-net-value.pos { color: var(--green); }
 .card-net-value.neg { color: var(--red); }
 .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
 .kv { display: flex; flex-direction: column; }
-.kv-k { color: var(--muted); font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; }
+.kv-k { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; }
 .kv-v { font-family: var(--font-mono); font-weight: 600; }
 .window { display: flex; flex-direction: column; gap: 4px; }
 .window-row { display: flex; justify-content: space-between; font-size: 0.85rem; }
@@ -261,7 +261,7 @@ a { color: var(--accent); }
 .card-foot .link { font-size: 0.85rem; white-space: nowrap; }
 .card-actions { display: flex; gap: 8px; flex: 1 1 100%; }
 .card-meta { display: flex; gap: 8px; flex-wrap: wrap; font-size: 0.75rem; color: var(--muted); }
-.state-badge { font-family: var(--font-mono); font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; background: var(--panel-3); }
+.state-badge { font-family: var(--font-mono); font-size: 0.75rem; padding: 1px 6px; border-radius: 4px; background: var(--panel-3); }
 
 .empty { text-align: center; color: var(--muted); padding: 40px 10px; }
 .empty-title { font-weight: 600; color: var(--text); margin: 0 0 4px; }
@@ -271,7 +271,7 @@ a { color: var(--accent); }
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
 .table { width: 100%; border-collapse: collapse; font-size: 0.85rem; min-width: 760px; }
 .table th, .table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
-.table th { background: var(--panel-2); color: var(--muted); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; position: sticky; top: 0; }
+.table th { background: var(--panel-2); color: var(--muted); font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; position: sticky; top: 0; }
 .table th.num, .table td.num { text-align: right; font-family: var(--font-mono); }
 .table tbody tr:hover { background: var(--panel-3); }
 .table td.wrap { white-space: normal; min-width: 220px; color: var(--muted); }

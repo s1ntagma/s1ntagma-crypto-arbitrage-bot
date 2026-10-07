@@ -1130,6 +1130,13 @@
       if (state.manual !== m) return;
       m.busy = false;
       if (!r.ok) { m.refs.formError.textContent = r.error; updateManualLive(); return; }
+      if (r.data && r.data.ok === false) {
+        // Engine refused the entry (position already open, AUTO in progress, opportunity closed…).
+        m.refs.formError.textContent = r.data.reason || r.data.message || 'entry rejected by the engine';
+        if (r.data.message) m.support = Object.assign({}, m.support, { message: r.data.message });
+        updateManualLive();
+        return;
+      }
       m.entered = Object.assign({ entry_price: price, quote_amount: qty }, r.data || {});
       m.phase = 'sell';
       renderManual(true);
@@ -1198,6 +1205,10 @@
       if (d.confirmation_required) {
         a.phase = 'confirm';
         a.snapshot = d.snapshot || {};
+      } else if (d.ok === false && !(d.state && isTerminal(d.state))) {
+        // Engine refused before anything was sent (risk limit, emergency, stale book…): HTTP 200 + ok:false.
+        a.phase = 'error';
+        a.error = d.reason || 'AUTO rejected by the engine';
       } else {
         a.phase = 'executing';
         a.result = d;

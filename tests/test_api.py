@@ -611,6 +611,26 @@ def test_auto_with_auto_confirm_executes_immediately(client, ctx):
     assert "confirmation_required" not in d and d["state"] == "EXECUTING"
 
 
+def test_engine_business_refusal_passes_through_as_200(client, ctx):
+    """The real engine answers risk/state refusals with ``{"ok": False, "reason"}``
+    (not an exception); the API must forward that verbatim so the UI can show the
+    reason instead of treating it as a transport error."""
+
+    async def refuse_auto(opp_id: str) -> dict[str, Any]:
+        return {"ok": False, "reason": "risk: daily loss limit reached", "opp_id": opp_id, "state": "VALID"}
+
+    async def refuse_entry(opp_id: str, price: float, quote_amount: float) -> dict[str, Any]:
+        return {"ok": False, "reason": "AUTO execution in progress for this opportunity"}
+
+    ctx.execution.select_auto = refuse_auto
+    ctx.execution.manual_entered = refuse_entry
+    r = client.post("/api/opportunities/opp_1/auto")
+    assert r.status_code == 200
+    assert r.json() == {"ok": False, "reason": "risk: daily loss limit reached", "opp_id": "opp_1", "state": "VALID"}
+    r = client.post("/api/opportunities/opp_1/manual/entered", json={"price": 100.0, "quote_amount": 50.0})
+    assert r.status_code == 200 and r.json()["ok"] is False and "AUTO execution" in r.json()["reason"]
+
+
 # --------------------------------------------------------------------------- #
 # Emergency
 # --------------------------------------------------------------------------- #
