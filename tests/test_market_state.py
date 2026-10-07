@@ -1,0 +1,131 @@
+"""Offline tests for latbot.market.state.MarketState."""
+from __future__ import annotations
+
+from latbot.clock import SimClock
+from latbot.config import Settings
+from latbot.market.state import MarketState
+from latbot.models import BookLevel, ExchangeHealth, OrderBook, Side, Ticker, Timestamps, Trade
+
+
+def ts(mono: float) -> Timestamps:
+    return Timestamps(recv_ts=1_700_000_000.0 + (mono - 1000.0), recv_mono=mono)
+
+
+def book(ex: str, mid: float, mono: float, asset: str = "BTC", symbol: str = "BTC/USDT") -> OrderBook:
+    bids = [BookLevel(mid * (1 - 0.0001 * k), 50.0) for k in (1, 2, 3)]
+    asks = [BookLevel(mid * (1 + 0.0001 * k), 50.0) for k in (1, 2, 3)]
+    return OrderBook(exchange=ex, symbol=symbol, bids=bids, asks=asks, ts=ts(mono), asset=asset)
+
+
+def ticker(ex: str, mono: float, bid=100.0, ask=100.2, last=None, base_volume=None, quote_volume=None,
+           asset="BTC", symbol="BTC/USDT") -> Ticker:
+    return Ticker(exchange=ex, symbol=symbol, bid=bid, ask=ask, last=last, ts=ts(mono), asset=asset,
+                  base_volume=base_volume, quote_volume=quote_volume)
+
+
+def make_state(**over) -> tuple[MarketState, SimClock]:
+    settings = Settings(**over)
+    clock = SimClock()
+    return MarketState(settings, clock), clock
+
+
+def test_store_latest_book_and_lookups():
+    st, clock = make_state(price_sample_min_interval_ms=0)
+    b1 = book("binance", 100.0, 1000.0)
+    b2 = book("binance", 101.0, 1001.0)
+    st.on_book(b1)
+    st.on_book(b2)
+    st.on_book(book("kraken", 100.0, 1001.0, symbol="BTC/EUR"))
+    assert st.book("binance", "BTC") is b2
+    assert st.book("kraken", "ETH") is None
+    assert set(st.books_for("BTC")) == {"binance", "kraken"}
+    assert st.assets() == {"BTC"}
+    assert st.exchanges_for("BTC") == ["binance", "kraken"]
+    assert st.exchanges_for("ETH") == []
+    assert st.symbol("kraken", "BTC") == "BTC/EUR"
+    assert st.symbol("kraken", "ETH") is None
+    # asset derived from the symbol when the adapter did not fill it
+    st.on_book(book("okx", 10.0, 1001.0, asset="", symbol="SOL/USDT"))
+    assert "SOL" in st.assets()
+    assert st.book("okx", "SOL") is not None
+
+
+def test_series_append_and_trim():
+    st, _ = make_state(price_history_s=10.0, price_sample_min_interval_ms=0)
+    for i in range(20):
+        st.on_book(book("binance", 100.0 + i, 1000.0 + i))
+    series = st.mid_series("binance", "BTC")
+    monos = [m for m, _ in series]
+    assert monos == sorted(monos)
+    assert monos[0] >= 1019.0 - 10.0
+    assert monos[-1] == 1019.0
+    assert series[-1][1] == 119.0
+    assert st.mid_series("nope", "BTC") == ()
+
+
+def test_series_throttle_replaces_newest_point():
+    st, _ = make_state(price_sample_min_interval_ms=100.0)
+    st.on_book(book("binance", 100.0, 1000.0))
+    st.on_book(book("binance", 101.0, 1000.05))  # lone first point is never replaced
+    assert [p[1] for p in st.mid_series("binance", "BTC")] == [100.0, 101.0]
+    st.on_book(book("binance", 102.0, 1000.10))  # within interval of the last accepted sample -> replace
+    assert [p for p in st.mid_series("binance", "BTC")] == [(1000.0, 100.0), (1000.10, 102.0)]
+    st.on_book(book("binance", 103.0, 1000.20))  # interval elapsed -> append
+    assert [p[1] for p in st.mid_series("binance", "BTC")] == [100.0, 102.0, 103.0]
+    # out-of-order sample is ignored
+    st.on_book(book("binance", 50.0, 999.0))
+    assert [p[1] for p in st.mid_series("binance", "BTC")] == [100.0, 102.0, 103.0]
+
+
+def test_mid_at():
+    st, _ = make_state(price_sample_min_interval_ms=0)
+    for i in range(5):
+        st.on_book(book("binance", 100.0 + i, 1000.0 + i))
+    assert st.mid_at("binance", "BTC", 999.0) is None
+    assert st.mid_at("binance", "BTC", 1000.0) == 100.0
+    assert st.mid_at("binance", "BTC", 1002.5) == 102.0
+    assert st.mid_at("binance", "BTC", 2000.0) == 104.0
+    assert st.mid_at("kraken", "BTC", 1000.0) is None
+
+
+def test_is_fresh_age_and_health():
+    st, _ = make_state()
+    assert st.is_fresh("binance", "BTC", 1000.0, 1500.0) is False
+    st.on_book(book("binance", 100.0, 1000.0))
+    assert st.is_fresh("binance", "BTC", 1001.0, 1500.0) is True
+    assert st.is_fresh("binance", "BTC", 1002.0, 1500.0) is False
+    h = ExchangeHealth(exchange="binance", ws_connected=True, stale=True)
+    st.on_health(h)
+    assert st.health("binance") is h
+    assert st.is_fresh("binance", "BTC", 1001.0, 1500.0) is False
+    h.stale = False  # same object -> live flag
+    assert st.is_fresh("binance", "BTC", 1001.0, 1500.0) is True
+    h.maintenance = True
+    assert st.is_fresh("binance", "BTC", 1001.0, 1500.0) is False
+
+
+def test_recent_quote_volume_window():
+    st, _ = make_state()
+    for i in range(10):
+        st.on_trade(Trade(exchange="binance", symbol="BTC/USDT", price=100.0, amount=1.0, side=Side.BUY,
+                          ts=ts(1000.0 + i), asset="BTC"))
+    assert st.recent_quote_volume("binance", "BTC", 5.0, 1009.0) == 600.0  # monos 1004..1009
+    assert st.recent_quote_volume("binance", "BTC", 100.0, 1009.0) == 1000.0
+    assert st.recent_quote_volume("binance", "BTC", 5.0, 2000.0) == 0.0
+    assert st.recent_quote_volume("kraken", "BTC", 5.0, 1009.0) == 0.0
+
+
+def test_ticker_mid_volume_and_series():
+    st, _ = make_state(price_sample_min_interval_ms=0)
+    st.on_ticker(ticker("kraken", 1000.0, bid=100.0, ask=100.2, quote_volume=5_000_000.0, symbol="BTC/EUR"))
+    assert st.volume24h("kraken", "BTC") == 5_000_000.0
+    assert st.mid_series("kraken", "BTC")[-1] == (1000.0, 100.1)
+    assert st.symbol("kraken", "BTC") == "BTC/EUR"
+    assert st.ticker("kraken", "BTC") is not None
+    assert st.is_fresh("kraken", "BTC", 1001.0, 1500.0) is True
+    # base volume * mid when no quote volume; last price when bid/ask missing
+    st.on_ticker(ticker("kraken", 1001.0, bid=None, ask=None, last=200.0, base_volume=10.0, symbol="BTC/EUR"))
+    assert st.volume24h("kraken", "BTC") == 2000.0
+    assert st.mid_series("kraken", "BTC")[-1] == (1001.0, 200.0)
+    assert st.volume24h("kraken", "ETH") is None
+    assert "kraken" in st.exchanges_for("BTC")
