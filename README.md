@@ -15,6 +15,19 @@
 В UI видны все реальные возможности (0.3 %, 1 %, 7 %…). В Telegram уходят только
 исполнимые с NET >= 3 % (порог настраивается).
 
+## Быстрый старт (Windows, без Git)
+
+1. Скачай архив ветки: https://github.com/s1ntagma/s1ntagma-crypto-arbitrage-bot/archive/refs/heads/claude/elegant-newton-g91gip.zip
+   (или на GitHub: зелёная кнопка **Code → Download ZIP**).
+2. Распакуй в любую папку, например `Documents\latency_bot` (внутри должны лежать `start.bat`, `run.py`, папка `latbot`).
+3. Запусти `start.bat`. При первом запуске он сам: проверит Python 3.11+, поставит зависимости,
+   создаст `.env` и откроет его в Блокноте. Вставь токен бота после `TELEGRAM_BOT_TOKEN=`, сохрани, закрой Блокнот.
+4. Через несколько секунд откроется терминал `http://127.0.0.1:8787`. Остановка - `stop.bat`.
+   Ярлык на рабочий стол - `shortcut.bat`.
+
+Нет Python - поставь с https://www.python.org/downloads/windows/ с галочкой «Add python.exe to PATH».
+Старый бот с тем же Telegram-токеном перед запуском выключи (Telegram не даёт двум программам один токен).
+
 ## Запуск (Windows)
 
 1. Python 3.11+. В папке проекта: `pip install -r requirements.txt`.
