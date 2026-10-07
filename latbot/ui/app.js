@@ -832,12 +832,16 @@
           h('span', { class: 'muted', text: o.expire_reason || '', title: o.expire_reason || '' }))));
     } else {
       var frac = est > 0 ? Math.max(0, Math.min(1, rem / est)) : 0;
+      // Same rule as tick(): a card swapped in by opp.update must not lose its
+      // urgent state (and restart the bar pulse) until the next 250 ms tick.
+      var urgent = rem > 0 && rem < 3;
       card.appendChild(h('div', { class: 'window' },
         h('div', { class: 'window-row' },
           h('span', { class: 'kv-k', text: 'OPPORTUNITY WINDOW' }),
-          h('span', { class: 'kv-v', 'data-role': 'window-val', text: '~' + rem.toFixed(1) + ' sec' })),
+          h('span', { class: 'kv-v' + (urgent ? ' urgent' : ''), 'data-role': 'window-val',
+            text: rem > 0 ? '~' + rem.toFixed(1) + ' sec' : '0.0 sec · expiring' })),
         h('div', { class: 'bar', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(frac * 100)) },
-          h('div', { class: 'bar-fill ' + barClass(rem, o), 'data-role': 'bar', style: 'width:' + (frac * 100).toFixed(1) + '%' }))));
+          h('div', { class: 'bar-fill ' + barClass(rem, o) + (urgent ? ' urgent' : ''), 'data-role': 'bar', style: 'width:' + (frac * 100).toFixed(1) + '%' }))));
     }
 
     var humanParts = [hl.emoji + ' ' + fmtSecs(human.est_execution_s, 0) + ' execution'];
