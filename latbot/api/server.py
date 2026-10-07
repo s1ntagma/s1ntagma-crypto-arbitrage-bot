@@ -1,0 +1,957 @@
+"""FastAPI server: JSON API + WebSocket hub for the latbot terminal UI.
+
+``create_app(ctx)`` wires every route of ARCHITECTURE §api/server.py on top of
+an application context (duck-typed; see ``latbot.app.AppContext``):
+``settings, secrets, bus, clock, db, state, stats, opps, pipeline, adapters,
+exec_adapters, risk, execution, notifier``.  Every optional member is read with
+``getattr(ctx, name, None)`` and guarded, so the server also runs on a partial
+context (tests, degraded start-up).
+
+Rules enforced here
+-------------------
+* Secrets never reach a response: only ``Settings.public()`` is serialised and
+  ``Secrets`` / ``ExchangeCredentials`` instances are dropped by ``_jsonable``.
+* Errors are always JSON ``{"error": "..."}`` (400 validation, 404 unknown
+  opportunity, 503 no execution engine, 500 engine failure).
+* ``PUT /api/settings`` accepts only keys that exist on ``Settings``.
+* The WebSocket hub coalesces OPP_UPDATE per opportunity id to at most one
+  message per ``coalesce_interval_s`` (0.25 s -> <= 4/s per opportunity).
+"""
+from __future__ import annotations
+
+import asyncio
+import datetime as _dt
+import functools
+import inspect
+import json
+import logging
+import math
+import os
+import re
+import time
+from contextlib import asynccontextmanager
+from dataclasses import asdict, fields, is_dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any, AsyncIterator, Callable
+
+from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from .. import VERSION
+from ..config import ExchangeCredentials, Secrets, Settings, save_settings
+from ..events import BALANCE, DASHBOARD, EMERGENCY, HEALTH, OPP_NEW, OPP_STATE, OPP_UPDATE, SETTINGS, TRADE_UPDATE
+from ..logging_setup import redact
+from ..models import ExchangeHealth, Light
+
+log = logging.getLogger(__name__)
+
+UI_DIR: Path = Path(__file__).resolve().parent.parent / "ui"
+WS_TOPICS: tuple[str, ...] = (
+    OPP_NEW,
+    OPP_UPDATE,
+    OPP_STATE,
+    TRADE_UPDATE,
+    HEALTH,
+    DASHBOARD,
+    EMERGENCY,
+    SETTINGS,
+    BALANCE,
+)
+OPP_STATE_FILTERS = ("active", "executing", "history", "all")
+_LIGHT_VALUES = {light.value for light in Light}
+_SECRET_KEY_RE = re.compile(r"(?i)(api[_-]?key|api[_-]?secret|secret|token|passphrase|password)")
+_SETTINGS_KEYS = frozenset(f.name for f in fields(Settings))
+
+
+# --------------------------------------------------------------------------- #
+# JSON helpers
+# --------------------------------------------------------------------------- #
+def _jsonable(obj: Any) -> Any:
+    """Convert models/dataclasses/enums into plain JSON-safe values.
+
+    ``float`` NaN/inf become ``None`` (browsers reject ``NaN`` in JSON).
+    ``Secrets`` / ``ExchangeCredentials`` are dropped unconditionally.
+    """
+    if obj is None or isinstance(obj, (bool, int, str)):
+        return obj
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, (Secrets, ExchangeCredentials)):
+        return None
+    if isinstance(obj, Enum):
+        return _jsonable(obj.value)
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return _jsonable(asdict(obj))
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            key = k.value if isinstance(k, Enum) else k
+            out[key if isinstance(key, str) else str(key)] = _jsonable(v)
+        return out
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        return [_jsonable(x) for x in obj]
+    if isinstance(obj, (Path, _dt.date, _dt.datetime, _dt.time)):
+        return str(obj)
+    log.debug("non-serialisable object of type %s dropped", type(obj).__name__)
+    return None
+
+
+def _json(data: Any, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(content=_jsonable(data), status_code=status_code)
+
+
+def _error(status_code: int, message: str) -> JSONResponse:
+    return JSONResponse(content={"error": redact(str(message))}, status_code=status_code)
+
+
+def _now(ctx: Any) -> float:
+    clock = getattr(ctx, "clock", None)
+    if clock is not None and hasattr(clock, "mono"):
+        try:
+            return float(clock.mono())
+        except Exception:  # noqa: BLE001
+            log.exception("clock.mono failed; falling back to time.monotonic")
+    return time.monotonic()
+
+
+def _wall(ctx: Any) -> float:
+    clock = getattr(ctx, "clock", None)
+    if clock is not None and hasattr(clock, "wall"):
+        try:
+            return float(clock.wall())
+        except Exception:  # noqa: BLE001
+            log.exception("clock.wall failed; falling back to time.time")
+    return time.time()
+
+
+def _opp_dict(opp: Any, now_mono: float) -> dict[str, Any]:
+    if isinstance(opp, dict):
+        return _jsonable(opp)
+    return _jsonable(opp.to_dict(now_mono))
+
+
+def _trade_dict(trade: Any) -> dict[str, Any]:
+    if isinstance(trade, dict):
+        return _jsonable(trade)
+    return _jsonable(trade.to_dict())
+
+
+def _result(obj: Any, now_mono: float) -> Any:
+    """Serialise an engine result: TradeRecord/Opportunity -> to_dict, lists recurse."""
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return _jsonable(obj)
+    if isinstance(obj, dict):
+        return {str(k): _result(v, now_mono) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        return [_result(x, now_mono) for x in obj]
+    to_dict = getattr(obj, "to_dict", None)
+    if callable(to_dict):
+        try:
+            if _supports_kwarg(to_dict, "now_mono"):
+                return _jsonable(to_dict(now_mono))
+            return _jsonable(to_dict())
+        except TypeError:
+            return _jsonable(to_dict())
+    return _jsonable(obj)
+
+
+def _supports_kwarg(fn: Callable[..., Any], name: str) -> bool:
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _mode_value(settings: Any) -> str:
+    try:
+        mode = settings.mode()
+    except Exception:  # noqa: BLE001
+        return "paper"
+    return mode.value if isinstance(mode, Enum) else str(mode)
+
+
+# --------------------------------------------------------------------------- #
+# State builders
+# --------------------------------------------------------------------------- #
+def _health_list(ctx: Any) -> list[dict[str, Any]]:
+    """Health of every configured/active exchange with display label + usability."""
+    now = _now(ctx)
+    settings = ctx.settings
+    adapters = getattr(ctx, "adapters", None) or {}
+    state = getattr(ctx, "state", None)
+    names: list[str] = list(adapters.keys())
+    if not names:
+        try:
+            names = list(settings.enabled_exchanges())
+        except Exception:  # noqa: BLE001
+            names = []
+    out: list[dict[str, Any]] = []
+    for name in names:
+        adapter = adapters.get(name)
+        health = getattr(adapter, "health", None) if adapter is not None else None
+        if health is None and state is not None and hasattr(state, "health"):
+            try:
+                health = state.health(name)
+            except Exception:  # noqa: BLE001
+                health = None
+        if health is None:
+            health = ExchangeHealth(exchange=name)
+        d = _jsonable(health) if is_dataclass(health) else dict(health)
+        d.setdefault("exchange", name)
+        try:
+            d["usable"] = bool(health.is_usable(now)) if hasattr(health, "is_usable") else bool(d.get("ws_connected"))
+        except Exception:  # noqa: BLE001
+            d["usable"] = False
+        cfg = settings.exchange(name) if hasattr(settings, "exchange") else None
+        d["label"] = cfg.display if cfg is not None else name.capitalize()
+        role = getattr(cfg, "role", None)
+        d["role"] = role.value if isinstance(role, Enum) else (str(role) if role else "")
+        out.append(d)
+    return out
+
+
+def _dashboard(ctx: Any) -> dict[str, Any]:
+    now = _now(ctx)
+    pipeline = getattr(ctx, "pipeline", None)
+    if pipeline is not None and hasattr(pipeline, "dashboard"):
+        try:
+            return _jsonable(pipeline.dashboard() or {})
+        except Exception:  # noqa: BLE001
+            log.exception("pipeline.dashboard failed")
+    opps = getattr(ctx, "opps", None)
+    if opps is not None and hasattr(opps, "counters"):
+        try:
+            return _jsonable(opps.counters(now) or {})
+        except Exception:  # noqa: BLE001
+            log.exception("opps.counters failed")
+    return {}
+
+
+def _best(ctx: Any) -> dict[str, Any] | None:
+    opps = getattr(ctx, "opps", None)
+    if opps is None or not hasattr(opps, "best"):
+        return None
+    now = _now(ctx)
+    try:
+        best = opps.best(now)
+    except Exception:  # noqa: BLE001
+        log.exception("opps.best failed")
+        return None
+    return _opp_dict(best, now) if best is not None else None
+
+
+def _emergency(ctx: Any) -> tuple[bool, str]:
+    risk = getattr(ctx, "risk", None)
+    if risk is None:
+        return False, ""
+    return bool(getattr(risk, "emergency", False)), str(getattr(risk, "emergency_reason", "") or "")
+
+
+def build_state(ctx: Any) -> dict[str, Any]:
+    """Payload of ``GET /api/state`` (also embedded in the WS snapshot)."""
+    settings = ctx.settings
+    emergency, reason = _emergency(ctx)
+    return {
+        "mode": _mode_value(settings),
+        "emergency": emergency,
+        "emergency_reason": reason,
+        "settings": _jsonable(settings.public()),
+        "health": _health_list(ctx),
+        "dashboard": _dashboard(ctx),
+        "best": _best(ctx),
+        "version": VERSION,
+        "server_ts": _wall(ctx),
+    }
+
+
+def _live_opps(ctx: Any) -> list[Any]:
+    """Active + executing opportunities (deduplicated, net desc)."""
+    opps = getattr(ctx, "opps", None)
+    if opps is None:
+        return []
+    items: list[Any] = []
+    seen: set[str] = set()
+    for getter in ("active", "executing"):
+        fn = getattr(opps, getter, None)
+        if fn is None:
+            continue
+        try:
+            for opp in fn() or []:
+                if opp.id not in seen:
+                    seen.add(opp.id)
+                    items.append(opp)
+        except Exception:  # noqa: BLE001
+            log.exception("opps.%s failed", getter)
+    return items
+
+
+def build_snapshot(ctx: Any) -> dict[str, Any]:
+    """Full snapshot sent to a WebSocket client on connect."""
+    now = _now(ctx)
+    return {"state": build_state(ctx), "opportunities": [_opp_dict(o, now) for o in _live_opps(ctx)]}
+
+
+# --------------------------------------------------------------------------- #
+# Event serialisation + WebSocket hub
+# --------------------------------------------------------------------------- #
+def _looks_like_secrets(payload: Any) -> bool:
+    if isinstance(payload, (Secrets, ExchangeCredentials)):
+        return True
+    if isinstance(payload, dict):
+        return any(_SECRET_KEY_RE.search(str(k)) for k in payload)
+    return any(hasattr(payload, attr) for attr in ("telegram_bot_token", "api_secret"))
+
+
+def serialise_event(topic: str, payload: Any, now_mono: float) -> dict[str, Any] | None:
+    """Turn a bus event into ``{"topic", "data"}`` for the UI; ``None`` = skip."""
+    try:
+        if topic in (OPP_NEW, OPP_UPDATE):
+            if payload is None:
+                return None
+            return {"topic": topic, "data": _opp_dict(payload, now_mono)}
+        if topic == OPP_STATE:
+            if isinstance(payload, dict):
+                opp = payload.get("opportunity")
+                if opp is None:
+                    return None
+                data = {
+                    "opportunity": _opp_dict(opp, now_mono),
+                    "from": _jsonable(payload.get("from")),
+                    "to": _jsonable(payload.get("to")),
+                    "reason": str(payload.get("reason") or ""),
+                }
+            else:
+                data = {
+                    "opportunity": _opp_dict(payload, now_mono),
+                    "from": None,
+                    "to": _jsonable(getattr(payload, "state", None)),
+                    "reason": "",
+                }
+            return {"topic": topic, "data": data}
+        if topic == TRADE_UPDATE:
+            if payload is None:
+                return None
+            return {"topic": topic, "data": _trade_dict(payload)}
+        if topic == HEALTH:
+            if payload is None:
+                return None
+            data = _jsonable(payload) if is_dataclass(payload) else _jsonable(dict(payload))
+            if hasattr(payload, "is_usable"):
+                data["usable"] = bool(payload.is_usable(now_mono))
+            return {"topic": topic, "data": data}
+        if topic in (DASHBOARD, EMERGENCY):
+            return {"topic": topic, "data": _jsonable(dict(payload or {}))}
+        if topic == SETTINGS:
+            if _looks_like_secrets(payload):
+                log.warning("refusing to broadcast a secrets-like payload on topic %s", topic)
+                return None
+            public = getattr(payload, "public", None)
+            if callable(public):
+                return {"topic": topic, "data": _jsonable(public())}
+            if isinstance(payload, dict):
+                return {"topic": topic, "data": _jsonable(payload)}
+            return None
+        if topic == BALANCE:
+            if not isinstance(payload, dict):
+                return None
+            return {
+                "topic": topic,
+                "data": {
+                    "exchange": str(payload.get("exchange", "")),
+                    "mode": _jsonable(payload.get("mode")),
+                    "balances": _jsonable(payload.get("balances") or {}),
+                },
+            }
+    except Exception:  # noqa: BLE001
+        log.exception("failed to serialise event topic=%s", topic)
+    return None
+
+
+def _opp_id_of(msg: dict[str, Any]) -> str | None:
+    data = msg.get("data")
+    if not isinstance(data, dict):
+        return None
+    if msg.get("topic") == OPP_STATE:
+        opp = data.get("opportunity")
+        return opp.get("id") if isinstance(opp, dict) else None
+    oid = data.get("id")
+    return str(oid) if oid else None
+
+
+class WsHub:
+    """Fan-out of bus events to WebSocket clients with OPP_UPDATE coalescing.
+
+    ``on_event`` is synchronous (safe as a bus handler); messages go through an
+    ``asyncio.Queue`` drained by ``_pump``.  OPP_UPDATE messages are parked in
+    ``_pending`` per opportunity id and released by ``flush`` every
+    ``coalesce_interval_s`` so a client sees at most ~4 updates/s per
+    opportunity.  An OPP_STATE for an id drops its pending update, so a stale
+    coalesced update can never regress a state the client already saw.
+    """
+
+    def __init__(self, ctx: Any, *, coalesce_interval_s: float = 0.25) -> None:
+        self._ctx = ctx
+        self._interval = max(0.01, float(coalesce_interval_s))
+        self.clients: set[WebSocket] = set()
+        self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._pending: dict[str, dict[str, Any]] = {}
+        self._unsubs: list[Callable[[], None]] = []
+        self._tasks: list[asyncio.Task[None]] = []
+        self._started = False
+        self.sent_count = 0
+
+    # ---- lifecycle -------------------------------------------------------
+    def start(self) -> None:
+        """Subscribe to the bus and spawn the pump/flush tasks (idempotent).
+        Must be called from inside a running event loop."""
+        if self._started:
+            return
+        bus = getattr(self._ctx, "bus", None)
+        if bus is not None and hasattr(bus, "subscribe"):
+            for topic in WS_TOPICS:
+                self._unsubs.append(bus.subscribe(topic, functools.partial(self.on_event, topic)))
+        loop = asyncio.get_running_loop()
+        self._tasks = [loop.create_task(self._pump(), name="ws-hub-pump"), loop.create_task(self._flusher(), name="ws-hub-flush")]
+        self._started = True
+        log.info("websocket hub started (coalesce %.0f ms)", self._interval * 1000)
+
+    async def stop(self) -> None:
+        for unsub in self._unsubs:
+            try:
+                unsub()
+            except Exception:  # noqa: BLE001
+                log.exception("unsubscribe failed")
+        self._unsubs.clear()
+        for task in self._tasks:
+            task.cancel()
+        for task in self._tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self._tasks.clear()
+        for ws in list(self.clients):
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self.clients.clear()
+        self._pending.clear()
+        self._started = False
+
+    # ---- events ----------------------------------------------------------
+    def on_event(self, topic: str, payload: Any) -> None:
+        msg = serialise_event(topic, payload, _now(self._ctx))
+        if msg is None:
+            return
+        oid = _opp_id_of(msg)
+        if topic == OPP_UPDATE and oid:
+            self._pending[oid] = msg
+            return
+        if topic == OPP_STATE and oid:
+            self._pending.pop(oid, None)
+        self._queue.put_nowait(msg)
+
+    async def flush(self) -> None:
+        """Broadcast every pending coalesced OPP_UPDATE (one per opportunity)."""
+        if not self._pending:
+            return
+        pending = list(self._pending.values())
+        self._pending.clear()
+        for msg in pending:
+            await self.broadcast(msg)
+
+    async def broadcast(self, msg: dict[str, Any]) -> None:
+        if not self.clients:
+            return
+        try:
+            text = json.dumps(_jsonable(msg), ensure_ascii=False, allow_nan=False, default=str)
+        except (TypeError, ValueError):
+            log.exception("cannot encode websocket message topic=%s", msg.get("topic"))
+            return
+        dead: list[WebSocket] = []
+        for ws in list(self.clients):
+            try:
+                await ws.send_text(text)
+            except Exception:  # noqa: BLE001
+                dead.append(ws)
+        for ws in dead:
+            self.clients.discard(ws)
+        self.sent_count += 1
+
+    async def _pump(self) -> None:
+        while True:
+            msg = await self._queue.get()
+            try:
+                await self.broadcast(msg)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("broadcast failed")
+
+    async def _flusher(self) -> None:
+        while True:
+            await asyncio.sleep(self._interval)
+            try:
+                await self.flush()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("flush failed")
+
+    # ---- client handling -------------------------------------------------
+    async def handle(self, ws: WebSocket) -> None:
+        await ws.accept()
+        self.start()
+        try:
+            snapshot = {"topic": "snapshot", "data": build_snapshot(self._ctx)}
+            await ws.send_text(json.dumps(_jsonable(snapshot), ensure_ascii=False, allow_nan=False, default=str))
+        except Exception:  # noqa: BLE001
+            log.exception("failed to send snapshot")
+            self.clients.discard(ws)
+            return
+        self.clients.add(ws)
+        try:
+            while True:
+                text = await ws.receive_text()
+                if text.strip().lower() == "ping":
+                    await ws.send_text(json.dumps({"topic": "pong", "data": {"ts": time.time()}}))
+        except WebSocketDisconnect:
+            pass
+        except Exception:  # noqa: BLE001
+            log.debug("websocket client dropped", exc_info=True)
+        finally:
+            self.clients.discard(ws)
+
+
+# --------------------------------------------------------------------------- #
+# Request bodies
+# --------------------------------------------------------------------------- #
+class ManualEntered(BaseModel):
+    price: float = Field(gt=0, description="price the user actually got on the entry leg")
+    quote_amount: float = Field(gt=0, description="capital used, in quote currency")
+
+
+class ManualExited(BaseModel):
+    price: float = Field(gt=0, description="price the user actually got on the exit leg")
+
+
+class EmergencyStopBody(BaseModel):
+    reason: str = "user"
+
+
+class CancelBody(BaseModel):
+    reason: str = "user"
+
+
+# --------------------------------------------------------------------------- #
+# Engine call helper
+# --------------------------------------------------------------------------- #
+async def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Call an engine method (sync or async) and map its errors to HTTP errors."""
+    try:
+        result = fn(*args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+    except HTTPException:
+        raise
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="opportunity not found") from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=redact(str(exc)) or "not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=redact(str(exc)) or "invalid request") from exc
+    except Exception as exc:  # noqa: BLE001
+        log.exception("engine call %s failed", getattr(fn, "__name__", repr(fn)))
+        raise HTTPException(status_code=500, detail=redact(f"{type(exc).__name__}: {exc}")) from exc
+
+
+# --------------------------------------------------------------------------- #
+# Application factory
+# --------------------------------------------------------------------------- #
+def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -> FastAPI:
+    """Build the FastAPI app for the given application context.
+
+    ``config_path`` is where ``PUT /api/settings`` persists ``config.json``
+    (kwarg -> ``ctx.config_path`` -> ``"config.json"``).
+    """
+    cfg_path = Path(config_path if config_path is not None else (getattr(ctx, "config_path", None) or "config.json"))
+    hub = WsHub(ctx)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        hub.start()
+        try:
+            yield
+        finally:
+            await hub.stop()
+
+    app = FastAPI(title="latbot", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.hub = hub
+    app.state.ctx = ctx
+
+    # ---- error handling ----------------------------------------------------
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        errors = exc.errors() if hasattr(exc, "errors") else []
+        if errors:
+            first = errors[0]
+            loc = ".".join(str(x) for x in first.get("loc", ()) if x != "body") or "request"
+            msg = f"{loc}: {first.get('msg', 'invalid value')}"
+        else:
+            msg = "invalid request"
+        return _error(400, msg)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        detail = exc.detail if isinstance(exc.detail, str) else json.dumps(_jsonable(exc.detail))
+        return _error(exc.status_code, detail)
+
+    @app.exception_handler(ValueError)
+    async def _value_error(_request: Request, exc: ValueError) -> JSONResponse:
+        return _error(400, str(exc) or "invalid value")
+
+    @app.exception_handler(LookupError)
+    async def _lookup_error(_request: Request, exc: LookupError) -> JSONResponse:
+        return _error(404, "opportunity not found" if isinstance(exc, KeyError) else (str(exc) or "not found"))
+
+    @app.exception_handler(Exception)
+    async def _unexpected(_request: Request, exc: Exception) -> JSONResponse:
+        log.exception("unhandled error in API")
+        return _error(500, f"{type(exc).__name__}: {exc}")
+
+    # ---- helpers bound to ctx ---------------------------------------------
+    def _settings() -> Any:
+        return ctx.settings
+
+    def _require_execution() -> Any:
+        execution = getattr(ctx, "execution", None)
+        if execution is None:
+            raise HTTPException(status_code=503, detail="execution engine not available")
+        return execution
+
+    def _require_opp(opp_id: str) -> Any:
+        opps = getattr(ctx, "opps", None)
+        if opps is None or not hasattr(opps, "get"):
+            return None
+        opp = opps.get(opp_id)
+        if opp is None:
+            raise HTTPException(status_code=404, detail="opportunity not found")
+        return opp
+
+    async def _publish(topic: str, payload: Any) -> None:
+        bus = getattr(ctx, "bus", None)
+        if bus is None or not hasattr(bus, "publish"):
+            return
+        try:
+            await bus.publish(topic, payload)
+        except Exception:  # noqa: BLE001
+            log.exception("publish %s failed", topic)
+
+    # ---- UI --------------------------------------------------------------
+    if UI_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
+    else:  # pragma: no cover - packaging problem, not a runtime path
+        log.error("UI directory missing: %s", UI_DIR)
+
+    @app.get("/", include_in_schema=False)
+    async def index() -> Response:
+        page = UI_DIR / "index.html"
+        if not page.is_file():
+            return _error(404, "ui not installed")
+        return FileResponse(str(page), media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        return Response(status_code=204)
+
+    # ---- state -----------------------------------------------------------
+    @app.get("/api/state")
+    async def api_state() -> JSONResponse:
+        return _json(build_state(ctx))
+
+    @app.get("/api/health")
+    async def api_health() -> JSONResponse:
+        emergency, reason = _emergency(ctx)
+        return _json(
+            {
+                "ok": True,
+                "mode": _mode_value(_settings()),
+                "emergency": emergency,
+                "emergency_reason": reason,
+                "ws_clients": len(hub.clients),
+                "exchanges": _health_list(ctx),
+                "version": VERSION,
+                "server_ts": _wall(ctx),
+            }
+        )
+
+    # ---- opportunities ---------------------------------------------------
+    @app.get("/api/opportunities")
+    async def api_opportunities(
+        state: str = Query("active"),
+        asset: str | None = Query(None),
+        exchange: str | None = Query(None),
+        min_net: float | None = Query(None),
+        min_window: float | None = Query(None),
+        human: str | None = Query(None),
+        bot: str | None = Query(None),
+        limit: int = Query(200, ge=1, le=5000),
+    ) -> JSONResponse:
+        state_f = (state or "active").strip().lower()
+        if state_f not in OPP_STATE_FILTERS:
+            raise HTTPException(status_code=400, detail=f"state must be one of {', '.join(OPP_STATE_FILTERS)}")
+        human_f = (human or "").strip().lower() or None
+        bot_f = (bot or "").strip().lower() or None
+        for name, value in (("human", human_f), ("bot", bot_f)):
+            if value is not None and value not in _LIGHT_VALUES:
+                raise HTTPException(status_code=400, detail=f"{name} must be one of green, yellow, red")
+        opps = getattr(ctx, "opps", None)
+        now = _now(ctx)
+        items: list[Any] = []
+        if opps is not None:
+            seen: set[str] = set()
+
+            def _extend(values: Any) -> None:
+                for o in values or []:
+                    if o.id not in seen:
+                        seen.add(o.id)
+                        items.append(o)
+
+            if state_f in ("active", "all") and hasattr(opps, "active"):
+                _extend(opps.active())
+            if state_f in ("executing", "all") and hasattr(opps, "executing"):
+                _extend(opps.executing())
+            if state_f in ("history", "all") and hasattr(opps, "history"):
+                _extend(opps.history(limit))
+        asset_f = (asset or "").strip().upper() or None
+        exchange_f = (exchange or "").strip().lower() or None
+        out: list[dict[str, Any]] = []
+        for o in items:
+            if asset_f and str(o.asset).upper() != asset_f:
+                continue
+            if exchange_f and str(o.target_exchange).lower() != exchange_f:
+                continue
+            if min_net is not None and float(o.econ.net_pct) < min_net:
+                continue
+            if min_window is not None and float(o.remaining_s(now)) < min_window:
+                continue
+            if human_f and _jsonable(o.human.light) != human_f:
+                continue
+            if bot_f and _jsonable(o.bot.light) != bot_f:
+                continue
+            out.append(_opp_dict(o, now))
+            if len(out) >= limit:
+                break
+        return _json(out)
+
+    @app.get("/api/opportunities/{opp_id}")
+    async def api_opportunity(opp_id: str) -> JSONResponse:
+        opps = getattr(ctx, "opps", None)
+        opp = opps.get(opp_id) if opps is not None and hasattr(opps, "get") else None
+        if opp is None:
+            raise HTTPException(status_code=404, detail="opportunity not found")
+        return _json(_opp_dict(opp, _now(ctx)))
+
+    # ---- manual flow -----------------------------------------------------
+    @app.post("/api/opportunities/{opp_id}/manual")
+    async def api_manual_select(opp_id: str) -> JSONResponse:
+        _require_opp(opp_id)
+        execution = _require_execution()
+        return _json(_result(await _call(execution.select_manual, opp_id), _now(ctx)))
+
+    @app.get("/api/opportunities/{opp_id}/manual/support")
+    async def api_manual_support(opp_id: str) -> JSONResponse:
+        _require_opp(opp_id)
+        execution = _require_execution()
+        return _json(_result(await _call(execution.manual_support, opp_id), _now(ctx)))
+
+    @app.post("/api/opportunities/{opp_id}/manual/entered")
+    async def api_manual_entered(opp_id: str, body: ManualEntered) -> JSONResponse:
+        _require_opp(opp_id)
+        execution = _require_execution()
+        result = await _call(execution.manual_entered, opp_id, body.price, body.quote_amount)
+        return _json(_result(result, _now(ctx)))
+
+    @app.post("/api/opportunities/{opp_id}/manual/exited")
+    async def api_manual_exited(opp_id: str, body: ManualExited) -> JSONResponse:
+        _require_opp(opp_id)
+        execution = _require_execution()
+        result = await _call(execution.manual_exited, opp_id, body.price)
+        return _json(_result(result, _now(ctx)))
+
+    # ---- auto flow -------------------------------------------------------
+    @app.post("/api/opportunities/{opp_id}/auto")
+    async def api_auto_select(opp_id: str) -> JSONResponse:
+        _require_opp(opp_id)
+        execution = _require_execution()
+        return _json(_result(await _call(execution.select_auto, opp_id), _now(ctx)))
+
+    @app.post("/api/opportunities/{opp_id}/auto/confirm")
+    async def api_auto_confirm(opp_id: str) -> JSONResponse:
+        _require_opp(opp_id)
+        execution = _require_execution()
+        kwargs: dict[str, Any] = {}
+        # Non-blocking when the engine supports it: the trade runs as a tracked
+        # task and the UI follows it through TRADE_UPDATE events.
+        if _supports_kwarg(execution.confirm_auto, "wait"):
+            kwargs["wait"] = False
+        return _json(_result(await _call(execution.confirm_auto, opp_id, **kwargs), _now(ctx)))
+
+    @app.post("/api/opportunities/{opp_id}/cancel")
+    async def api_cancel(opp_id: str, body: CancelBody | None = None) -> JSONResponse:
+        _require_opp(opp_id)
+        execution = _require_execution()
+        reason = (body.reason if body is not None else "user") or "user"
+        return _json(_result(await _call(execution.cancel, opp_id, reason=reason), _now(ctx)))
+
+    # ---- emergency -------------------------------------------------------
+    @app.post("/api/emergency/stop")
+    async def api_emergency_stop(body: EmergencyStopBody | None = None) -> JSONResponse:
+        reason = (body.reason if body is not None else "user") or "user"
+        execution = getattr(ctx, "execution", None)
+        risk = getattr(ctx, "risk", None)
+        if execution is not None and hasattr(execution, "emergency_stop"):
+            result = await _call(execution.emergency_stop, reason)
+            data = dict(result) if isinstance(result, dict) else {}
+            data.setdefault("ok", True)
+            data.setdefault("emergency", True)
+            data.setdefault("reason", reason)
+            log.warning("EMERGENCY STOP via API (reason=%s)", reason)
+            return _json(_result(data, _now(ctx)))
+        if risk is not None and hasattr(risk, "set_emergency"):
+            await _call(risk.set_emergency, True, reason)
+            log.warning("EMERGENCY STOP via API without execution engine (reason=%s)", reason)
+            return _json({"ok": True, "emergency": True, "reason": reason})
+        raise HTTPException(status_code=503, detail="execution engine not available")
+
+    @app.post("/api/emergency/close")
+    async def api_emergency_close() -> JSONResponse:
+        execution = _require_execution()
+        closed = await _call(execution.emergency_close_positions)
+        trades = [_trade_dict(t) for t in (closed or [])]
+        log.warning("EMERGENCY CLOSE via API: %d position(s) closed", len(trades))
+        return _json({"ok": True, "closed": trades})
+
+    @app.post("/api/emergency/resume")
+    async def api_emergency_resume() -> JSONResponse:
+        execution = getattr(ctx, "execution", None)
+        risk = getattr(ctx, "risk", None)
+        if execution is not None and hasattr(execution, "resume"):
+            await _call(execution.resume)
+        elif risk is not None and hasattr(risk, "set_emergency"):
+            await _call(risk.set_emergency, False, "")
+        else:
+            raise HTTPException(status_code=503, detail="execution engine not available")
+        log.info("emergency resumed via API")
+        return _json({"ok": True, "emergency": False})
+
+    # ---- settings --------------------------------------------------------
+    @app.get("/api/settings")
+    async def api_settings() -> JSONResponse:
+        return _json(_settings().public())
+
+    @app.put("/api/settings")
+    async def api_settings_put(patch: dict[str, Any] = Body(...)) -> JSONResponse:
+        if not isinstance(patch, dict) or not patch:
+            raise HTTPException(status_code=400, detail="empty settings patch")
+        secretish = sorted(k for k in patch if _SECRET_KEY_RE.search(str(k)))
+        if secretish:
+            raise HTTPException(status_code=400, detail="secrets cannot be set through the API: " + ", ".join(secretish))
+        unknown = sorted(str(k) for k in patch if k not in _SETTINGS_KEYS)
+        if unknown:
+            raise HTTPException(status_code=400, detail="unknown settings keys: " + ", ".join(unknown))
+        settings = _settings()
+        before = {f.name: getattr(settings, f.name) for f in fields(Settings)}
+        try:
+            changed = settings.update(patch)
+        except (ValueError, TypeError) as exc:
+            for name, value in before.items():  # keep the live settings consistent
+                setattr(settings, name, value)
+            raise HTTPException(status_code=400, detail=redact(str(exc)) or "invalid settings") from exc
+        saved = True
+        try:
+            save_settings(settings, cfg_path)
+        except OSError:
+            saved = False
+            log.exception("could not persist settings to %s", cfg_path)
+        public = settings.public()
+        await _publish(SETTINGS, public)
+        if changed:
+            log.info("settings changed via API: %s", ", ".join(changed))
+        return _json({"ok": True, "changed": changed, "saved": saved, "settings": public})
+
+    # ---- trades / stats / balances ---------------------------------------
+    @app.get("/api/trades")
+    async def api_trades(limit: int = Query(200, ge=1, le=5000)) -> JSONResponse:
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        execution = getattr(ctx, "execution", None)
+        if execution is not None and hasattr(execution, "trades"):
+            try:
+                for t in execution.trades(limit) or []:
+                    d = _trade_dict(t)
+                    seen.add(str(d.get("id")))
+                    out.append(d)
+            except Exception:  # noqa: BLE001
+                log.exception("execution.trades failed")
+        db = getattr(ctx, "db", None)
+        if len(out) < limit and db is not None and hasattr(db, "list_trades"):
+            try:
+                for row in db.list_trades(limit) or []:
+                    d = _jsonable(row)
+                    if isinstance(d, dict) and d.get("id") and str(d["id"]) not in seen:
+                        seen.add(str(d["id"]))
+                        out.append(d)
+            except Exception:  # noqa: BLE001
+                log.exception("db.list_trades failed")
+        return _json(out[:limit])
+
+    @app.get("/api/stats")
+    async def api_stats() -> JSONResponse:
+        stats = getattr(ctx, "stats", None)
+        if stats is None or not hasattr(stats, "summary"):
+            return _json([])
+        try:
+            return _json(list(stats.summary() or []))
+        except Exception:  # noqa: BLE001
+            log.exception("stats.summary failed")
+            return _json([])
+
+    @app.get("/api/balances")
+    async def api_balances() -> JSONResponse:
+        settings = _settings()
+        mode = _mode_value(settings)
+        exec_adapters = getattr(ctx, "exec_adapters", None) or {}
+        adapters: dict[str, Any] = {}
+        for key, value in exec_adapters.items():
+            key_value = key.value if isinstance(key, Enum) else str(key)
+            if key_value == mode:
+                adapters = dict(value or {})
+                break
+        balances: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        for name, adapter in adapters.items():
+            try:
+                raw = await adapter.fetch_balances()
+                balances[name] = {str(asset): _jsonable(b) for asset, b in (raw or {}).items()}
+            except Exception as exc:  # noqa: BLE001
+                errors[name] = redact(f"{type(exc).__name__}: {exc}")
+                log.warning("fetch_balances failed for %s: %s", name, errors[name])
+        return _json({"mode": mode, "balances": balances, "errors": errors})
+
+    # ---- websocket -------------------------------------------------------
+    @app.websocket("/ws")
+    async def websocket_endpoint(websocket: WebSocket) -> None:
+        await hub.handle(websocket)
+
+    return app

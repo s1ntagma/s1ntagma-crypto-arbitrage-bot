@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>latbot · latency terminal</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#tab-opps">Skip to opportunities</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-title">latbot</span>
+      <span class="brand-sub">latency terminal</span>
+    </div>
+    <div id="mode-badge" class="mode-badge paper" title="Execution mode">PAPER</div>
+    <div class="topbar-spacer"></div>
+    <div id="ws-status" class="ws-status" title="WebSocket connection">
+      <span id="ws-dot" class="dot red" aria-hidden="true"></span>
+      <span id="ws-label">connecting…</span>
+    </div>
+    <button id="close-positions-btn" class="btn btn-warn hidden" type="button">CLOSE POSITIONS</button>
+    <button id="emergency-btn" class="btn btn-danger" type="button">🛑 EMERGENCY STOP</button>
+    <button id="settings-btn" class="btn btn-ghost" type="button" aria-controls="settings-drawer" aria-expanded="false">⚙ Settings</button>
+  </header>
+
+  <div id="emergency-banner" class="banner banner-danger hidden" role="status" aria-live="assertive"></div>
+
+  <section id="dashboard" class="dashboard" aria-label="Dashboard counters"></section>
+  <section id="health-strip" class="health-strip" aria-label="Exchange health"></section>
+
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button class="tab" role="tab" type="button" data-tab="opps" aria-selected="true" aria-controls="tab-opps">OPPORTUNITIES <span class="tab-count" id="opps-count">0</span></button>
+    <button class="tab" role="tab" type="button" data-tab="trades" aria-selected="false" aria-controls="tab-trades">TRADES <span class="tab-count" id="trades-count">0</span></button>
+    <button class="tab" role="tab" type="button" data-tab="stats" aria-selected="false" aria-controls="tab-stats">STATS</button>
+  </nav>
+
+  <main class="main">
+    <section id="tab-opps" class="tab-panel" role="tabpanel" aria-label="Opportunities">
+      <section id="best-panel" class="best-panel" aria-live="polite">
+        <h2 class="panel-title">🔥 BEST CURRENT OPPORTUNITY</h2>
+        <div id="best-body" class="best-body"></div>
+      </section>
+
+      <div id="filters" class="filters" aria-label="Filters">
+        <div id="filter-quick" class="filter-quick" role="group" aria-label="Quick filters">
+          <button class="chip active" type="button" data-quick="ALL">ALL</button>
+          <button class="chip" type="button" data-quick="MANUAL">MANUAL</button>
+          <button class="chip" type="button" data-quick="AUTO">AUTO</button>
+          <button class="chip" type="button" data-quick="THRESHOLD">≥3%</button>
+          <button class="chip" type="button" data-quick="PAPER">PAPER</button>
+          <button class="chip" type="button" data-quick="LIVE">LIVE</button>
+          <button class="chip" type="button" data-quick="EXPIRED">EXPIRED</button>
+        </div>
+        <div class="filter-selects">
+          <label class="field">
+            <span class="field-label">Exchange</span>
+            <select id="f-exchange"><option value="">any</option></select>
+          </label>
+          <label class="field">
+            <span class="field-label">Asset</span>
+            <select id="f-asset"><option value="">any</option></select>
+          </label>
+          <label class="field">
+            <span class="field-label">Min NET %</span>
+            <input id="f-minnet" type="number" step="0.1" inputmode="decimal" placeholder="0.0">
+          </label>
+          <label class="field">
+            <span class="field-label">Min window s</span>
+            <input id="f-minwin" type="number" step="1" min="0" inputmode="numeric" placeholder="0">
+          </label>
+          <label class="field">
+            <span class="field-label">HUMAN</span>
+            <select id="f-human">
+              <option value="">any</option>
+              <option value="green">🟢 green</option>
+              <option value="yellow">🟡 yellow</option>
+              <option value="red">🔴 red</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">BOT</span>
+            <select id="f-bot">
+              <option value="">any</option>
+              <option value="green">🟢 green</option>
+              <option value="yellow">🟡 yellow</option>
+              <option value="red">🔴 red</option>
+            </select>
+          </label>
+          <button id="filters-reset" class="btn btn-ghost btn-sm" type="button">Reset</button>
+        </div>
+      </div>
+
+      <div id="cards" class="cards" aria-live="polite"></div>
+      <div id="cards-empty" class="empty hidden">
+        <p class="empty-title">No opportunities match.</p>
+        <p class="empty-sub">Every card is a measured lag: no data, no signal. Nothing is invented to fill the grid.</p>
+      </div>
+    </section>
+
+    <section id="tab-trades" class="tab-panel hidden" role="tabpanel" aria-label="Trades">
+      <div class="panel-head">
+        <h2 class="panel-title">TRADES · expected vs actual</h2>
+        <button id="trades-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="trades-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Mode</th>
+              <th>Asset</th>
+              <th>Side</th>
+              <th class="num">Capital</th>
+              <th class="num">Expected NET</th>
+              <th class="num">Actual NET</th>
+              <th class="num">Expected profit</th>
+              <th class="num">Realized</th>
+              <th class="num">Slippage</th>
+              <th class="num">Exec</th>
+              <th>State</th>
+              <th>Diff reason</th>
+            </tr>
+          </thead>
+          <tbody id="trades-body"></tbody>
+        </table>
+      </div>
+      <div id="trades-empty" class="empty hidden"><p class="empty-title">No trades yet.</p></div>
+    </section>
+
+    <section id="tab-stats" class="tab-panel hidden" role="tabpanel" aria-label="Statistics">
+      <div class="panel-head">
+        <h2 class="panel-title">STATS · learned per asset / exchange</h2>
+        <button id="stats-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="stats-table">
+          <thead><tr id="stats-head"></tr></thead>
+          <tbody id="stats-body"></tbody>
+        </table>
+      </div>
+      <div id="stats-empty" class="empty hidden"><p class="empty-title">No statistics recorded yet.</p></div>
+    </section>
+  </main>
+
+  <div id="drawer-backdrop" class="backdrop hidden"></div>
+  <aside id="settings-drawer" class="drawer" aria-hidden="true" aria-labelledby="settings-title">
+    <div class="drawer-head">
+      <h2 id="settings-title" class="panel-title">⚙ Settings</h2>
+      <button id="settings-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close settings">✕</button>
+    </div>
+    <form id="settings-form" class="settings-form" autocomplete="off">
+      <fieldset class="fieldset">
+        <legend>Mode</legend>
+        <div class="radio-row">
+          <label class="radio"><input type="radio" name="mode" value="paper"> <span>PAPER</span></label>
+          <label class="radio"><input type="radio" name="mode" value="live"> <span class="live-text">LIVE</span></label>
+        </div>
+        <p class="hint">LIVE sends real orders with your API keys. PAPER uses the simulator / Bybit demo.</p>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend>Human execution</legend>
+        <label class="field"><span class="field-label">HUMAN_EXECUTION_TIME (s)</span>
+          <input type="number" name="human_execution_time_s" step="0.5" min="0.5" inputmode="decimal"></label>
+        <label class="check"><input type="checkbox" name="alert_human_only"> <span>Telegram only when HUMAN light is not red</span></label>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend>Capital</legend>
+        <label class="field"><span class="field-label">Capital per card (quote)</span>
+          <input type="number" name="capital_quote" step="1" min="1" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">MAX_TRADE_SIZE (quote)</span>
+          <input type="number" name="max_trade_quote" step="1" min="1" inputmode="decimal"></label>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend>Thresholds</legend>
+        <label class="field"><span class="field-label">Show opportunities from NET %</span>
+          <input type="number" name="min_net_pct_show" step="0.05" min="0" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">TELEGRAM threshold NET %</span>
+          <input type="number" name="telegram_profit_threshold_pct" step="0.1" min="0" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">Min movers (exchanges)</span>
+          <input type="number" name="min_movers" step="1" min="1" inputmode="numeric"></label>
+        <label class="check"><input type="checkbox" name="telegram_require_executable"> <span>Telegram requires an executable light</span></label>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend>Automation</legend>
+        <label class="check"><input type="checkbox" name="auto_confirm"> <span>AUTO_CONFIRM: execute AUTO immediately without the confirmation dialog</span></label>
+      </fieldset>
+      <div class="drawer-actions">
+        <button id="settings-save" class="btn btn-primary" type="submit">Save</button>
+        <button id="settings-reset" class="btn btn-ghost" type="button">Reset</button>
+      </div>
+      <p id="settings-status" class="status-line" role="status"></p>
+    </form>
+  </aside>
+
+  <div id="modal-manual" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="manual-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="manual-title" class="panel-title">MANUAL</h2>
+        <button id="manual-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close">✕</button>
+      </div>
+      <div id="manual-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="modal-auto" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="auto-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="auto-title" class="panel-title">AUTO</h2>
+        <button id="auto-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close">✕</button>
+      </div>
+      <div id="auto-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="modal-confirm" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="modal-card modal-sm">
+      <div class="modal-head">
+        <h2 id="confirm-title" class="panel-title">Confirm</h2>
+      </div>
+      <div id="confirm-body" class="modal-body"></div>
+      <div class="modal-actions">
+        <button id="confirm-cancel" class="btn btn-ghost" type="button">Cancel</button>
+        <button id="confirm-ok" class="btn btn-danger" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
