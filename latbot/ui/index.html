@@ -366,6 +366,8 @@
         <legend>Selectivity &amp; leverage</legend>
         <label class="field"><span class="field-label">Min quality score (0-100) for display, Telegram, AUTO</span>
           <input type="number" name="min_quality_score" step="1" min="0" max="100" inputmode="numeric"></label>
+        <label class="field"><span class="field-label">Training: virtual balance (stakes come out of it; New period restarts it)</span>
+          <input type="number" name="shadow_balance_quote" step="any" min="10" inputmode="decimal"></label>
         <label class="field"><span class="field-label">Training: virtual trade from NET %</span>
           <input type="number" name="shadow_min_net_pct" step="0.05" min="0" inputmode="decimal"></label>
         <label class="field"><span class="field-label">Max leverage (advice; spot venues stay 1x)</span>

@@ -119,3 +119,29 @@ async def test_stats_period_hides_older_trades_but_keeps_history():
     assert start == env.clock.wall() and sh.summary()["closed"] == 0 and sh.summary()["all_time_closed"] == 2
     # the period survives a restart
     assert ShadowTrader(env.settings, env.bus, env.clock, db=db).summary()["period_start_ts"] == start
+
+
+async def test_virtual_balance_grows_with_closed_trades_and_limits_new_ones():
+    db = Database(":memory:")
+    env = Env(db=db)
+    env.settings.shadow_balance_quote = 1000.0
+    sh = ShadowTrader(env.settings, env.bus, env.clock, db=db)
+    opp = await detect(env)
+    env.clock.advance(0.3)
+    await env.push("kraken", 101.5)  # target reached: a virtual win
+    s = sh.summary()
+    pnl = s["pnl_quote"]
+    assert pnl > 0
+    assert s["balance_start"] == 1000.0 and s["balance_now"] == pytest.approx(1000.0 + pnl)
+    assert s["balance_pct"] == pytest.approx(pnl / 1000.0 * 100.0)
+    assert s["today_closed"] == 1 and s["today_pnl_quote"] == pytest.approx(pnl)
+    assert s["max_drawdown_pct"] == pytest.approx(0.0)
+    assert opp.id == sh.trades()[0]["id"]
+
+
+async def test_no_free_virtual_balance_skips_the_trade():
+    env = Env()
+    env.settings.shadow_balance_quote = 10.0  # less than one trade's stake
+    sh = ShadowTrader(env.settings, env.bus, env.clock)
+    await detect(env)
+    assert sh.trades() == [] and sh.skipped.get("no free virtual balance") == 1

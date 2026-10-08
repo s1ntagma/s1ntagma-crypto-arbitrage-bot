@@ -23,7 +23,7 @@
     'min_quality_score', 'shadow_min_net_pct', 'max_leverage', 'pool_enabled', 'context_enabled', 'ws_assets',
     'simple_mode', 'simple_entry_deadline_s', 'simple_max_hold_s',
     'ride_enabled', 'ride_entry_max_age_s', 'ride_reversal_pct', 'ride_stall_s', 'ride_trail_arm_pct', 'ride_trail_pct',
-    'ride_stop_pct', 'ride_max_hold_s'
+    'ride_stop_pct', 'ride_max_hold_s', 'shadow_balance_quote'
   ];
 
   var state = {
@@ -1678,6 +1678,10 @@
         : 'Period: all time';
       kvRows($('shadow-sum-body'), [
         ['Status', d.enabled ? 'ON (no orders, virtual)' : 'OFF (shadow_trading=false)'],
+        ['Virtual balance', s.balance_start == null ? '–' : fmtMoney(s.balance_start, displayQuote()) + ' → ' +
+          fmtMoney(s.balance_now, displayQuote()) + (s.balance_pct == null ? '' : ' (' + fmtPct(s.balance_pct) + ')')],
+        ['Today', fmtMoney(s.today_pnl_quote || 0, displayQuote(), { sign: true }) + ' · ' + (s.today_closed || 0) + ' trades'],
+        ['Max drawdown', s.max_drawdown_pct == null ? '–' : num(s.max_drawdown_pct).toFixed(2) + '%'],
         ['Open', String(s.open || 0)], ['Closed', String(s.closed || 0)], ['Win rate', rateOrDash(s.win_rate)],
         ['Avg expected NET', pctOrDash(s.avg_expected_net_pct)], ['Avg actual NET', pctOrDash(s.avg_actual_net_pct)],
         ['Target reached', String(s.target_reached || 0)], ['Stopped', String(s.stopped || 0)],

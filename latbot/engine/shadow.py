@@ -108,6 +108,7 @@ class ShadowTrader:
         self.no_data = 0  # closed without a fresh price (outcome unknown, not learned)
         self.skipped: dict[str, int] = {}
         self._period_start: float | None = self._load_period()
+        self._period_pnl = self._load_period_pnl()  # virtual balance = start + this
         self._unsubs = [
             bus.subscribe(events.OPP_NEW, self._on_new),
             bus.subscribe(events.OPP_UPDATE, self._on_update),
@@ -142,6 +143,9 @@ class ShadowTrader:
             return
         if float(e.net_pct) < float(getattr(self._settings, "shadow_min_net_pct", 0.1)):
             self._skip("NET below training threshold")
+            return
+        if float(e.executable_quote) > self._free_balance() + 1e-9:
+            self._skip("no free virtual balance")  # like a real account: open stakes are not available
             return
         now = self._clock.wall()
         quality = opp.quality if isinstance(getattr(opp, "quality", None), dict) else {}
@@ -288,6 +292,8 @@ class ShadowTrader:
             return
         t.actual_net_pct = t.net_at(price)
         t.pnl_quote = t.capital_quote * t.actual_net_pct / 100.0
+        if self._period_start is None or t.opened_ts >= self._period_start:
+            self._period_pnl += t.pnl_quote
         t.pnl_leveraged_quote = t.pnl_quote * max(1.0, t.leverage_max)
         self._save(t)
         self._learn(t)
@@ -345,6 +351,25 @@ class ShadowTrader:
             log.exception("stats period not available; counting every trade")
             return None
 
+    def _balance_start(self) -> float:
+        return float(getattr(self._settings, "shadow_balance_quote", 1000.0) or 0.0)
+
+    def _load_period_pnl(self) -> float:
+        rows = []
+        if self._db is not None and hasattr(self._db, "list_shadow"):
+            try:
+                rows = self._db.list_shadow(5000)
+            except Exception:  # noqa: BLE001
+                log.exception("list_shadow failed")
+        start = self._period_start
+        return sum(float(r.get("pnl_quote") or 0.0) for r in rows
+                   if r.get("closed_ts") is not None and (start is None or float(r.get("opened_ts") or 0.0) >= start))
+
+    def _free_balance(self) -> float:
+        """Virtual balance now minus what the open virtual positions hold."""
+        held = sum(t.capital_quote for t in self._open.values())
+        return self._balance_start() + self._period_pnl - held
+
     @property
     def period_start_ts(self) -> float | None:
         return self._period_start
@@ -356,6 +381,7 @@ class ShadowTrader:
         if kv_set is not None:
             kv_set(PERIOD_KEY, now)
         self._period_start = now
+        self._period_pnl = 0.0  # the virtual balance starts again from shadow_balance_quote
         log.info("stats: new period from %.0f", now)
         return now
 
@@ -364,6 +390,7 @@ class ShadowTrader:
         start = self._period_start
         cur = rows if start is None else [r for r in rows if float(r.get("opened_ts") or 0.0) >= start]
         out = summarize(cur)
+        out.update(_balance_stats(cur, self._balance_start(), self._clock.wall()))
         out["skipped"] = dict(self.skipped)
         out["period_start_ts"] = start
         out["all_time_closed"] = sum(1 for r in rows if r.get("closed_ts") is not None)
@@ -394,6 +421,30 @@ def _stats(closed: list[dict[str, Any]]) -> dict[str, Any]:
         "stopped": sum(1 for r in closed if r.get("barrier") == "stop"),
         "pnl_leveraged_quote": sum(float(r.get("pnl_leveraged_quote") or r.get("pnl_quote") or 0.0) for r in closed),
     }
+
+
+def _balance_stats(rows: list[dict[str, Any]], start: float, now_wall: float) -> dict[str, Any]:
+    """Virtual balance of the training period: start + closed results, today's result, max drawdown."""
+    import datetime as _dt
+
+    closed = sorted((r for r in rows if r.get("closed_ts") is not None and r.get("pnl_quote") is not None),
+                    key=lambda r: float(r.get("closed_ts") or 0.0))
+    midnight = _dt.datetime.fromtimestamp(now_wall).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    equity = peak = start
+    max_dd = 0.0
+    today_pnl, today_n = 0.0, 0
+    for r in closed:
+        pnl = float(r.get("pnl_quote") or 0.0)
+        equity += pnl
+        peak = max(peak, equity)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - equity) / peak * 100.0)
+        if float(r.get("closed_ts") or 0.0) >= midnight:
+            today_pnl += pnl
+            today_n += 1
+    return {"balance_start": start, "balance_now": equity,
+            "balance_pct": (equity - start) / start * 100.0 if start > 0 else None,
+            "today_pnl_quote": today_pnl, "today_closed": today_n, "max_drawdown_pct": max_dd}
 
 
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:

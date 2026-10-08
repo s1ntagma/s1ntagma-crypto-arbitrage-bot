@@ -302,6 +302,7 @@ class Settings:
     # ---- Phase 3: selective, context-aware signals (ARCHITECTURE "Phase 3") ----
     # Training: every opportunity with NET >= this is traded virtually (shadow), whatever its quality.
     shadow_min_net_pct: float = 0.1
+    shadow_balance_quote: float = 1000.0  # virtual training balance: stakes come out of it, results go back in
     shadow_stop_pct: float = 1.0  # shadow stop barrier when the leverage plan has no stop
     # quality score (engine/quality.py) - fixed, documented weights; never fitted to past trades
     min_quality_score: int = 60  # below: hidden by default, no Telegram, no AUTO (still shadow-traded)
