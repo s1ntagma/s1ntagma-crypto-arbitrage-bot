@@ -42,6 +42,25 @@ def _has_browser() -> bool:
 pytestmark = pytest.mark.skipif(not _has_browser(), reason="no Chromium for Playwright (set PLAYWRIGHT_BROWSERS_PATH or CHROMIUM_PATH)")
 
 
+
+EMOJI_JS = r"""() => {
+  const re = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B50}\u{2B55}\u{23E9}-\u{23FA}\u{25B6}\u{25B8}\u{2197}\u{FE0F}]/u;
+  const found = [];
+  const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = w.nextNode())) {
+    if (re.test(n.nodeValue)) found.push(n.nodeValue.trim().slice(0, 60));
+  }
+  document.querySelectorAll('option').forEach(o => { if (re.test(o.textContent)) found.push('option: ' + o.textContent); });
+  return found;
+}"""
+
+
+async def assert_no_emoji(page, where: str) -> None:
+    found = await page.evaluate(EMOJI_JS)
+    assert not found, f"emoji visible on {where}: {found}"
+
+
 async def _server(tmp_path: Path):
     b = build(tmp_path, ui_push_interval_ms=50, default_opp_duration_s=60.0)
     task = asyncio.create_task(run_app(b.ctx, seconds=None, serve=True))
@@ -76,8 +95,10 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
 
             # 1. empty board is honest, DIAG explains why
             assert await page.locator("#cards-empty").is_visible()
+            await assert_no_emoji(page, "empty board")
             await page.click("button.tab[data-tab='diag']")
             await page.wait_for_selector("#diag-why .why-line", timeout=5000)
+            await assert_no_emoji(page, "diagnostics tab")
             why = await page.locator("#diag-why").inner_text()
             assert any(k in why for k in ("Рынок спокоен", "тика", "не подключена")), why  # fakes: no data yet
             assert "Exchanges connected" in await page.locator("#diag-funnel").inner_text()
@@ -89,6 +110,7 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             await page.click("button.tab[data-tab='opps']")
             await page.wait_for_selector(".card", timeout=5000)
             card = page.locator(".card").first
+            await assert_no_emoji(page, "board with an opportunity (card, best panel, lights)")
             assert "BTC" in await card.inner_text()
             assert await card.locator(".plan").count() == 1
             assert (await page.locator("#opps-count").inner_text()).strip() == "1"
@@ -104,10 +126,12 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             assert "Я ЗАШЁЛ" in await btn.inner_text()
             await btn.click()
             await page.wait_for_selector("#modal-manual:not(.hidden) input[name='capital']", timeout=5000)
+            await assert_no_emoji(page, "session: amount step")
             assert await page.evaluate("document.body.classList.contains('in-session')")
             await page.fill("#modal-manual input[name='capital']", "50")
             await page.click("#modal-manual button:has-text('ПОКАЗАТЬ ТОЧНЫЙ ПЛАН')")
             await page.wait_for_selector("#modal-manual button:has-text('Я КУПИЛ')", timeout=5000)
+            await assert_no_emoji(page, "session: plan step")
             plan = (await page.locator("#manual-body").inner_text()).lower()  # labels are uppercased by CSS
             assert "купить" in plan and "потом продать" in plan and "ожидаемо" in plan and "≤" in plan and "≥" in plan
             assert "0.49995 btc" in plan  # exactly 50 EUR worth on the real book
@@ -117,6 +141,7 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             await page.click("#modal-manual button:has-text('Я КУПИЛ')")
             await wait_for(lambda: b.ctx.risk.open_trades() == 1, timeout=5.0)
             await page.wait_for_selector("#modal-manual .escort:has-text('ЖДИ')", timeout=5000)
+            await assert_no_emoji(page, "session: escort")
             await page.click("#manual-close")  # Свернуть: the position stays
             assert not await page.evaluate("document.body.classList.contains('in-session')")
             await page.wait_for_selector(".card button.btn-manual:has-text('СДЕЛКА')", timeout=5000)
@@ -147,6 +172,7 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             # 6. settings drawer saves to the server
             await page.click("#settings-btn")
             await page.wait_for_selector("#settings-drawer[aria-hidden='false']", timeout=3000)
+            await assert_no_emoji(page, "settings drawer")
             human = page.locator("#settings-form [name='human_execution_time_s']")
             await human.fill("9")
             await page.click("#settings-save")
@@ -156,6 +182,7 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             # 7. STATS tab renders (empty is a message, not a blank)
             await page.click("button.tab[data-tab='stats']")
             await page.wait_for_selector("#stats-empty:not(.hidden), #stats-body tr", timeout=5000)
+            await assert_no_emoji(page, "stats tab")
             await page.wait_for_selector("#shadow-body tr", timeout=5000)  # the lag above was shadow-traded
             assert "BTC" in await page.locator("#shadow-body").inner_text()
             assert "ON" in await page.locator("#shadow-sum-body").inner_text()
@@ -172,6 +199,7 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             await page.fill("#modal-manual textarea[name='note']", "вышел по цели")
             await page.click("#modal-manual button:has-text('СОХРАНИТЬ РЕЗУЛЬТАТ')")
             await page.wait_for_selector("#modal-manual:has-text('Сделка завершена и сохранена')", timeout=5000)
+            await assert_no_emoji(page, "session: saved")
             closed = b.ctx.db.get_trade(trade_id)
             assert closed["state"] == "CLOSED" and closed["user_reported_pnl_quote"] == 0.4 and closed["user_note"] == "вышел по цели"
             await page.click("#modal-manual button:has-text('К МОНИТОРИНГУ')")

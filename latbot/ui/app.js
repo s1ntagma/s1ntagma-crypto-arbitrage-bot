@@ -12,10 +12,10 @@
   var TERMINAL = { CLOSED: 1, EXPIRED: 1, CANCELLED: 1, FAILED: 1 };
   var EXECUTING = { EXECUTING: 1, PARTIALLY_FILLED: 1, FILLED: 1 };
   var LIGHTS = {
-    green: { emoji: '🟢', cls: 'green', word: 'GREEN' },
-    yellow: { emoji: '🟡', cls: 'yellow', word: 'YELLOW' },
-    red: { emoji: '🔴', cls: 'red', word: 'RED' },
-    unknown: { emoji: '⚪', cls: 'muted', word: 'N/A' }
+    green: { emoji: '', cls: 'green', word: 'GREEN' },
+    yellow: { emoji: '', cls: 'yellow', word: 'YELLOW' },
+    red: { emoji: '', cls: 'red', word: 'RED' },
+    unknown: { emoji: '', cls: 'muted', word: 'N/A' }
   };
   var SETTINGS_FIELDS = [
     'human_execution_time_s', 'telegram_profit_threshold_pct', 'capital_quote', 'max_trade_quote',
@@ -548,7 +548,7 @@
       setButtonLabel(btn, iconPlay(), 'RESUME TRADING');
       btn.className = 'btn btn-warn';
       closeBtn.classList.remove('hidden');
-      banner.textContent = 'EMERGENCY STOP ACTIVE — new AUTO trades are blocked' + (state.emergencyReason ? ' · reason: ' + state.emergencyReason : '');
+      banner.textContent = 'EMERGENCY STOP ACTIVE — new AUTO trades are blocked' + (state.emergencyReason ? ' (reason: ' + state.emergencyReason + ')' : '');
       banner.classList.remove('hidden');
     } else {
       setButtonLabel(btn, iconStop(), 'EMERGENCY STOP');
@@ -576,9 +576,9 @@
     box.appendChild(tile('Active', fmtInt(d.active)));
     box.appendChild(tile('Today', fmtInt(d.today)));
     box.appendChild(tile('Lights', h('span', { class: 'tile-lights' },
-      h('span', { class: 'light green', text: '🟢 ' + fmtInt(d.green) }),
-      h('span', { class: 'light yellow', text: '🟡 ' + fmtInt(d.yellow) }),
-      h('span', { class: 'light red', text: '🔴 ' + fmtInt(d.red) })), 'tile-wide'));
+      h('span', { class: 'light green' }, h('span', { class: 'dot green', 'aria-hidden': 'true' }), fmtInt(d.green) + ' green'),
+      h('span', { class: 'light yellow' }, h('span', { class: 'dot yellow', 'aria-hidden': 'true' }), fmtInt(d.yellow) + ' yellow'),
+      h('span', { class: 'light red' }, h('span', { class: 'dot red', 'aria-hidden': 'true' }), fmtInt(d.red) + ' red')), 'tile-wide'));
     box.appendChild(tile('Human OK', fmtInt(d.human_executable)));
     box.appendChild(tile('Bot OK', fmtInt(d.bot_executable)));
     box.appendChild(tile('TG alerts', fmtInt(d.telegram_alerts)));
@@ -849,7 +849,7 @@
     card.appendChild(h('div', { class: 'card-grid' },
       kv('BUY', fmtMoney(o.buy_price, q)),
       kv('SELL', fmtMoney(o.sell_price, q)),
-      kv('CAPITAL', fmtMoney(econ.executable_quote, q) + (econ.liquidity_ok === false ? ' ⚠' : '')),
+      kv('CAPITAL', fmtMoney(econ.executable_quote, q) + (econ.liquidity_ok === false ? ' (thin book)' : '')),
       kv('EXPECTED PROFIT', fmtMoney(profit, q, { sign: true }), profit >= 0 ? 'pos' : 'neg')));
 
     if (term) {
@@ -872,7 +872,7 @@
           h('div', { class: 'bar-fill ' + barClass(rem, o) + (urgent ? ' urgent' : ''), 'data-role': 'bar', style: 'width:' + (frac * 100).toFixed(1) + '%' }))));
     }
 
-    var humanParts = [hl.emoji + ' ' + fmtSecs(human.est_execution_s, 0) + ' execution'];
+    var humanParts = [fmtSecs(human.est_execution_s, 0) + ' execution'];
     humanParts.push(hl.cls === 'green' ? 'low risk' : hl.cls === 'yellow' ? 'high risk' : (human.label || 'NOT EXECUTABLE'));
     if (!term) humanParts.push('~' + fmtSecs(rem, 0) + ' window');
     var hn = num(human.stats_n);
@@ -886,7 +886,7 @@
     var botLine = h('div', { class: 'line light ' + bl.cls, 'data-light': bl.cls },
       h('span', { class: 'dot ' + bl.cls, 'aria-hidden': 'true' }),
       h('span', { class: 'line-k', text: 'BOT' }),
-      h('span', { text: bl.emoji + ' ' + (bot.label || bl.word) + ' estimated execution: ' + fmtSecs(bot.est_execution_s) }));
+      h('span', { text: (bot.label || bl.word) + ' estimated execution: ' + fmtSecs(bot.est_execution_s) }));
     if (bl.cls !== 'green' && Array.isArray(bot.reasons) && bot.reasons.length) {
       botLine.appendChild(h('span', { class: 'reason', text: '· ' + bot.reasons[0], title: bot.reasons[0] }));
     }
@@ -942,7 +942,7 @@
     var foot = h('div', { class: 'card-foot' });
     var url = safeUrl(o.pair_url);
     if (url) {
-      foot.appendChild(h('a', { class: 'link', href: url, target: '_blank', rel: 'noopener noreferrer', text: 'Open on ' + exchangeLabel(o.target_exchange) + ' ↗' }));
+      foot.appendChild(h('a', { class: 'link', href: url, target: '_blank', rel: 'noopener noreferrer', text: 'Open on ' + exchangeLabel(o.target_exchange) + '' }));
     }
     foot.appendChild(h('span', { class: 'card-meta' }, h('span', { text: 'seen ' + fmtTime(o.detected_ts) })));
     var manualMine = state.manual && state.manual.id === o.id && state.manual.phase !== 'done';
@@ -955,7 +955,7 @@
     var manualBtn = h('button', {
       class: 'btn btn-manual', type: 'button', disabled: manualDisabled,
       title: term ? 'opportunity is over' : manualOpen ? 'открытая ручная сделка: вернуться к сопровождению' : humanRed ? 'too fast for a human' : exec ? 'already executing' : 'зайти в сделку вручную: бот проведёт по шагам',
-      text: manualMine || manualOpen ? 'СДЕЛКА ▸' : 'Я ЗАШЁЛ',
+      text: manualMine || manualOpen ? 'Сделка' : 'Я ЗАШЁЛ',
       onclick: function () { openManual(o.id); }
     });
     var autoBtn = h('button', {
@@ -980,7 +980,7 @@
       if (isExecuting(t.state) && !t.entry_order && t.opportunity_id) {
         // Open MANUAL position (no entry order = bought by hand): second entry point to report the exit.
         stateCell.appendChild(h('button', {
-          class: 'btn btn-manual btn-sm', type: 'button', text: 'СДЕЛКА ▸', title: 'открытая ручная сделка: вернуться к сопровождению',
+          class: 'btn btn-manual btn-sm', type: 'button', text: 'Сделка', title: 'открытая ручная сделка: вернуться к сопровождению',
           onclick: function () { openManual(t.opportunity_id); }
         }));
       }
@@ -1470,7 +1470,7 @@
         m.supportAt = performance.now();
         m.error = '';
       } else if (r.status === 404) {
-        m.support = Object.assign({}, m.support, { valid: false, expired: true, message: '⚠️ OPPORTUNITY EXPIRED' });
+        m.support = Object.assign({}, m.support, { valid: false, expired: true, message: 'OPPORTUNITY EXPIRED' });
         m.error = '';
       } else {
         m.error = r.error;
@@ -1496,18 +1496,18 @@
     var rem = manualRemaining(m);
     if (inPosition(m) || s.status === 'in_position') {
       // A position already held is never "too fast": only the window can close (and no fresh data is said so).
-      if (s.status === 'no_data') return { cls: 'yellow', text: '⚠️ NO FRESH DATA — exit at best price' };
-      if (s.expired || rem <= 0) return { cls: 'yellow', text: '⏱ WINDOW CLOSED — exit at best price' };
-      return { cls: 'green', text: '🟢 IN POSITION' };
+      if (s.status === 'no_data') return { cls: 'yellow', text: 'NO FRESH DATA — exit at best price' };
+      if (s.expired || rem <= 0) return { cls: 'yellow', text: 'WINDOW CLOSED — exit at best price' };
+      return { cls: 'green', text: 'IN POSITION' };
     }
-    if (s.status === 'no_data') return { cls: 'yellow', text: '⚠️ NO FRESH DATA' };
-    if (s.status === 'mode_changed') return { cls: 'red', text: '⚠️ MODE CHANGED' };
-    if (manualExpired(m)) return { cls: 'red', text: '⚠️ OPPORTUNITY EXPIRED' };
+    if (s.status === 'no_data') return { cls: 'yellow', text: 'NO FRESH DATA' };
+    if (s.status === 'mode_changed') return { cls: 'red', text: 'MODE CHANGED' };
+    if (manualExpired(m)) return { cls: 'red', text: 'OPPORTUNITY EXPIRED' };
     var est = num(s.human && s.human.est_execution_s);
     if (!Number.isFinite(est)) est = num(state.settings.human_execution_time_s);
-    if (s.status === 'too_fast' || (Number.isFinite(est) && rem < est)) return { cls: 'red', text: '🔴 TOO FAST FOR HUMAN' };
+    if (s.status === 'too_fast' || (Number.isFinite(est) && rem < est)) return { cls: 'red', text: 'TOO FAST FOR HUMAN' };
     var li = lightInfo(s.human && s.human.light);
-    return { cls: li.cls, text: li.emoji + ' ' + ((s.human && s.human.label) || li.word) };
+    return { cls: li.cls, text: (s.human && s.human.label) || li.word };
   }
 
   function entrySide(o, s) {
@@ -1520,7 +1520,7 @@
   function openExchangeLink(s, o, exch) {
     var url = safeUrl(s.pair_url || o.pair_url);
     if (!url) return h('p', { class: 'hint', text: 'Ссылки на пару для ' + exch + ' нет — открой биржу вручную.' });
-    return h('a', { class: 'btn btn-open', href: url, target: '_blank', rel: 'noopener noreferrer', text: 'ОТКРЫТЬ БИРЖУ · ' + exch + ' ↗' });
+    return h('a', { class: 'btn btn-open', href: url, target: '_blank', rel: 'noopener noreferrer', text: 'ОТКРЫТЬ БИРЖУ · ' + exch });
   }
 
   function othersCount(m) {
@@ -1732,7 +1732,7 @@
       var sig = s.status === 'no_data' ? 'no_data' : (s.sell_signal || 'wait');
       r.escort.className = 'escort ' + sig;
       r.escort.textContent = s.status === 'no_data'
-        ? '⚠️ Нет свежих данных по стакану — выходи по лучшей цене, которую видишь на бирже.'
+        ? 'Нет свежих данных по стакану — выходи по лучшей цене, которую видишь на бирже.'
         : (s.sell_text || (m.error ? 'нет связи с ботом: ' + m.error : 'ЖДИ: бот сравнивает стакан с целью…'));
     }
     var expired = manualExpired(m);
@@ -1742,7 +1742,7 @@
       if (inPosition(m)) {
         if (m.error) { text = 'Нет связи с ботом: ' + m.error + ' — сделка твоя, пока ты не запишешь выход.'; cls = 'alert warn'; }
       }
-      else if (expired) { text = (s.message || '⚠️ OPPORTUNITY EXPIRED') + ' — возможность закончилась, покупать уже поздно.'; cls = 'alert danger'; }
+      else if (expired) { text = (s.message || 'OPPORTUNITY EXPIRED') + ' — возможность закончилась, покупать уже поздно.'; cls = 'alert danger'; }
       else if (m.error) { text = 'Нет связи с ботом: ' + m.error; cls = 'alert warn'; }
       else if (st.cls === 'red') { text = st.text + (s.message && s.message !== st.text ? ' · ' + s.message : ''); cls = 'alert warn'; }
       r.banner.textContent = text;
@@ -1985,7 +1985,7 @@
     if (!a) return;
     if (a.phase === 'confirm' && a.busy) return;  // EXECUTE in flight: hide only, the dialog follows TRADE_UPDATE
     if (a.phase === 'confirm' || a.phase === 'loading') {
-      // CANCEL, ✕, backdrop and Escape all back out the same way - never through /cancel (that would kill a live lag).
+      // CANCEL, close button, backdrop and Escape all back out the same way - never through /cancel (that would kill a live lag).
       a.abandoned = true;
       state.auto = null;
       if (a.phase === 'confirm') deselectAuto(a).then(function () { scheduleRender('cards'); });
@@ -2013,7 +2013,7 @@
     }
     var m = state.manual;
     if (m && m.id === o.id && isTerminal(o.state) && (m.phase === 'buy' || m.phase === 'amount')) {
-      m.support = Object.assign({}, m.support, { valid: false, expired: true, message: '⚠️ OPPORTUNITY ' + o.state });
+      m.support = Object.assign({}, m.support, { valid: false, expired: true, message: 'OPPORTUNITY ' + o.state });
       updateManualLive();
     }
   }
@@ -2049,15 +2049,15 @@
       row('EXPECTED PROFIT', fmtMoney(snap.expected_profit_quote, q, { sign: true }));
       row('CAPITAL', fmtMoney(snap.capital, q));
       // risk.ok stays null until RiskManager.check actually ran (revalidation can fail earlier): only true is green.
-      if (risk.ok === true) row('RISK', '🟢 OK' + (Number.isFinite(num(risk.allowed)) ? ' · allowed ' + fmtMoney(risk.allowed, q) : ''), 'pos');
-      else if (risk.ok === false) row('RISK', '🔴 ' + (risk.reason || 'blocked'), 'neg');
-      else row('RISK', '⚪ not checked' + (snap.valid === false ? ' (revalidation failed first)' : ''), 'muted');
+      if (risk.ok === true) row('RISK', 'OK' + (Number.isFinite(num(risk.allowed)) ? ' · allowed ' + fmtMoney(risk.allowed, q) : ''), 'pos');
+      else if (risk.ok === false) row('RISK', 'Blocked: ' + (risk.reason || 'blocked'), 'neg');
+      else row('RISK', 'not checked' + (snap.valid === false ? ' (revalidation failed first)' : ''), 'muted');
       if (Number.isFinite(num(bal.free))) row('BALANCE', fmtMoney(bal.free, bal.quote || q) + ' free');
-      else row('BALANCE', '⚪ not checked', 'muted');
+      else row('BALANCE', 'not checked', 'muted');
       if (snap.entry_price !== undefined) row('ENTRY', fmtMoney(snap.entry_price, q));
       if (snap.exit_target !== undefined) row('EXIT TARGET', fmtMoney(snap.exit_target, q));
       if (snap.remaining_s !== undefined) row('WINDOW', fmtSecs(snap.remaining_s));
-      row('REVALIDATION', snap.valid === false ? '🔴 ' + (snap.reason || 'not valid now') : '🟢 ' + (snap.reason || 'valid on the latest book'), snap.valid === false ? 'neg' : 'pos');
+      row('REVALIDATION', snap.valid === false ? 'Not valid: ' + (snap.reason || 'not valid now') : (snap.reason || 'Valid on the latest book'), snap.valid === false ? 'neg' : 'pos');
       Object.keys(snap).forEach(function (k) { if (!AUTO_KNOWN[k]) row(humanize(k), fmtAny(snap[k], k)); });
       body.appendChild(h('div', { class: 'block' }, h('div', { class: 'block-title', text: 'Confirm execution (' + String(state.mode).toUpperCase() + ')' }), rows));
       body.appendChild(h('p', { class: 'hint', text: 'The bot revalidates on the latest book right before the entry and before the exit. If the edge is gone it cancels instead of executing a stale snapshot.' }));
@@ -2074,7 +2074,7 @@
     var tq = quoteOf({ target_symbol: t.symbol }) || q;
     var stateText = t.state || res.state || (a.phase === 'done' ? 'DONE' : 'EXECUTING');
     var ok = res.ok !== false && !(t.state === 'FAILED' || t.state === 'CANCELLED');
-    body.appendChild(h('div', { class: 'alert ' + (a.phase === 'done' ? (ok ? 'ok' : 'danger') : 'warn'), text: (a.phase === 'done' ? (ok ? '✅ ' : '⛔ ') : '⏳ ') + stateText + (res.reason ? ' · ' + res.reason : '') }));
+    body.appendChild(h('div', { class: 'alert ' + (a.phase === 'done' ? (ok ? 'ok' : 'danger') : 'warn'), text: stateText + (res.reason ? ' · ' + res.reason : '') }));
     var r2 = h('div', { class: 'rows' });
     var row2 = function (k, v, cls) { r2.appendChild(h('span', { class: 'k', text: k })); r2.appendChild(h('span', { class: 'v ' + (cls || ''), text: v })); };
     if (t.id) {
@@ -2122,7 +2122,7 @@
       return;
     }
     confirmDialog({
-      title: '🛑 EMERGENCY STOP',
+      title: 'EMERGENCY STOP',
       body: ['Blocks every new AUTO trade and cancels pending orders.', 'Open positions stay open until you press CLOSE POSITIONS. History is kept.'],
       okLabel: 'STOP NOW', okClass: 'btn-danger'
     }).then(function (ok) {
@@ -2367,7 +2367,35 @@
     window.addEventListener('hashchange', handleHash);
   }
 
+
+  // Emoji never reach the screen: backend strings (also sent to Telegram) are scrubbed here.
+  var EMOJI_CLASS = '[\\u{1F000}-\\u{1FAFF}\\u{2600}-\\u{27BF}\\u{2B50}\\u{2B55}\\u{23E9}-\\u{23FA}\\u{25B6}\\u{25B8}\\u{2197}\\u{FE0F}\\u{200D}]';
+  var EMOJI_TEST = new RegExp(EMOJI_CLASS, 'u');
+  var EMOJI_RUN = new RegExp('\\s*' + EMOJI_CLASS + '+\\s*', 'gu');
+  function scrubText(node) {
+    var v = node.nodeValue;
+    if (!v || !EMOJI_TEST.test(v)) return;
+    node.nodeValue = v.replace(EMOJI_RUN, ' ').trim();
+  }
+  function scrubTree(root) {
+    if (root.nodeType === 3) { scrubText(root); return; }
+    if (root.nodeType !== 1) return;
+    var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    var n;
+    while ((n = w.nextNode())) scrubText(n);
+  }
+  function startEmojiScrub() {
+    scrubTree(document.body);
+    new MutationObserver(function (list) {
+      list.forEach(function (m) {
+        if (m.type === 'characterData') scrubText(m.target);
+        else m.addedNodes.forEach(scrubTree);
+      });
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  }
+
   function init() {
+    startEmojiScrub();
     bindUi();
     renderAll();
     api('GET', '/api/state').then(function (r) {

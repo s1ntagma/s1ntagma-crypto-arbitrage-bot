@@ -17,10 +17,10 @@
         <span class="brand-text"><span class="brand-title">latbot</span><span class="brand-sub">latency terminal</span></span>
       </div>
       <nav class="tabs" role="tablist" aria-label="Sections">
-        <button class="tab" role="tab" type="button" data-tab="opps" aria-selected="true" aria-controls="tab-opps"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg><span class="tab-label">OPPORTUNITIES</span> <span class="tab-count" id="opps-count">0</span></button>
-        <button class="tab" role="tab" type="button" data-tab="trades" aria-selected="false" aria-controls="tab-trades"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg><span class="tab-label">TRADES</span> <span class="tab-count" id="trades-count">0</span></button>
-        <button class="tab" role="tab" type="button" data-tab="stats" aria-selected="false" aria-controls="tab-stats"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="tab-label">STATS</span></button>
-        <button class="tab" role="tab" type="button" data-tab="diag" aria-selected="false" aria-controls="tab-diag"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span class="tab-label">DIAG</span></button>
+        <button class="tab" role="tab" type="button" data-tab="opps" aria-selected="true" aria-controls="tab-opps"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg><span class="tab-label">opportunities</span> <span class="tab-count" id="opps-count">0</span></button>
+        <button class="tab" role="tab" type="button" data-tab="trades" aria-selected="false" aria-controls="tab-trades"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg><span class="tab-label">trades</span> <span class="tab-count" id="trades-count">0</span></button>
+        <button class="tab" role="tab" type="button" data-tab="stats" aria-selected="false" aria-controls="tab-stats"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="tab-label">stats</span></button>
+        <button class="tab" role="tab" type="button" data-tab="diag" aria-selected="false" aria-controls="tab-diag"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span class="tab-label">diagnostics</span></button>
       </nav>
     </aside>
 
@@ -53,13 +53,13 @@
 
       <div id="filters" class="filters" aria-label="Filters">
         <div id="filter-quick" class="filter-quick" role="group" aria-label="Quick filters">
-          <button class="chip active" type="button" data-quick="ALL">ALL</button>
-          <button class="chip" type="button" data-quick="MANUAL">MANUAL</button>
-          <button class="chip" type="button" data-quick="AUTO">AUTO</button>
+          <button class="chip active" type="button" data-quick="ALL">All</button>
+          <button class="chip" type="button" data-quick="MANUAL">Manual</button>
+          <button class="chip" type="button" data-quick="AUTO">Auto</button>
           <button class="chip" type="button" data-quick="THRESHOLD">≥3%</button>
-          <button class="chip" type="button" data-quick="PAPER">PAPER</button>
-          <button class="chip" type="button" data-quick="LIVE">LIVE</button>
-          <button class="chip" type="button" data-quick="EXPIRED">EXPIRED</button>
+          <button class="chip" type="button" data-quick="PAPER">Paper</button>
+          <button class="chip" type="button" data-quick="LIVE">Live</button>
+          <button class="chip" type="button" data-quick="EXPIRED">Expired</button>
         </div>
         <div class="filter-selects">
           <label class="field">
@@ -82,18 +82,18 @@
             <span class="field-label">HUMAN</span>
             <select id="f-human">
               <option value="">any</option>
-              <option value="green">🟢 green</option>
-              <option value="yellow">🟡 yellow</option>
-              <option value="red">🔴 red</option>
+              <option value="green">green</option>
+              <option value="yellow">yellow</option>
+              <option value="red">red</option>
             </select>
           </label>
           <label class="field">
             <span class="field-label">BOT</span>
             <select id="f-bot">
               <option value="">any</option>
-              <option value="green">🟢 green</option>
-              <option value="yellow">🟡 yellow</option>
-              <option value="red">🔴 red</option>
+              <option value="green">green</option>
+              <option value="yellow">yellow</option>
+              <option value="red">red</option>
             </select>
           </label>
           <button id="filters-reset" class="btn btn-ghost btn-sm" type="button">Reset</button>
@@ -228,8 +228,8 @@
   <div id="drawer-backdrop" class="backdrop hidden"></div>
   <aside id="settings-drawer" class="drawer" aria-hidden="true" aria-labelledby="settings-title">
     <div class="drawer-head">
-      <h2 id="settings-title" class="panel-title">⚙ Settings</h2>
-      <button id="settings-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close settings">✕</button>
+      <h2 id="settings-title" class="panel-title">Settings</h2>
+      <button id="settings-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close settings"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
     </div>
     <form id="settings-form" class="settings-form" autocomplete="off">
       <fieldset class="fieldset">
@@ -290,7 +290,7 @@
     <div class="modal-card">
       <div class="modal-head">
         <h2 id="journal-title" class="panel-title">JOURNAL</h2>
-        <button id="journal-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close">✕</button>
+        <button id="journal-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
       </div>
       <div class="modal-body">
         <div id="journal-trade" class="journal-trade muted"></div>
@@ -315,7 +315,7 @@
     <div class="modal-card">
       <div class="modal-head">
         <h2 id="auto-title" class="panel-title">AUTO</h2>
-        <button id="auto-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close">✕</button>
+        <button id="auto-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
       </div>
       <div id="auto-body" class="modal-body"></div>
     </div>
