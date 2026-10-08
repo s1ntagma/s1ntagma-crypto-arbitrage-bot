@@ -455,7 +455,9 @@ class Pipeline:
                 log.debug(
                     "no opportunity %s on %s: net %+.2f%% < %.2f%%", signal.asset, signal.target, econ.net_pct, s.min_net_pct_show
                 )
-                self.diag.reject("below_min_net", signal.asset, signal.target, signal.direction)
+                reason = "fees" if econ.gross_pct >= s.min_net_pct_show else "below_min_net"
+                self.diag.reject(reason, signal.asset, signal.target, signal.direction,
+                                 detail=f"gross {econ.gross_pct:+.2f}% net {econ.net_pct:+.2f}%")
                 return None
             if econ.executable_quote < s.min_trade_quote:
                 log.debug(

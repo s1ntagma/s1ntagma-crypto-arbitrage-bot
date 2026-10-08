@@ -585,6 +585,33 @@ async def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
 # --------------------------------------------------------------------------- #
 # Application factory
 # --------------------------------------------------------------------------- #
+def _trade_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    def stats(group: list[dict[str, Any]]) -> dict[str, Any]:
+        done = [r for r in group if str(r.get("state")) in ("CLOSED", "FAILED") and r.get("actual_net_pct") is not None]
+        n = len(done)
+        wins = sum(1 for r in done if float(r.get("realized_pnl_quote") or 0.0) > 0)
+        return {
+            "trades": len(group),
+            "finished": n,
+            "open": sum(1 for r in group if str(r.get("state")) == "EXECUTING"),
+            "wins": wins,
+            "win_rate": (wins / n) if n else None,
+            "avg_expected_net_pct": (sum(float(r.get("expected_net_pct") or 0.0) for r in done) / n) if n else None,
+            "avg_actual_net_pct": (sum(float(r.get("actual_net_pct") or 0.0) for r in done) / n) if n else None,
+            "pnl_quote": sum(float(r.get("realized_pnl_quote") or 0.0) for r in done),
+        }
+
+    out = stats(rows)
+    by: dict[str, dict[str, list[dict[str, Any]]]] = {"by_mode": {}, "by_exchange": {}, "by_asset": {}}
+    for r in rows:
+        by["by_mode"].setdefault(str(r.get("mode") or "?"), []).append(r)
+        by["by_exchange"].setdefault(str(r.get("exchange") or "?"), []).append(r)
+        by["by_asset"].setdefault(str(r.get("asset") or "?"), []).append(r)
+    for k, groups in by.items():
+        out[k] = {name: stats(g) for name, g in groups.items()}
+    return out
+
+
 class _NoCacheStatic(StaticFiles):
     """UI assets are revalidated on every load (ETag -> 304 when unchanged), so a
     new version of the bot never runs with a stale app.js from the browser cache."""
@@ -1112,6 +1139,30 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
         db.set_screenshot_analysis(screenshot_id, text, model)
         fresh = db.get_screenshot(screenshot_id)
         return _json(_screenshot_dict(fresh) if fresh else {"id": screenshot_id, "analysis": text})
+
+    @app.get("/api/shadow")
+    async def api_shadow(limit: int = Query(200, ge=1, le=5000)) -> JSONResponse:
+        """Shadow trades (virtual, real book, no orders) + strategy statistics."""
+        shadow = getattr(ctx, "shadow", None)
+        if shadow is None:
+            return _json({"enabled": False, "trades": [], "summary": {}})
+        try:
+            return _json({"enabled": bool(shadow.enabled), "trades": shadow.trades(limit), "summary": shadow.summary()})
+        except Exception:  # noqa: BLE001
+            log.exception("shadow listing failed")
+            return _error(500, "shadow listing failed")
+
+    @app.get("/api/trades/summary")
+    async def api_trades_summary() -> JSONResponse:
+        """Real (PAPER/LIVE) trade statistics: expected vs actual NET, win rate, P&L."""
+        db = getattr(ctx, "db", None)
+        rows: list[dict[str, Any]] = []
+        if db is not None and hasattr(db, "list_trades"):
+            try:
+                rows = [r for r in (db.list_trades(5000) or []) if isinstance(r, dict)]
+            except Exception:  # noqa: BLE001
+                log.exception("db.list_trades failed")
+        return _json(_trade_summary(rows))
 
     @app.get("/api/diagnostics")
     async def api_diagnostics() -> JSONResponse:

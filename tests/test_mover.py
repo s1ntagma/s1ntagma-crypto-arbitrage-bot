@@ -445,3 +445,26 @@ def test_slow_target_catch_up_is_measured_from_the_episode_anchor():
     h.clock.advance(2.0)
     h.push_all({"a": 101.0, "b": 101.0, "c": 100.5})  # +0.5 % since the move began -> reacted
     assert ("reaction", "BTC", "c", 10.0, 0.5) in h.stats.calls
+
+
+def test_volume_gate_reports_unknown_vs_low_with_exchange():
+    """'volume unknown' is a data gap, 'volume low' is an honest filter: the
+    diagnostics name which one and which exchange (and its volume)."""
+    s = make_settings(min_mover_volume_quote=1_000_000.0, min_target_volume_quote=0.0)
+    h = Harness(s)
+    run_lag_scenario(h)  # no tickers at all -> volumes unknown
+    assert h.det.diag.rejected["mover_volume_unknown"] >= 1 and h.det.diag.rejected["mover_volume"] == 0
+    assert "a:?" in list(h.det.diag.recent["mover_volume_unknown"])[-1]
+    h2 = Harness(s)
+    h2.state.on_ticker(h2.ticker("a", 100.0, 5_000_000.0))
+    h2.state.on_ticker(h2.ticker("b", 100.0, 40_000.0))  # known, too small
+    run_lag_scenario(h2)
+    assert h2.det.diag.rejected["mover_volume"] >= 1 and h2.det.diag.rejected["mover_volume_unknown"] == 0
+    assert "b:40k" in list(h2.det.diag.recent["mover_volume"])[-1]
+
+
+def test_state_volume_coverage():
+    h = Harness()
+    h.state.on_ticker(h.ticker("a", 100.0, 5_000_000.0))
+    h.state.on_ticker(h.ticker("b", 100.0, None))
+    assert h.state.volume_coverage() == {"a": 1}

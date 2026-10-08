@@ -139,6 +139,10 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             # 7. STATS tab renders (empty is a message, not a blank)
             await page.click("button.tab[data-tab='stats']")
             await page.wait_for_selector("#stats-empty:not(.hidden), #stats-body tr", timeout=5000)
+            await page.wait_for_selector("#shadow-body tr", timeout=5000)  # the lag above was shadow-traded
+            assert "BTC" in await page.locator("#shadow-body").inner_text()
+            assert "ON" in await page.locator("#shadow-sum-body").inner_text()
+            assert "Trades" in await page.locator("#tsum-body").inner_text()
 
             # 8. EMERGENCY STOP: confirm dialog -> server flag -> banner
             await page.click("#emergency-btn")

@@ -22,12 +22,14 @@ log = logging.getLogger(__name__)
 REASONS: tuple[tuple[str, str], ...] = (
     ("min_movers", "двинулась только одна биржа (нужно >= min_movers)"),
     ("mover_volume", "у двинувшихся бирж объём 24ч ниже min_mover_volume_quote"),
+    ("mover_volume_unknown", "объём 24ч двинувшейся биржи неизвестен (биржа не отдала объём в тикере)"),
     ("target_no_data", "по твоей бирже нет свежих данных по этой монете"),
     ("direction", "направление не разрешено на твоей бирже (SHORT без allow_short)"),
     ("target_volume", "объём 24ч на твоей бирже ниже min_target_volume_quote"),
     ("min_lag", "твоя биржа двинулась вместе с рынком: лаг меньше min_lag_pct"),
     ("no_fresh_book", "нет свежего стакана на твоей бирже (старше max_data_age_ms)"),
-    ("below_min_net", "после комиссий, спреда и проскальзывания NET ниже min_net_pct_show"),
+    ("fees", "edge был, но комиссии и исполнение съели его: NET ниже min_net_pct_show"),
+    ("below_min_net", "ожидаемый догон слишком мал даже до комиссий (gross ниже min_net_pct_show)"),
     ("liquidity", "стакан не держит минимальную сделку (min_trade_quote)"),
 )
 REASON_KEYS = tuple(k for k, _ in REASONS)
@@ -68,7 +70,7 @@ class Diagnostics:
         self.episodes += 1
         self.first_movers[first_mover] = self.first_movers.get(first_mover, 0) + 1
 
-    def reject(self, reason: str, asset: str = "", target: str = "", direction: int = 0) -> None:
+    def reject(self, reason: str, asset: str = "", target: str = "", direction: int = 0, detail: str = "") -> None:
         """Count one rejected candidate.  Repeats of the same (reason, asset,
         target, direction) within ``_DEDUPE_S`` are one event, so a hot book
         stream does not inflate the funnel."""
@@ -88,6 +90,8 @@ class Diagnostics:
         label = asset or "?"
         if target:
             label += f"@{target}"
+        if detail:
+            label += f" ({detail})"
         self.recent[reason].append(label)
 
     def signal(self) -> None:
@@ -108,6 +112,12 @@ class Diagnostics:
         s = self._settings
         now = self._mono()
         exchanges: dict[str, dict[str, Any]] = {}
+        coverage: dict[str, int] = {}
+        if state is not None and hasattr(state, "volume_coverage"):
+            try:
+                coverage = state.volume_coverage()
+            except Exception:  # noqa: BLE001
+                coverage = {}
         for e in s.exchanges:
             if not e.enabled:
                 continue
@@ -133,6 +143,7 @@ class Diagnostics:
                 "books": int(t.get("book", 0)),
                 "tickers": int(t.get("ticker", 0)),
                 "trades": int(t.get("trade", 0)),
+                "volumes": int(coverage.get(e.name, 0)),
                 "last_data_s": round(last_age, 1) if last_age is not None else None,
                 "stale": bool(getattr(health, "stale", False)) if health is not None else None,
             }

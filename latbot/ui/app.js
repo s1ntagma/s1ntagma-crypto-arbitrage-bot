@@ -1144,9 +1144,9 @@
     active_now: 'Active now', expired_today: 'Expired by TTL today', alerts: 'Telegram alerts sent'
   };
   var REASON_LABELS = {
-    min_movers: 'Only one exchange moved (min_movers)', mover_volume: 'Mover 24h volume too low', target_no_data: 'Target has no fresh data',
+    min_movers: 'Only one exchange moved (min_movers)', mover_volume: 'Mover 24h volume too low', mover_volume_unknown: 'Mover 24h volume unknown (no data)', target_no_data: 'Target has no fresh data',
     direction: 'Direction not allowed on target', target_volume: 'Target 24h volume too low', min_lag: 'Lag below min_lag_pct',
-    no_fresh_book: 'No fresh target order book', below_min_net: 'NET after fees below min_net_pct_show', liquidity: 'Book below min trade size'
+    no_fresh_book: 'No fresh target order book', fees: 'Rejected by fees (edge eaten by costs)', below_min_net: 'Edge below min net (even before fees)', liquidity: 'Book below min trade size'
   };
 
   function loadDiag() {
@@ -1195,6 +1195,7 @@
       tr.appendChild(h('td', { class: 'num', text: String(x.books) }));
       tr.appendChild(h('td', { class: 'num', text: String(x.tickers) }));
       tr.appendChild(h('td', { class: 'num', text: String(x.trades) }));
+      tr.appendChild(h('td', { class: 'num', text: String(x.volumes == null ? '—' : x.volumes) }));
       tr.appendChild(h('td', { class: 'num', text: x.last_data_s == null ? '—' : x.last_data_s + ' s ago' }));
       ex.appendChild(tr);
     });
@@ -1203,11 +1204,69 @@
   }
 
   function loadStats() {
+    loadSummaries();
     return api('GET', '/api/stats').then(function (r) {
       if (!r.ok) { toast('Stats: ' + r.error, 'err'); return; }
       state.stats = Array.isArray(r.data) ? r.data : [];
       state.statsLoaded = true;
       renderStats();
+    });
+  }
+
+  // ------------------------------------------------------------------ trade + shadow statistics
+  function pctOrDash(v) { return v == null ? '—' : fmtPct(v); }
+  function rateOrDash(v) { return v == null ? '—' : (v * 100).toFixed(0) + '%'; }
+
+  function loadSummaries() {
+    api('GET', '/api/trades/summary').then(function (r) {
+      if (!r.ok) { toast('Trade stats: ' + r.error, 'err'); return; }
+      var t = r.data || {};
+      kvRows($('tsum-body'), [
+        ['Trades', String(t.trades || 0)], ['Finished', String(t.finished || 0)], ['Open', String(t.open || 0)],
+        ['Win rate', rateOrDash(t.win_rate)], ['Avg expected NET', pctOrDash(t.avg_expected_net_pct)],
+        ['Avg actual NET', pctOrDash(t.avg_actual_net_pct)], ['Realized P&L', fmtMoney(t.pnl_quote || 0, '', { sign: true })]
+      ]);
+    });
+    api('GET', '/api/shadow?limit=100').then(function (r) {
+      if (!r.ok) { toast('Shadow: ' + r.error, 'err'); return; }
+      var d = r.data || {};
+      var s = d.summary || {};
+      kvRows($('shadow-sum-body'), [
+        ['Status', d.enabled ? 'ON (no orders, virtual)' : 'OFF (shadow_trading=false)'],
+        ['Open', String(s.open || 0)], ['Closed', String(s.closed || 0)], ['Win rate', rateOrDash(s.win_rate)],
+        ['Avg expected NET', pctOrDash(s.avg_expected_net_pct)], ['Avg actual NET', pctOrDash(s.avg_actual_net_pct)],
+        ['Target reached', String(s.target_reached || 0)], ['Virtual P&L', fmtMoney(s.pnl_quote || 0, '', { sign: true })]
+      ]);
+      var sb = $('strategy-body');
+      clear(sb);
+      [['target', s.by_target || {}], ['asset', s.by_asset || {}]].forEach(function (pair) {
+        Object.keys(pair[1]).forEach(function (name) {
+          var g = pair[1][name];
+          sb.appendChild(h('tr', null,
+            h('td', { text: (pair[0] === 'target' ? exchangeLabel(name) : name) + ' (' + pair[0] + ')' }),
+            h('td', { class: 'num', text: String(g.closed) }),
+            h('td', { class: 'num', text: rateOrDash(g.win_rate) }),
+            h('td', { class: 'num', text: pctOrDash(g.avg_expected_net_pct) }),
+            h('td', { class: 'num ' + (num(g.avg_actual_net_pct) >= 0 ? 'pos' : 'neg'), text: pctOrDash(g.avg_actual_net_pct) }),
+            h('td', { class: 'num', text: String(g.target_reached) }),
+            h('td', { class: 'num', text: fmtMoney(g.pnl_quote || 0, '', { sign: true }) })));
+        });
+      });
+      var body = $('shadow-body');
+      clear(body);
+      var rows = d.trades || [];
+      $('shadow-empty').classList.toggle('hidden', rows.length > 0);
+      rows.forEach(function (t) {
+        body.appendChild(h('tr', null,
+          h('td', { class: 'mono', text: fmtTime(t.opened_ts) }),
+          h('td', { text: t.asset + ' @ ' + exchangeLabel(t.target) }),
+          h('td', { class: 'num', text: fmtMoney(t.entry_price, t.quote) }),
+          h('td', { class: 'num', text: t.exit_price == null ? 'open · ' + fmtMoney(t.last_exit_price, t.quote) : fmtMoney(t.exit_price, t.quote) }),
+          h('td', { class: 'num', text: pctOrDash(t.expected_net_pct) }),
+          h('td', { class: 'num ' + (num(t.actual_net_pct) >= 0 ? 'pos' : 'neg'), text: pctOrDash(t.actual_net_pct) }),
+          h('td', { class: 'num', text: t.pnl_quote == null ? '—' : fmtMoney(t.pnl_quote, t.quote, { sign: true }) }),
+          h('td', { class: 'wrap', text: t.open ? 'open' : t.exit_reason })));
+      });
     });
   }
 

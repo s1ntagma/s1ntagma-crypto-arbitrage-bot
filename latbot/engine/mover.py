@@ -76,6 +76,16 @@ class _Episode:
     anchors: dict[str, float] = field(default_factory=dict)  # pre-move price per not-yet-crossed exchange
 
 
+def _fmt_vol(v: float | None) -> str:
+    if v is None:
+        return "?"
+    if v >= 1e6:
+        return f"{v / 1e6:.1f}M"
+    if v >= 1e3:
+        return f"{v / 1e3:.0f}k"
+    return f"{v:.0f}"
+
+
 class MoveDetector:
     """Detects cross-exchange moves and the exchanges lagging behind them."""
 
@@ -343,7 +353,14 @@ class MoveDetector:
                 continue
             counted.append(ex)
         if len(counted) < max(1, int(s.min_movers)):
-            self.diag.reject("mover_volume" if len(movers) > len(counted) else "min_movers", asset, "", direction)
+            dropped = [ex for ex in movers if ex not in counted]
+            if not dropped:
+                self.diag.reject("min_movers", asset, "", direction)
+            else:
+                unknown = [ex for ex in dropped if ex not in volumes]
+                reason = "mover_volume_unknown" if len(unknown) == len(dropped) else "mover_volume"
+                detail = " ".join(f"{ex}:{_fmt_vol(volumes.get(ex))}" for ex in dropped)
+                self.diag.reject(reason, asset, "", direction, detail=detail)
             return []
         first = min(counted, key=lambda e: (cross[e].cross_mono, e))
         first_move = moves[first][0]

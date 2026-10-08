@@ -62,6 +62,14 @@ CREATE INDEX IF NOT EXISTS ix_trades_mode ON trades(mode);
 CREATE INDEX IF NOT EXISTS ix_trades_finished ON trades(finished_ts);
 CREATE INDEX IF NOT EXISTS ix_trades_started ON trades(started_ts);
 
+CREATE TABLE IF NOT EXISTS shadow_trades (
+    id TEXT PRIMARY KEY,
+    opened_ts REAL,
+    closed_ts REAL,
+    json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_shadow_opened ON shadow_trades(opened_ts);
+
 CREATE TABLE IF NOT EXISTS trade_notes (
     trade_id TEXT PRIMARY KEY,
     note TEXT NOT NULL,
@@ -416,6 +424,26 @@ class Database:
                 "UPDATE trade_screenshots SET analysis = ?, analysis_ts = ?, analysis_model = ? WHERE id = ?",
                 (analysis, now, model, int(screenshot_id)),
             )
+
+    def save_shadow(self, row: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO shadow_trades (id, opened_ts, closed_ts, json) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET opened_ts=excluded.opened_ts, closed_ts=excluded.closed_ts, json=excluded.json",
+                (str(row["id"]), row.get("opened_ts"), row.get("closed_ts"), json.dumps(row, ensure_ascii=False, default=str)),
+            )
+
+    def list_shadow(self, limit: int = 200) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT json FROM shadow_trades ORDER BY opened_ts DESC LIMIT ?", (int(limit),)
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = self._load(r["json"])
+            if isinstance(d, dict):
+                out.append(d)
+        return out
 
     def journal_summary(self) -> dict[str, dict[str, Any]]:
         """trade_id -> {note, screenshots, analyzed} for the trades table."""

@@ -40,6 +40,7 @@ from .clock import Clock
 from .config import Secrets, Settings, load_secrets, load_settings, save_settings
 from .engine.diagnostics import Diagnostics
 from .engine.duration import DurationEstimator
+from .engine.shadow import ShadowTrader
 from .engine.mover import MoveDetector
 from .engine.opportunity import OpportunityManager
 from .engine.pipeline import Pipeline
@@ -105,6 +106,7 @@ class AppContext:
     risk: RiskManager
     execution: ExecutionEngine
     diag: Diagnostics | None = None
+    shadow: ShadowTrader | None = None
     notifier: TelegramNotifier | None = None
     recorder: MarketRecorder | None = None
     app: Any = None  # FastAPI application
@@ -164,6 +166,7 @@ def build_context(
     opps = OpportunityManager(settings, bus, clock, db=db, stats=stats)
     adapters = build_market_adapters(settings, secrets, bus, clock, adapter_factory=adapter_factory)
     pipeline = Pipeline(settings, bus, clock, state, detector, stats, opps, adapters, duration, db=db, diag=diag)
+    shadow = ShadowTrader(settings, bus, clock, db=db, diag=diag)
     exec_adapters = build_execution_adapters(settings, secrets, bus, clock, adapters, db, adapter_factory=adapter_factory)
     risk = RiskManager(settings, db, clock, bus)
     execution = ExecutionEngine(settings, bus, clock, pipeline, opps, exec_adapters, risk, db, stats)
@@ -205,6 +208,7 @@ def build_context(
         clock=clock,
         db=db,
         diag=diag,
+        shadow=shadow,
         state=state,
         stats=stats,
         detector=detector,

@@ -1,0 +1,84 @@
+"""Shadow trading: every approved opportunity is traded virtually on the real
+book (no orders) and closed by the real market - target reached or window over."""
+from __future__ import annotations
+
+import pytest
+
+from latbot.engine.shadow import ShadowTrader, summarize
+from latbot.models import OppState
+from latbot.storage.db import Database
+from test_pipeline import Env, detect
+
+
+def _env(db=None) -> tuple[Env, ShadowTrader]:
+    env = Env(db=db)
+    return env, ShadowTrader(env.settings, env.bus, env.clock, db=db)
+
+
+async def test_shadow_opens_on_real_book_and_closes_when_target_reached():
+    db = Database(":memory:")
+    env, sh = _env(db)
+    opp = await detect(env)
+    rows = sh.trades()
+    assert len(rows) == 1 and rows[0]["open"] is True and rows[0]["id"] == opp.id
+    t = rows[0]
+    assert t["entry_price"] == pytest.approx(opp.econ.entry_vwap) and t["expected_net_pct"] == pytest.approx(opp.econ.net_pct)
+    assert t["capital_quote"] == pytest.approx(opp.econ.executable_quote)
+    # kraken catches up past the exit target -> refresh -> shadow sells at the real exit VWAP
+    env.clock.advance(0.3)
+    await env.push("kraken", 101.5)
+    rows = sh.trades()
+    closed = rows[0]
+    assert closed["open"] is False and closed["exit_reason"] == "target reached"
+    expected = (closed["exit_price"] / closed["entry_price"] - 1) * 100 - t["entry_fee_pct"] - t["exit_fee_pct"] - t["execution_loss_pct"]
+    assert closed["actual_net_pct"] == pytest.approx(expected) and closed["actual_net_pct"] > 0
+    assert closed["pnl_quote"] == pytest.approx(closed["capital_quote"] * closed["actual_net_pct"] / 100)
+    assert db.list_shadow()[0]["exit_reason"] == "target reached"  # persisted
+    s = sh.summary()
+    assert s["closed"] == 1 and s["wins"] == 1 and s["win_rate"] == 1.0 and s["target_reached"] == 1
+    assert s["by_target"]["kraken"]["closed"] == 1 and s["by_asset"]["BTC"]["pnl_quote"] > 0
+
+
+async def test_shadow_closes_at_last_market_price_when_window_ends():
+    env, sh = _env()
+    opp = await detect(env)
+    await env.opps.expire(opp.id, "window over")
+    row = sh.trades()[0]
+    assert row["open"] is False and row["exit_reason"].startswith("opportunity expired")
+    # nothing moved: sold at the bid it was bought against -> fees + spread = a loss, honestly
+    assert row["actual_net_pct"] < 0
+    assert sh.summary()["wins"] == 0
+
+
+async def test_shadow_off_and_no_book_means_no_trade():
+    env, sh = _env()
+    env.settings.shadow_trading = False
+    await detect(env)
+    assert sh.trades() == []
+
+
+def test_summarize_empty():
+    s = summarize([])
+    assert s["closed"] == 0 and s["win_rate"] is None and s["open"] == 0 and s["by_target"] == {}
+
+
+def test_state_enum_has_expired():
+    assert OppState("EXPIRED") is OppState.EXPIRED
+
+
+async def test_shadow_and_trade_summary_api_through_real_app(tmp_path):
+    from fastapi.testclient import TestClient
+    from latbot.api.server import create_app
+    from test_app import build, detect as app_detect
+
+    b = build(tmp_path)
+    assert b.ctx.shadow is not None
+    opp = await app_detect(b)
+    await b.ctx.execution.select_manual(opp.id)
+    await b.ctx.execution.manual_entered(opp.id, price=100.01, quote_amount=100.0)
+    with TestClient(create_app(b.ctx)) as c:
+        d = c.get("/api/shadow").json()
+        assert d["enabled"] is True and d["trades"][0]["id"] == opp.id and d["summary"]["open"] == 1
+        ts = c.get("/api/trades/summary").json()
+        assert ts["trades"] == 1 and ts["open"] == 1 and ts["finished"] == 0 and ts["win_rate"] is None
+        assert ts["by_exchange"]["kraken"]["trades"] == 1 and ts["by_mode"]["paper"]["trades"] == 1

@@ -222,6 +222,13 @@ class MarketState:
     def volume24h(self, exchange: str, asset: str) -> float | None:
         return self._volume24h.get((exchange, asset))
 
+    def volume_coverage(self) -> dict[str, int]:
+        """exchange -> number of assets with a known 24h volume (diagnostics)."""
+        out: dict[str, int] = {}
+        for ex, _asset in self._volume24h:
+            out[ex] = out.get(ex, 0) + 1
+        return out
+
     def health(self, exchange: str) -> ExchangeHealth | None:
         return self._health.get(exchange)
 

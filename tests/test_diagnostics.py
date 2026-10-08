@@ -63,9 +63,10 @@ async def test_net_below_show_threshold_is_a_counted_rejection():
     await env.push("binance", 102.0)
     await env.push("kucoin", 102.0)
     f = _funnel(env)
-    assert f["signals"] == 1 and f["opportunities"] == 0 and f["rejected"]["below_min_net"] == 1
+    assert f["signals"] == 1 and f["opportunities"] == 0 and f["rejected"]["fees"] == 1  # gross 1.2 %, 1 % fee per leg
+    assert f["rejected"]["below_min_net"] == 0
     why = env.pipeline.diagnostics()["why"]
-    assert any("NET ниже min_net_pct_show" in line and "BTC@kraken" in line for line in why)
+    assert any("комиссии и исполнение съели" in line and "BTC@kraken (gross +1.18% net -0.87%)" in line for line in why)
     assert any("ни один не стал возможностью" in line for line in why)
 
 

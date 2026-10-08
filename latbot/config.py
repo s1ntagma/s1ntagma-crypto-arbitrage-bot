@@ -236,6 +236,7 @@ class Settings:
     min_net_pct_bot: float = 0.3  # bot RED below this
     min_net_pct_auto: float = 0.5  # AUTO execution requires at least this at revalidation
     telegram_profit_threshold_pct: float = 3.0  # TELEGRAM_PROFIT_THRESHOLD
+    shadow_trading: bool = True  # virtually trade every approved opportunity on the real book (no orders)
     analysis_model: str = "claude-opus-5-5"  # Claude model for screenshot / trade review (needs ANTHROPIC_API_KEY)
     telegram_require_executable: bool = True
     max_slippage_pct: float = 0.3  # MAX_SLIPPAGE: liquidity counted only within this

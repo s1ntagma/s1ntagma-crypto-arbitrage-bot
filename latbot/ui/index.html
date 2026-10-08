@@ -139,9 +139,39 @@
 
     <section id="tab-stats" class="tab-panel hidden" role="tabpanel" aria-label="Statistics">
       <div class="panel-head">
-        <h2 class="panel-title">STATS · learned per asset / exchange</h2>
+        <h2 class="panel-title">STATS</h2>
         <button id="stats-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
       </div>
+      <div class="diag-grid">
+        <div class="diag-block">
+          <h3 class="diag-title">TRADES (PAPER / LIVE) · expected vs actual</h3>
+          <table class="table table-compact"><tbody id="tsum-body"></tbody></table>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title">SHADOW TRADING · every opportunity, virtual, real book</h3>
+          <table class="table table-compact"><tbody id="shadow-sum-body"></tbody></table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">STRATEGY · shadow result by target exchange and asset</h3>
+        <div class="table-wrap">
+          <table class="table" id="strategy-table">
+            <thead><tr><th>Group</th><th class="num">Closed</th><th class="num">Win rate</th><th class="num">Avg expected NET</th><th class="num">Avg actual NET</th><th class="num">Target reached</th><th class="num">P&amp;L</th></tr></thead>
+            <tbody id="strategy-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">LATEST SHADOW TRADES</h3>
+        <div class="table-wrap">
+          <table class="table" id="shadow-table">
+            <thead><tr><th>Opened</th><th>Asset @ target</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">Expected NET</th><th class="num">Actual NET</th><th class="num">P&amp;L</th><th>Result</th></tr></thead>
+            <tbody id="shadow-body"></tbody>
+          </table>
+        </div>
+        <p id="shadow-empty" class="muted hidden">No shadow trades yet: they start automatically with the first approved opportunity.</p>
+      </div>
+      <h3 class="diag-title">LEARNED · per asset / exchange</h3>
       <div class="table-wrap">
         <table class="table" id="stats-table">
           <thead><tr id="stats-head"></tr></thead>
@@ -174,7 +204,7 @@
         <h3 class="diag-title">EXCHANGES</h3>
         <div class="table-wrap">
           <table class="table" id="diag-exchanges-table">
-            <thead><tr><th>Exchange</th><th>Role</th><th>Connected</th><th class="num">Books</th><th class="num">Tickers</th><th class="num">Trades</th><th class="num">Last data</th></tr></thead>
+            <thead><tr><th>Exchange</th><th>Role</th><th>Connected</th><th class="num">Books</th><th class="num">Tickers</th><th class="num">Trades</th><th class="num">24h volumes</th><th class="num">Last data</th></tr></thead>
             <tbody id="diag-exchanges"></tbody>
           </table>
         </div>
