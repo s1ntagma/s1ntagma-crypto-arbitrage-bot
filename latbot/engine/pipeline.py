@@ -630,7 +630,19 @@ class Pipeline:
 
     def diagnostics(self) -> dict[str, Any]:
         """Funnel snapshot + "why no signals" (see engine.diagnostics)."""
-        return self.diag.snapshot(self._state, self._adapters, self._opps.counters(self._clock.mono()))
+        return self.diag.snapshot(self._state, self._adapters, self._opps.counters(self._clock.mono()), pool=self._pool_info())
+
+    def _pool_info(self) -> dict[str, Any]:
+        pool = self.pool
+        skipped = sorted(self.pool_skipped)
+        if pool is None:
+            return {"enabled": False, "size": 0, "assets": [], "skipped_n": len(skipped), "skipped": skipped[:50]}
+        try:
+            assets = list(pool.assets()) if hasattr(pool, "assets") else []
+        except Exception:  # noqa: BLE001
+            log.exception("pool.assets failed")
+            assets = []
+        return {"enabled": True, "size": len(assets), "assets": assets, "skipped_n": len(skipped), "skipped": skipped[:50]}
 
     def dashboard(self) -> dict[str, Any]:
         now = self._clock.mono()

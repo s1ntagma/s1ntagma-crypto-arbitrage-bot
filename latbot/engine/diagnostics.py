@@ -53,6 +53,10 @@ class Diagnostics:
         self.opportunities = 0
         self.alerts = 0
         self._last_reject: dict[tuple[str, str, str, int], float] = {}
+        # Phase 3 quality gate (counted once per new opportunity)
+        self.quality_checked = 0
+        self.quality_passed = 0
+        self.quality_fail_reasons: dict[str, int] = {}
 
     # ---- recording --------------------------------------------------------
     def _mono(self) -> float:
@@ -103,9 +107,21 @@ class Diagnostics:
     def alert(self) -> None:
         self.alerts += 1
 
+    def quality(self, passed: bool, reason: str = "") -> None:
+        """One new opportunity went through the quality check (engine.quality)."""
+        self.quality_checked += 1
+        if passed:
+            self.quality_passed += 1
+            return
+        key = (reason or "качество ниже порога").strip()[:120]
+        self.quality_fail_reasons[key] = self.quality_fail_reasons.get(key, 0) + 1
+        if len(self.quality_fail_reasons) > 200:
+            keep = sorted(self.quality_fail_reasons.items(), key=lambda kv: -kv[1])[:100]
+            self.quality_fail_reasons = dict(keep)
+
     # ---- reporting --------------------------------------------------------
     def snapshot(self, state: Any | None = None, adapters: dict[str, Any] | None = None,
-                 opp_counters: dict[str, Any] | None = None) -> dict[str, Any]:
+                 opp_counters: dict[str, Any] | None = None, pool: dict[str, Any] | None = None) -> dict[str, Any]:
         """Funnel + live view.  ``state`` is the MarketState (scanned assets,
         health), ``adapters`` the market adapters (health), ``opp_counters``
         OpportunityManager.counters()."""
@@ -181,6 +197,9 @@ class Diagnostics:
             "signals": self.signals,
             "opportunities": self.opportunities,
             "alerts": self.alerts,
+            "quality_checked": self.quality_checked,
+            "quality_passed": self.quality_passed,
+            "quality_failed": self.quality_checked - self.quality_passed,
         }
         oc = opp_counters or {}
         funnel["expired_today"] = int(oc.get("expired", 0) or 0)
@@ -192,6 +211,8 @@ class Diagnostics:
             "funnel": funnel,
             "recent_rejections": {k: list(v) for k, v in self.recent.items() if v},
             "first_movers": dict(sorted(self.first_movers.items(), key=lambda kv: -kv[1])),
+            "pool": dict(pool) if pool is not None else {"enabled": False, "size": 0, "assets": [], "skipped_n": 0, "skipped": []},
+            "quality_fail_reasons": [[k, n] for k, n in sorted(self.quality_fail_reasons.items(), key=lambda kv: -kv[1])[:10]],
             "thresholds": {
                 "move_threshold_pct": s.move_threshold_pct,
                 "move_window_s": s.move_window_s,
@@ -221,6 +242,17 @@ class Diagnostics:
         with_data = {n for n, x in ex.items() if x["books"] + x["tickers"] + x.get("polled", 0) > 0}
         uptime = float(snap.get("uptime_s", 0.0))
 
+        pool = snap.get("pool") or {}
+        if pool.get("enabled"):
+            line = (f"Пул: {pool.get('size', 0)} предсказуемых монет (без мем/хайп/скачущих)"
+                    f"; вне пула пропущено монет: {pool.get('skipped_n', 0)}.")
+            out.append(line)
+        if f.get("quality_checked"):
+            reasons = snap.get("quality_fail_reasons") or []
+            line = f"Проверку качества прошли {f['quality_passed']} из {f['quality_checked']} возможностей"
+            if reasons:
+                line += "; чаще всего мешает: " + "; ".join(f"{k} ({n})" for k, n in reasons[:3])
+            out.append(line + ". Остальные видны по фильтру «показать все» и торгуются виртуально (обучение).")
         if f["opportunities"] > 0:
             out.append(f"Сигналы были: возможностей {f['opportunities']}, алертов в Telegram {f['alerts']}.")
         if not connected:
