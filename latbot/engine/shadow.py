@@ -9,6 +9,13 @@ book, without sending a single order.
 * result = price move after spread/slippage (already in the VWAPs) minus entry
   fee, exit fee and execution loss.  No book data -> no shadow trade.
 
+Phase 3: shadow trading is the TRAINING of the system.  Every opportunity with
+NET >= ``shadow_min_net_pct`` (0.1 %) is traded virtually regardless of its
+quality score; each trade has three barriers - target reached (win), stop
+(loss, the leverage plan's stop or ``shadow_stop_pct``) and the window end
+(time: win iff NET > 0) - and its outcome, quality score/grade and leveraged
+virtual P&L are recorded; closed trades feed ``engine.metalabel.MetaLabelStore``.
+
 Results go to SQLite (``shadow_trades``) and feed the strategy statistics:
 expected NET vs what the market actually gave, per target exchange and asset.
 Shadow trades never touch balances, risk limits or the exchange.
@@ -51,6 +58,16 @@ class ShadowTrade:
     actual_net_pct: float | None = None
     pnl_quote: float | None = None
     max_net_pct: float = field(default=float("-inf"))
+    # Phase 3 (training)
+    lag_pct: float = 0.0
+    quality_score: float | None = None
+    grade: str = ""
+    btc_vol_pctile: float | None = None
+    leverage_max: float = 1.0  # LeveragePlan.max_by_signal at entry (what the signal justified)
+    stop_pct: float = 1.0
+    stop_price: float = 0.0
+    barrier: str = ""  # "target" | "stop" | "time"
+    pnl_leveraged_quote: float | None = None
 
     def net_at(self, exit_price: float) -> float:
         move = (exit_price / self.entry_price - 1.0) * 100.0 * self.direction
@@ -67,12 +84,14 @@ class ShadowTrade:
 class ShadowTrader:
     """Subscribes to OPP_NEW / OPP_UPDATE / OPP_STATE; no network, no orders."""
 
-    def __init__(self, settings: Any, bus: events.EventBus, clock: Any, db: Any | None = None, diag: Any | None = None) -> None:
+    def __init__(self, settings: Any, bus: events.EventBus, clock: Any, db: Any | None = None, diag: Any | None = None,
+                 metalabel: Any | None = None) -> None:
         self._settings = settings
         self._bus = bus
         self._clock = clock
         self._db = db
         self._diag = diag
+        self._metalabel = metalabel
         self._open: dict[str, ShadowTrade] = {}
         self._closed: list[ShadowTrade] = []
         self.opened = 0
@@ -110,7 +129,13 @@ class ShadowTrader:
         if e.executable_quote < min_trade:
             self._skip("book below min trade size")
             return
+        if float(e.net_pct) < float(getattr(self._settings, "shadow_min_net_pct", 0.1)):
+            self._skip("NET below training threshold")
+            return
         now = self._clock.wall()
+        quality = opp.quality if isinstance(getattr(opp, "quality", None), dict) else {}
+        lev = opp.leverage if isinstance(getattr(opp, "leverage", None), dict) else {}
+        stop_pct = _positive(lev.get("stop_pct")) or float(getattr(self._settings, "shadow_stop_pct", 1.0))
         t = ShadowTrade(
             id=opp.id, asset=opp.asset, target=opp.target_exchange, symbol=opp.target_symbol,
             quote=getattr(opp, "quote", "") or opp.signal.target_quote, first_mover=opp.first_mover,
@@ -119,6 +144,12 @@ class ShadowTrader:
             entry_fee_pct=float(e.entry_fee_pct), exit_fee_pct=float(e.exit_fee_pct),
             execution_loss_pct=float(e.execution_loss_pct), expected_net_pct=float(e.net_pct),
             exit_target=float(e.exit_target), last_exit_price=float(e.exit_vwap_now), last_update_ts=now,
+            lag_pct=float(getattr(opp.signal, "lag_pct", 0.0) or 0.0),
+            quality_score=_number(quality.get("score")), grade=str(quality.get("grade") or ""),
+            btc_vol_pctile=_number(quality.get("btc_vol_pctile")),
+            leverage_max=_positive(lev.get("max_by_signal")) or 1.0,
+            stop_pct=stop_pct,
+            stop_price=float(e.entry_vwap) * (1.0 - int(opp.direction) * stop_pct / 100.0),
         )
         t.max_net_pct = t.net_at(t.last_exit_price)
         self._open[opp.id] = t
@@ -138,7 +169,9 @@ class ShadowTrader:
         t.max_net_pct = max(t.max_net_pct, t.net_at(price))
         reached = (price - t.exit_target) * t.direction >= 0
         if reached:
-            self._close(t, price, "target reached")
+            self._close(t, price, "target reached", "target")
+        elif t.stop_price > 0 and (price - t.stop_price) * t.direction <= 0:
+            self._close(t, price, f"stop {t.stop_pct:.2f}% hit", "stop")
 
     def _on_state(self, payload: Any) -> None:
         opp = payload.get("opportunity") if isinstance(payload, dict) else None
@@ -153,26 +186,41 @@ class ShadowTrader:
         except ValueError:
             return
         if state in TERMINAL_STATES:
-            self._close(t, t.last_exit_price, f"opportunity {state.value.lower()}: sold at last market price")
+            self._close(t, t.last_exit_price, f"opportunity {state.value.lower()}: sold at last market price", "time")
 
     # ---- bookkeeping -------------------------------------------------------
     def _skip(self, reason: str) -> None:
         self.skipped[reason] = self.skipped.get(reason, 0) + 1
         log.debug("shadow skipped: %s", reason)
 
-    def _close(self, t: ShadowTrade, price: float, reason: str) -> None:
+    def _close(self, t: ShadowTrade, price: float, reason: str, barrier: str = "time") -> None:
         self._open.pop(t.id, None)
         t.closed_ts = self._clock.wall()
         t.exit_price = price
         t.exit_reason = reason
+        t.barrier = barrier
         t.actual_net_pct = t.net_at(price)
         t.pnl_quote = t.capital_quote * t.actual_net_pct / 100.0
+        t.pnl_leveraged_quote = t.pnl_quote * max(1.0, t.leverage_max)
         self._closed.append(t)
         del self._closed[:-500]
         self.closed += 1
         self._save(t)
+        self._learn(t)
         log.info("shadow close %s %s@%s net %+.2f%% (expected %+.2f%%) - %s",
                  t.id, t.asset, t.target, t.actual_net_pct, t.expected_net_pct, reason)
+
+    def _learn(self, t: ShadowTrade) -> None:
+        if self._metalabel is None:
+            return
+        try:
+            self._metalabel.record({
+                "id": t.id, "asset": t.asset, "target": t.target, "first_mover": t.first_mover, "lag_pct": t.lag_pct,
+                "btc_vol_pctile": t.btc_vol_pctile, "barrier": t.barrier, "net_pct": t.actual_net_pct,
+                "quality_score": t.quality_score, "grade": t.grade, "ts": t.closed_ts,
+            })
+        except Exception:  # noqa: BLE001
+            log.exception("meta-label record failed for shadow trade %s", t.id)
 
     def _save(self, t: ShadowTrade) -> None:
         if self._db is None or not hasattr(self._db, "save_shadow"):
@@ -223,6 +271,8 @@ def _stats(closed: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_actual_net_pct": sum(float(r.get("actual_net_pct") or 0.0) for r in closed) / n,
         "pnl_quote": sum(float(r.get("pnl_quote") or 0.0) for r in closed),
         "target_reached": sum(1 for r in closed if r.get("exit_reason") == "target reached"),
+        "stopped": sum(1 for r in closed if r.get("barrier") == "stop"),
+        "pnl_leveraged_quote": sum(float(r.get("pnl_leveraged_quote") or r.get("pnl_quote") or 0.0) for r in closed),
     }
 
 
@@ -232,7 +282,22 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     out["open"] = sum(1 for r in rows if r.get("closed_ts") is None)
     out["by_target"] = _group(closed, "target")
     out["by_asset"] = _group(closed, "asset")
+    graded = [dict(r, grade=r.get("grade") or "unknown") for r in closed]
+    out["by_grade"] = _group(graded, "grade")
     return out
+
+
+def _number(v: Any) -> float | None:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if x == x and abs(x) != float("inf") else None
+
+
+def _positive(v: Any) -> float | None:
+    x = _number(v)
+    return x if x is not None and x > 0 else None
 
 
 __all__ = ["ShadowTrade", "ShadowTrader", "summarize"]
