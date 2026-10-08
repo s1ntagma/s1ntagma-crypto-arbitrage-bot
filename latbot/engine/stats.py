@@ -126,6 +126,17 @@ class StatsStore:
             rs.caught_up_ok += 1
         self._touch(rs)
 
+    def record_manual_result(self, asset: str, exchange: str, in_window: bool, win: bool) -> None:
+        """One finished MANUAL trade of the owner: did the entry happen while the
+        window was open, and did it end with a profit.  Feeds assess_human."""
+        rs = self.get(asset, exchange)
+        rs.manual_total += 1
+        if in_window:
+            rs.manual_in_window += 1
+        if win:
+            rs.manual_wins += 1
+        self._touch(rs)
+
     # ------------------------------------------------------------------ #
     # derived values
     # ------------------------------------------------------------------ #

@@ -550,6 +550,12 @@ class ManualEntered(BaseModel):
 
 class ManualExited(BaseModel):
     price: float = Field(gt=0, description="price the user actually got on the exit leg")
+    reported_pnl_quote: float | None = Field(None, description="result the exchange showed (quote currency)")
+    note: str = Field("", max_length=2000)
+
+
+class ManualSelect(BaseModel):
+    capital: float | None = Field(None, gt=0, description="amount the owner wants to put in (quote currency)")
 
 
 class EmergencyStopBody(BaseModel):
@@ -851,15 +857,20 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
 
     # ---- manual flow -----------------------------------------------------
     @app.post("/api/opportunities/{opp_id}/manual")
-    async def api_manual_select(opp_id: str) -> JSONResponse:
+    async def api_manual_select(opp_id: str, body: ManualSelect | None = Body(None)) -> JSONResponse:
         _require_opp_or_manual_position(opp_id)
         execution = _require_execution()
+        capital = body.capital if body is not None else None
+        if capital is not None and _supports_kwarg(execution.select_manual, "capital"):
+            return _json(_result(await _call(execution.select_manual, opp_id, capital=capital), _now(ctx)))
         return _json(_result(await _call(execution.select_manual, opp_id), _now(ctx)))
 
     @app.get("/api/opportunities/{opp_id}/manual/support")
-    async def api_manual_support(opp_id: str) -> JSONResponse:
+    async def api_manual_support(opp_id: str, capital: float | None = Query(None, gt=0)) -> JSONResponse:
         _require_opp_or_manual_position(opp_id)
         execution = _require_execution()
+        if capital is not None and _supports_kwarg(execution.manual_support, "capital"):
+            return _json(_result(await _call(execution.manual_support, opp_id, capital=capital), _now(ctx)))
         return _json(_result(await _call(execution.manual_support, opp_id), _now(ctx)))
 
     @app.post("/api/opportunities/{opp_id}/manual/entered")
@@ -873,7 +884,11 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
     async def api_manual_exited(opp_id: str, body: ManualExited) -> JSONResponse:
         _require_opp_or_manual_position(opp_id)  # a restored position has no opportunity any more
         execution = _require_execution()
-        result = await _call(execution.manual_exited, opp_id, body.price)
+        if (body.reported_pnl_quote is not None or body.note) and _supports_kwarg(execution.manual_exited, "note"):
+            result = await _call(execution.manual_exited, opp_id, body.price,
+                                 reported_pnl_quote=body.reported_pnl_quote, note=body.note)
+        else:
+            result = await _call(execution.manual_exited, opp_id, body.price)
         return _json(_result(result, _now(ctx)))
 
     # ---- auto flow -------------------------------------------------------

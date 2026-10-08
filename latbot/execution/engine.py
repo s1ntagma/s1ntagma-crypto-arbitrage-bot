@@ -49,6 +49,7 @@ from ..links import split_symbol
 from ..logging_setup import redact
 from ..models import (
     ACTIVE_STATES,
+    TERMINAL_STATES,
     EXECUTION_STATES,
     ExecutionEconomics,
     Light,
@@ -178,6 +179,8 @@ class ExecutionEngine:
         self._open_positions: dict[str, _OpenPosition] = {}
         self._manual: dict[str, TradeRecord] = {}
         self._manual_entry_mono: dict[str, float] = {}
+        self._manual_capital: dict[str, float] = {}  # amount the owner chose in the session ("сколько вложить")
+        self._manual_selected_mono: dict[str, float] = {}  # "Я ЗАШЁЛ" pressed (session opened)
         self._rest_book_mono: dict[tuple[str, str], float] = {}  # (exchange, symbol) -> last REST book attempt
         self._rate_limited_until: dict[str, float] = {}  # exchange -> loop time a RateLimited told us to stay away until
         self._restored: list[TradeRecord] = []
@@ -252,6 +255,8 @@ class ExecutionEngine:
         return econ
 
     def _forget(self, opp_id: str) -> None:
+        self._manual_capital.pop(opp_id, None)
+        self._manual_selected_mono.pop(opp_id, None)
         self._expected.pop(opp_id, None)
         self._plan.pop(opp_id, None)
         self._abort.pop(opp_id, None)
@@ -748,8 +753,20 @@ class ExecutionEngine:
             f"(card shows {opp.mode.value.upper()}); wait for the card to refresh and select again"
         )
 
-    async def select_manual(self, opp_id: str) -> dict[str, Any]:
-        """Mark the opportunity MANUAL_SELECTED and return the live support payload."""
+    def _set_manual_capital(self, opp_id: str, capital: float | None) -> None:
+        if capital is None:
+            return
+        try:
+            value = float(capital)
+        except (TypeError, ValueError):
+            return
+        if value > 0:
+            self._manual_capital[opp_id] = value
+
+    async def select_manual(self, opp_id: str, capital: float | None = None) -> dict[str, Any]:
+        """Mark the opportunity MANUAL_SELECTED ("Я ЗАШЁЛ") and return the live
+        support payload; ``capital`` = the amount the owner wants to put in."""
+        self._set_manual_capital(opp_id, capital)
         opp = self._opps.get(opp_id)
         if opp is None:
             manual = self._manual.get(opp_id)
@@ -770,9 +787,10 @@ class ExecutionEngine:
             await self._transition(opp, OppState.MANUAL_SELECTED, "user selected MANUAL")
         if opp.state == OppState.MANUAL_SELECTED or opp.is_active:
             self._snapshot_expected(opp)
+            self._manual_selected_mono.setdefault(opp_id, self._clock.mono())
         return await self.manual_support(opp_id)
 
-    async def manual_support(self, opp_id: str) -> dict[str, Any]:
+    async def manual_support(self, opp_id: str, capital: float | None = None) -> dict[str, Any]:
         """Live numbers for the MANUAL modal, recomputed from the latest book.
 
         The target book must be younger than ``max_data_age_ms`` (one throttled
@@ -780,6 +798,7 @@ class ExecutionEngine:
         (``status="no_data"``) and the pipeline is NOT refreshed, so the poll
         can not keep a dead opportunity alive."""
         s = self._settings
+        self._set_manual_capital(opp_id, capital)
         opp = self._opps.get(opp_id)
         manual = self._manual.get(opp_id)
         if opp is None:
@@ -788,7 +807,13 @@ class ExecutionEngine:
             return self._expired_payload(None, opp_id)
         if not opp.is_active and manual is None:
             return self._expired_payload(opp, opp_id)
-        capital = manual.capital_quote if manual is not None else float(opp.econ.capital_quote or s.capital_quote)
+        requested = self._manual_capital.get(opp_id)
+        if manual is not None:
+            capital = manual.capital_quote
+        elif requested is not None:
+            capital = requested
+        else:
+            capital = float(opp.econ.capital_quote or s.capital_quote)
         adapter = self.adapter_for(opp)
         if adapter is not None:
             book, age = await self._fresh_book(adapter, opp.target_symbol, throttle_s=s.max_data_age_ms / 1000.0)
@@ -853,7 +878,52 @@ class ExecutionEngine:
             "entry_price": manual.actual_entry_price if manual is not None else None,
             "quote_amount": manual.capital_quote if manual is not None else None,
             "exit_side": "SELL" if opp.direction > 0 else "BUY",
+            # MANUAL trade session: exact quantities for the chosen amount + the escort
+            "requested_capital": requested if manual is None else manual.capital_quote,
+            "buy_amount": econ.base_amount,
+            "net_quote": econ.net_quote,
+            "exit_price_now": econ.exit_vwap_now,
+            **self._escort(opp, manual, econ, remaining, lag_gone=float(fresh.signal.lag_pct) < float(s.min_lag_pct)),
         }
+
+    def _escort(
+        self, opp: Opportunity, manual: TradeRecord | None, econ: Any, remaining: float, lag_gone: bool = False
+    ) -> dict[str, Any]:
+        """What to do with the exit leg right now, from the latest real book.
+
+        Before the entry: the amount to sell later = the amount bought.  In a
+        position: the target is the one the owner entered for; "sell_now" when
+        the book already pays it, "sell_market" when the window is over (the
+        lag is gone - waiting is a bet), "wait" otherwise."""
+        q = opp.quote or split_symbol(opp.target_symbol)[1]
+        if manual is None:
+            return {"sell_amount": econ.base_amount, "sell_signal": None, "sell_text": "", "pnl_now_pct": None, "pnl_now_quote": None}
+        d = opp.direction
+        entry = float(manual.actual_entry_price or 0.0)
+        base = manual.capital_quote / entry if entry > 0 else 0.0
+        target = float(manual.expected_exit_price or econ.exit_target)
+        now_px = float(econ.exit_vwap_now or 0.0)
+        taker = self._taker_fee(manual.exchange)
+        pnl_quote = pnl_pct = None
+        if entry > 0 and now_px > 0:
+            pnl_quote = (now_px - entry) * base * d - (manual.capital_quote * taker + now_px * base * taker)
+            pnl_pct = pnl_quote / manual.capital_quote * 100.0 if manual.capital_quote else None
+        reached = now_px > 0 and (now_px - target) * d >= 0
+        side_word = "ПРОДАВАЙ" if d > 0 else "ОТКУПАЙ"
+        if reached:
+            signal = "sell_now"
+            text = f"{side_word} СЕЙЧАС: стакан даёт {now_px:.8g} {q} ≥ цели {target:.8g} {q}"
+        elif lag_gone:
+            signal = "sell_market"
+            text = f"Рынок откатился, лаг исчез — продай по рынку (сейчас {now_px:.8g} {q}); цель {target:.8g} {q} уже не придёт"
+        elif remaining <= 0 or opp.state in TERMINAL_STATES:
+            signal = "sell_market"
+            text = f"Окно закрылось — продай по рынку (сейчас {now_px:.8g} {q}); цель {target:.8g} {q} уже не обещана"
+        else:
+            signal = "wait"
+            text = f"ЖДИ: продавать при цене ≥ {target:.8g} {q}, сейчас {now_px:.8g} {q} · осталось ~{remaining:.0f} с"
+        return {"sell_amount": base, "sell_signal": signal, "sell_text": text, "pnl_now_pct": pnl_pct, "pnl_now_quote": pnl_quote,
+                "exit_target_now": target}
 
     async def manual_entered(self, opp_id: str, price: float, quote_amount: float) -> dict[str, Any]:
         """The user did the entry by hand: record a TradeRecord and return the exit target."""
@@ -882,6 +952,9 @@ class ExecutionEngine:
         if opp.state in (OppState.VALID, OppState.NOTIFIED):
             await self._transition(opp, OppState.MANUAL_SELECTED, "user selected MANUAL")
         expected = self._snapshot_expected(opp)
+        now_mono = self._clock.mono()
+        in_window = bool(opp.is_active and opp.remaining_s(now_mono) > 0)
+        selected = self._manual_selected_mono.get(opp_id)
         adapter = self.adapter_for(opp)
         taker = self._taker_fee(opp.target_exchange)
         if adapter is not None:
@@ -911,6 +984,9 @@ class ExecutionEngine:
             actual_entry_price=price,
             actual_fees_quote=entry_fee,
             started_ts=self._clock.wall(),
+            manual=True,
+            entered_in_window=in_window,
+            time_to_entry_s=(now_mono - selected) if selected is not None else None,
         )
         self._trades[trade.id] = trade
         self._manual[opp_id] = trade
@@ -948,14 +1024,22 @@ class ExecutionEngine:
             "state": trade.state.value,
         }
 
-    async def manual_exited(self, opp_id: str, price: float) -> TradeRecord:
-        """The user sold by hand: realized P&L, CLOSED."""
+    async def manual_exited(
+        self, opp_id: str, price: float, reported_pnl_quote: float | None = None, note: str = ""
+    ) -> TradeRecord:
+        """"Я УШЁЛ СО СДЕЛКИ": realized P&L from the owner's exit price, CLOSED.
+        ``reported_pnl_quote`` / ``note``: the result the exchange showed the
+        owner, stored next to the expected one (and used for the learning)."""
         trade = self._manual.get(opp_id)
         if trade is None:
             raise KeyError(f"no open manual trade for opportunity {opp_id}")
         price = float(price)
         if price <= 0:
             raise ValueError("exit price must be positive")
+        if reported_pnl_quote is not None:
+            trade.user_reported_pnl_quote = float(reported_pnl_quote)
+        if note:
+            trade.user_note = str(note)[:2000]
         entry_price = float(trade.actual_entry_price or 0.0)
         base_amount = trade.capital_quote / entry_price if entry_price > 0 else 0.0
         taker = self._taker_fee(trade.exchange)
@@ -982,6 +1066,11 @@ class ExecutionEngine:
         pnl = float(trade.realized_pnl_quote or 0.0)
         self._risk.register_close(trade.id, pnl)
         self._record_stats(trade, success=pnl > 0)
+        result = trade.user_reported_pnl_quote if trade.user_reported_pnl_quote is not None else pnl
+        try:
+            self._stats.record_manual_result(trade.asset, trade.exchange, bool(trade.entered_in_window), result > 0)
+        except Exception:  # noqa: BLE001
+            log.exception("stats.record_manual_result failed for %s", trade.id)
         if opp is not None:
             await self._transition(opp, OppState.CLOSED, f"manual exit at {price:.8g}: realized {pnl:+.2f}")
         self._forget(opp_id)

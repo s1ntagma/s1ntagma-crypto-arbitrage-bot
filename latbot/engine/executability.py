@@ -24,6 +24,9 @@ def _fmt_margin(margin: float) -> str:
     return f"{margin:+.1f} s margin"
 
 
+_MIN_MANUAL_N = 3  # real manual trades needed before they move the HUMAN estimate
+
+
 def assess_human(
     remaining_s: float,
     net_pct: float,
@@ -70,6 +73,11 @@ def assess_human(
         if stats_rate is not None and stats_n >= _MIN_STATS_N:
             prob = 0.5 * prob + 0.5 * stats_rate
             reasons.append(f"by stats: {stats.human_window_ok}/{stats_n} made it")
+        manual_n = int(getattr(stats, "manual_total", 0) or 0)
+        if manual_n >= _MIN_MANUAL_N:
+            real = int(getattr(stats, "manual_wins", 0) or 0) / manual_n
+            prob = 0.4 * prob + 0.6 * real  # the owner's real trades outweigh the estimate
+            reasons.append(f"по твоим сделкам: {int(stats.manual_wins)}/{manual_n} в плюс")
     return ExecAssessment(
         light=light,
         label=label,

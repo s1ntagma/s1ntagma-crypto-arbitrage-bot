@@ -601,6 +601,12 @@ class TradeRecord:
     started_ts: float = field(default_factory=time.time)
     finished_ts: float | None = None
     events: list[tuple[float, str]] = field(default_factory=list)  # (ts, message)
+    # MANUAL trade session: what the owner did by hand, next to what was expected
+    manual: bool = False
+    entered_in_window: bool | None = None  # entry reported while the opportunity was still alive
+    time_to_entry_s: float | None = None  # "Я ЗАШЁЛ" -> "Я КУПИЛ"
+    user_reported_pnl_quote: float | None = None  # the result the exchange showed the owner
+    user_note: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -647,6 +653,11 @@ class ReactionStats:
     human_window_ok: int = 0
     caught_up_total: int = 0
     caught_up_ok: int = 0
+    # Real MANUAL trades of the owner (stronger evidence than the estimate above):
+    # entered while the window was open / closed with a profit.
+    manual_total: int = 0
+    manual_in_window: int = 0
+    manual_wins: int = 0
 
     @property
     def success_rate(self) -> float | None:
@@ -656,6 +667,10 @@ class ReactionStats:
     @property
     def human_success_rate(self) -> float | None:
         return None if self.human_window_total == 0 else self.human_window_ok / self.human_window_total
+
+    @property
+    def manual_success_rate(self) -> float | None:
+        return None if self.manual_total == 0 else self.manual_wins / self.manual_total
 
     @property
     def catchup_rate(self) -> float | None:
