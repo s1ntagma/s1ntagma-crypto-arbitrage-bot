@@ -344,7 +344,10 @@ def _history(stats: Any, metalabel: dict | None, settings: Any) -> tuple[float, 
                 f"n={n_ml} (≥ {min_n})"
             )
             return value, detail, True
-        ml_note = f"; мета-метка: n={n_ml} < {min_n} — используется догон"
+        if n_ml < min_n:
+            ml_note = f"; мета-метка: n={n_ml} < {min_n} — используется догон"
+        else:
+            ml_note = f"; мета-метка: нет оценки p10 (n={n_ml}) — используется догон"
     k = max(0.0, _setting(settings, "quality_history_k", DEFAULT_HISTORY_K))
     ok = max(0, int(_f(getattr(stats, "caught_up_ok", 0), 0.0))) if stats is not None else 0
     total = max(0, int(_f(getattr(stats, "caught_up_total", 0), 0.0))) if stats is not None else 0
@@ -518,10 +521,14 @@ def assess_quality(
         parts.append(f"ниже порога {min_score}" if not vetoes else f"заблокировано (порог {min_score})")
     if event_window:
         parts.append(f"окно макро-события: порог +{min_score - base_min}")
-    strongest = sorted(components, key=lambda c: c.weight * c.value, reverse=True)
-    weakest = [c for c in sorted(components, key=lambda c: c.value) if c.weight > 0][:2]
-    if strongest and strongest[0].weight > 0:
-        parts.append(f"сильнее всего: {_COMPONENT_RU[strongest[0].key]} {strongest[0].value:.0%}")
+    weighted = [c for c in components if c.weight > 0]
+    by_value = sorted(weighted, key=lambda c: (-c.value, COMPONENT_KEYS.index(c.key)))
+    if by_value:
+        best = by_value[0]
+        parts.append(f"сильнее всего: {_COMPONENT_RU[best.key]} {best.value:.0%}")
+        weakest = [c for c in reversed(by_value[1:])][:2]
+    else:
+        weakest = []
     if weakest:
         parts.append("слабее всего: " + ", ".join(f"{_COMPONENT_RU[c.key]} {c.value:.0%}" for c in weakest))
     parts.append(f"контекст: покрытие {coverage:.0%}, S_eff {s_eff:+.2f}")
