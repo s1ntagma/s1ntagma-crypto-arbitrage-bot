@@ -240,7 +240,7 @@ def test_veto_blocks_and_caps_score():
     assert r.raw_score > 70  # would pass without the veto ...
     assert r.score == 59  # ... but is capped below min_quality_score
     assert r.vetoes == ["Macro: CPI через 120 с"]
-    assert r.grade == grade_for(r.score)
+    assert r.grade == "X"  # blocked: kept out of the A-D statistics
     assert "вето: Macro: CPI через 120 с" in r.summary
 
 

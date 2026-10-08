@@ -193,7 +193,7 @@ def test_backoff_levels():
     for _ in range(5):
         st.record(_outcome(False, asset="ETH"))
 
-    base = (20 + 2 + 5 + 0) / 55
+    base = (20 + 2 + 5 + 0 + 0.5 * 10) / (55 + 10)  # global rate shrunk towards 0.5 with kappa pseudo-trades
     est = st.estimate("BTC", "bybit", "binance", 0.6, 0.5)
     assert est["level"] == "full" and est["key"] == ("BTC", "bybit", "binance", "0.5-1", "mid")
     assert (est["n"], est["wins"]) == (25, 20)
@@ -240,7 +240,8 @@ def test_degenerate_base_rate_and_zero_kappa():
     for _ in range(3):
         st.record(_outcome(False))
     est = st.estimate("BTC", "bybit", "binance", 0.6, 0.5)
-    assert est["mean"] == 0.0 and est["p10"] == 0.0  # all losses, base 0 -> point mass at 0
+    # all losses so far: the shrunk base (5/13) keeps the prior alive - never a point mass at 0
+    assert est["mean"] == pytest.approx((10 * 5 / 13) / (10 * 5 / 13 + 10 * 8 / 13 + 3)) and est["p10"] > 0.0
     st0 = _store(metalabel_kappa=0)
     est = st0.estimate("BTC", "bybit", "binance", 0.6, 0.5)
     assert est["n"] == 0 and est["mean"] is None and est["p10"] is None  # no data, no estimate

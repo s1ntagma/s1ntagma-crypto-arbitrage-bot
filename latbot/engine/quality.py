@@ -336,7 +336,8 @@ def _history(stats: Any, metalabel: dict | None, settings: Any) -> tuple[float, 
         level = str(metalabel.get("level") or "")
         if level:
             key_txt = f"{level}:{key_txt}" if key_txt else level
-        if n_ml >= min_n and p10 is not None:
+        own = level in ("full", "asset_target", "")  # other pairs never replace this pair's own history
+        if own and n_ml >= min_n and p10 is not None:
             value = _clamp(p10)
             mean_txt = f"{mean:.0%}" if mean is not None else "н/д"
             detail = (
@@ -344,7 +345,9 @@ def _history(stats: Any, metalabel: dict | None, settings: Any) -> tuple[float, 
                 f"n={n_ml} (≥ {min_n})"
             )
             return value, detail, True
-        if n_ml < min_n:
+        if not own:
+            ml_note = f"; мета-метка: по этой паре мало исходов (уровень {level}) — используется догон"
+        elif n_ml < min_n:
             ml_note = f"; мета-метка: n={n_ml} < {min_n} — используется догон"
         else:
             ml_note = f"; мета-метка: нет оценки p10 (n={n_ml}) — используется догон"
@@ -512,7 +515,7 @@ def assess_quality(
         score = min(score, max(0, base_min - 1))
     score = max(0, min(100, score))
     passed = not vetoes and score >= min_score
-    grade = grade_for(score)
+    grade = "X" if vetoes else grade_for(score)  # blocked signals never pollute the A-D statistics
 
     parts = [f"Качество {score}/100 ({grade})"]
     if passed:

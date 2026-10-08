@@ -489,7 +489,7 @@ class Pipeline:
                 rate, interval, next_ts = funding[0], funding[1], funding[2]
             sa = stats_asset if isinstance(stats_asset, dict) else {}
             plan = plan_leverage(
-                opp.econ, report.score, s, s.exchange(opp.target_exchange),
+                opp.econ, report.score if report.passed else 0.0, s, s.exchange(opp.target_exchange),
                 sigma_1m_pct=sa.get("vol_1m_pct"), tail_1m_pct=sa.get("tail_1m_pct"),
                 hold_s=float(opp.estimated_duration_s or 0.0), funding_rate_8h=rate, funding_interval_h=interval,
                 next_funding_ts=next_ts, now_wall=now_wall,

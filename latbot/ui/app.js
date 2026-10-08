@@ -722,7 +722,9 @@
     var id = best ? best.id : null;
     var old = box.firstElementChild;
     var fresh = best ? renderCard(best, { best: true })
-      : h('div', { class: 'best-empty', text: 'No executable opportunity right now — waiting for a real lag (no data, no signal).' });
+      : h('div', { class: 'best-empty', text: lowQualityCount() > 0
+        ? 'No opportunity passed the quality check: ' + lowQualityCount() + ' below the threshold (trained virtually; tick "Show low quality" below).'
+        : 'No executable opportunity right now — waiting for a real lag (no data, no signal).' });
     if (best && old && id === uiMemo.bestId) {
       flashChanged(old, fresh, '.card-net-value, .kv-v');
       markLightChanges(old, fresh);
@@ -1005,10 +1007,20 @@
     } else if (active === 0) {
       title.textContent = 'Watching ' + (n ? n + ' exchanges' : 'exchanges') + ' · no executable lag right now';
       sub.textContent = 'Signals need ≥2 venues to move while a target lags. Every card is a measured lag: no data, no signal — nothing is invented to fill the grid.';
+    } else if (!state.filters.lowq && lowQualityCount() > 0) {
+      var lq = lowQualityCount();
+      title.textContent = 'Nothing passed the quality check right now.';
+      sub.textContent = lq + ' active opportunit' + (lq === 1 ? 'y is' : 'ies are') + ' below the quality threshold (traded virtually for training). Tick "Show low quality" to see ' + (lq === 1 ? 'it' : 'them') + '.';
     } else {
       title.textContent = 'No opportunities match the current filters.';
       sub.textContent = active + ' active opportunit' + (active === 1 ? 'y is' : 'ies are') + ' hidden by the filters — press Reset to see everything.';
     }
+  }
+
+  function lowQualityCount() {
+    var n = 0;
+    state.opps.forEach(function (o) { if (!isTerminal(o.state) && !qualityPassed(o)) n++; });
+    return n;
   }
 
   function kv(k, v, cls) {
@@ -1133,7 +1145,7 @@
     var q = o.quality;
     if (!q || q.score == null) return null;
     var box = h('div', { class: 'q-details' });
-    box.appendChild(h('div', { class: 'q-summary', text: 'Quality ' + q.score + '/100 (' + (q.grade || '?') + ')' + (q.summary ? ' - ' + q.summary : '') }));
+    box.appendChild(h('div', { class: 'q-summary', text: q.summary || ('Quality ' + q.score + '/100 (' + (q.grade || '?') + ')') }));
     (q.vetoes || []).forEach(function (v) { box.appendChild(h('div', { class: 'q-veto', text: 'Block: ' + v })); });
     var list = h('ul', { class: 'q-factors' });
     (q.components || []).forEach(function (c) {
@@ -1161,7 +1173,7 @@
     if (!Number.isFinite(s)) return '—';
     if (s < 90) return s + ' s';
     if (s < 5400) return Math.round(s / 60) + ' min';
-    if (s < 172800) return Math.floor(s / 3600) + ' h ' + Math.round((s % 3600) / 60) + ' min';
+    if (s < 172800) { var m = Math.floor(s / 60); return Math.floor(m / 60) + ' h ' + (m % 60) + ' min'; }
     return Math.floor(s / 86400) + ' d';
   }
 
@@ -1171,6 +1183,7 @@
     if (!d.enabled) {
       st.appendChild(h('p', { class: 'why-line', text: d.reason || 'Market context is off.' }));
     } else {
+      st.appendChild(h('p', { class: 'why-line muted', text: 'Updated ' + fmtTime(d.ts) + ' (refreshes every 30 s on this tab).' }));
       st.appendChild(h('p', { class: 'why-line', text: d.event_window
         ? 'High-impact US release window: signals need a higher quality score and leverage is reduced.'
         : 'No high-impact US release window right now.' }));
@@ -1185,15 +1198,18 @@
       macro.appendChild(h('tr', null,
         h('td', { text: e.title + (e.impact === 'high' ? '' : ' (medium)') }),
         h('td', { class: 'muted', text: 'forecast ' + (e.forecast || '—') + ' · prev ' + (e.previous || '—') + ' · ' + hist }),
-        h('td', { text: 'in ' + fmtCountdown(e.in_s) })));
+        h('td', { text: 'in ' + fmtCountdown(num(e.ts) - Date.now() / 1000) })));
     });
     var reg = $('market-regime');
     clear(reg);
     var rg = d.regime || {};
     ['BTC', 'ETH'].forEach(function (a) {
       var x = rg[a] || {};
-      reg.appendChild(h('tr', null, h('td', { text: a }),
-        h('td', { text: Number.isFinite(num(x.ret_15m_pct)) ? '15 min ' + fmtPct(x.ret_15m_pct) + ' · 1 h ' + fmtPct(x.ret_1h_pct) + ' · vol pct ' + (Number.isFinite(num(x.vol_pctile)) ? Math.round(num(x.vol_pctile) * 100) : '—') : 'no minute data yet' })));
+      var txt = !d.enabled ? 'Off.'
+        : Number.isFinite(num(x.ret_15m_pct)) && x.fresh !== false ? '15 min ' + fmtPct(x.ret_15m_pct) + ' · 1 h ' + fmtPct(x.ret_1h_pct) + ' · vol pct ' + (Number.isFinite(num(x.vol_pctile)) ? Math.round(num(x.vol_pctile) * 100) : '—')
+        : num(x.minutes) > 0 ? 'minute data stale (' + x.minutes + ' bars, last ' + (x.last_minute_ts ? fmtTime(x.last_minute_ts) : '—') + ')'
+        : 'no minute data yet';
+      reg.appendChild(h('tr', null, h('td', { text: a }), h('td', { class: 'wrap', text: txt })));
     });
     var tf = d.tradfi && d.tradfi.quotes ? d.tradfi.quotes : (d.tradfi && d.tradfi.symbols) || null;
     var quotes = [];
@@ -1215,7 +1231,7 @@
         h('td', { text: it.channel || it.source }),
         h('td', { class: 'wrap', text: it.title }),
         h('td', { text: it.category }),
-        h('td', { text: (it.assets || []).join(', ') }),
+        h('td', { text: (it.assets || []).map(function (a) { return a === '*' ? 'market' : a; }).join(', ') }),
         h('td', { class: dir > 0 ? 'pos' : dir < 0 ? 'neg' : 'muted', text: dir > 0 ? 'bullish' : dir < 0 ? 'bearish' : 'unclear' }),
         h('td', { class: 'num', text: Math.round(num(it.importance) * 100) + '%' })));
     });
@@ -1249,7 +1265,7 @@
     (d.sources || []).forEach(function (x) {
       src.appendChild(h('tr', null,
         h('td', { text: x.name }),
-        h('td', { class: x.ok ? 'diag-ok' : 'diag-bad', text: x.ok ? 'ok' : (x.enabled === false ? 'off' : 'no data') }),
+        h('td', { class: x.ok ? 'diag-ok' : 'diag-bad', text: x.ok ? 'ok' : x.enabled === false ? 'off' : x.last_error ? (x.last_ok_ts ? 'error (has older data)' : 'error') : 'no data' }),
         h('td', { class: 'wrap muted', text: x.last_error || x.note || '' })));
     });
     if (!(d.sources || []).length) src.appendChild(h('tr', null, h('td', { class: 'muted', text: d.enabled ? 'Starting…' : 'Off.' })));
@@ -1309,7 +1325,7 @@
     var humanRed = lightOf(o, 'human') === 'red';
     var botRed = lightOf(o, 'bot') === 'red';
     var manualDisabled = term || (exec && !manualMine && !manualOpen) || (humanRed && !manualMine && !manualOpen);
-    var autoDisabled = term || exec || botRed || state.emergency || manualMine;
+    var autoDisabled = term || exec || botRed || state.emergency || manualMine || !qualityPassed(o);
     var manualBtn = h('button', {
       class: 'btn btn-manual', type: 'button', disabled: manualDisabled,
       title: term ? 'opportunity is over' : manualOpen ? 'открытая ручная сделка: вернуться к сопровождению' : humanRed ? 'too fast for a human' : exec ? 'already executing' : 'зайти в сделку вручную: бот проведёт по шагам',
@@ -1318,7 +1334,7 @@
     });
     var autoBtn = h('button', {
       class: 'btn btn-auto', type: 'button', disabled: autoDisabled,
-      title: state.emergency ? 'EMERGENCY STOP active' : term ? 'opportunity is over' : botRed ? 'bot cannot execute this one' : exec ? 'already executing' : 'let the bot execute (revalidated first)',
+      title: state.emergency ? 'EMERGENCY STOP active' : term ? 'opportunity is over' : !qualityPassed(o) ? 'below the quality threshold: AUTO is blocked' : botRed ? 'bot cannot execute this one' : exec ? 'already executing' : 'let the bot execute (revalidated first)',
       text: 'AUTO', onclick: function () { openAuto(o.id); }
     });
     foot.appendChild(h('div', { class: 'card-actions' }, manualBtn, autoBtn));
@@ -2687,10 +2703,13 @@
     });
     if (zeroed) scheduleRender('cards');
     if (state.manual && !modalHidden('manual')) updateManualLive();
+    marketTicks = (marketTicks + 1) % 120;  // the Market tab refreshes itself every 30 s while open
+    if (marketTicks === 0 && state.tab === 'market' && !document.hidden) loadMarket();
     chartTicks = (chartTicks + 1) % 8;  // every 2 s while the best opportunity is on screen
     if (chartTicks === 0 && state.tab === 'opps' && !document.hidden) refreshChart(false);
   }
   var chartTicks = 0;
+  var marketTicks = 0;
 
   // ------------------------------------------------------------------ wiring
   function bindUi() {

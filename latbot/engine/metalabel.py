@@ -438,11 +438,13 @@ class MetaLabelStore:
         return self._aggs.get((level, key))
 
     def base_rate(self) -> float:
-        """Global measured win rate (0.5 when nothing was recorded)."""
+        """Global win rate shrunk towards 0.5 with kappa pseudo-trades (0.5 when nothing was
+        recorded).  Never 0 or 1: an all-win / all-loss start must not collapse the prior."""
         g = self._agg("global", ())
         if g is None or g.n <= 0:
             return 0.5
-        return g.wins / g.n
+        k = max(1.0, self.kappa)
+        return (g.wins + 0.5 * k) / (g.n + k)
 
     def _posterior(self, wins: int, n: int) -> tuple[float, float, float | None, float | None]:
         """Beta(kappa*base + wins, kappa*(1-base) + losses) -> (alpha, beta, mean, p10)."""

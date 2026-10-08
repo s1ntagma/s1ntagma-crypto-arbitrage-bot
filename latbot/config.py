@@ -129,6 +129,12 @@ class ExchangeConfig:
     poll_tickers: bool = True  # broad coverage via REST fetch_tickers (all common assets)
     pair_url: str = ""  # override template for the "open pair" button (see market/links.py)
     retry_after_ms: bool = False  # the venue's Retry-After header is in milliseconds (Revolut X), not HTTP seconds
+    # Phase 3 leverage plan (advice only, no leveraged orders): what YOUR account allows on this venue
+    max_leverage: float = 1.0  # 1 = spot only
+    margin_kind: str = "spot"  # "spot" | "margin" | "perp"
+    maintenance_margin_rate: float = 0.005
+    borrow_rate_daily_pct: float = 0.0  # margin borrow cost per day, %
+    margin_open_fee_pct: float = 0.0  # margin opening fee, %
     label: str = ""  # display name ("OKX EEA", "Bybit EU")
 
     @property

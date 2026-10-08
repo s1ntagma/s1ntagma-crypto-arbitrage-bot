@@ -133,11 +133,11 @@
       <div id="market-status" class="diag-why" aria-live="polite"></div>
       <div class="diag-grid">
         <div class="diag-block">
-          <h3 class="diag-title">US MACRO CALENDAR · next releases</h3>
+          <h3 class="diag-title keep-case">US macro calendar · next releases</h3>
           <div class="table-wrap"><table class="table table-compact" id="market-macro-table"><tbody id="market-macro"></tbody></table></div>
         </div>
         <div class="diag-block">
-          <h3 class="diag-title">REGIME · BTC / ETH and US markets (delayed)</h3>
+          <h3 class="diag-title keep-case">Regime · BTC / ETH and US markets (delayed)</h3>
           <div class="table-wrap"><table class="table table-compact" id="market-regime-table"><tbody id="market-regime"></tbody></table></div>
         </div>
       </div>
@@ -225,7 +225,7 @@
         <h3 class="diag-title">LEARNING · does the quality grade predict the result?</h3>
         <div class="table-wrap">
           <table class="table" id="grade-table">
-            <thead><tr><th>Grade</th><th class="num">Closed</th><th class="num">Win rate</th><th class="num">Avg actual NET</th><th class="num">Stopped</th><th class="num">P&amp;L</th><th class="num">P&amp;L with leverage</th></tr></thead>
+            <thead><tr><th>Grade</th><th class="num">Closed</th><th class="num">Win rate</th><th class="num">Avg actual NET</th><th class="num">Stopped</th><th class="num">P&amp;L</th><th class="num">P&amp;L at signal leverage (est.)</th></tr></thead>
             <tbody id="grade-body"></tbody>
           </table>
         </div>
@@ -342,7 +342,7 @@
           <input type="number" name="shadow_min_net_pct" step="0.05" min="0" inputmode="decimal"></label>
         <label class="field"><span class="field-label">Max leverage (advice; spot venues stay 1x)</span>
           <input type="number" name="max_leverage" step="1" min="1" max="20" inputmode="numeric"></label>
-        <label class="check"><input type="checkbox" name="pool_enabled"> <span>Narrow pool: only predictable, liquid coins</span></label>
+        <label class="check"><input type="checkbox" name="pool_enabled"> <span>Narrow pool: only predictable, liquid coins (restart to apply)</span></label>
         <label class="check"><input type="checkbox" name="context_enabled"> <span>Market context: macro, news, derivatives (restart to apply)</span></label>
       </fieldset>
       <fieldset class="fieldset">

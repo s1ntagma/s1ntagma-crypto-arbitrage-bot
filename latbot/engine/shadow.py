@@ -149,7 +149,8 @@ class ShadowTrader:
             btc_vol_pctile=_number(quality.get("btc_vol_pctile")),
             leverage_max=_positive(lev.get("max_by_signal")) or 1.0,
             stop_pct=stop_pct,
-            stop_price=float(e.entry_vwap) * (1.0 - int(opp.direction) * stop_pct / 100.0),
+            # measured on the exit side (what the trade would be sold at), so the spread does not eat the stop
+            stop_price=float(e.exit_vwap_now) * (1.0 - int(opp.direction) * stop_pct / 100.0),
         )
         t.max_net_pct = t.net_at(t.last_exit_price)
         self._open[opp.id] = t

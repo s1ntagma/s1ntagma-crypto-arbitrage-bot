@@ -398,7 +398,7 @@ a:hover { color: #6db8ff; }
 .q-badge.grade-a { color: var(--up-text); border-color: var(--neon-line); background: var(--neon-dim); }
 .q-badge.grade-b { color: var(--accent-hover); border-color: var(--accent-line); background: var(--accent-dim); }
 .q-badge.grade-c { color: var(--warn-text); border-color: var(--warn); }
-.q-badge.grade-d, .q-badge.failed { color: var(--down-text); border-color: var(--down); }
+.q-badge.grade-d, .q-badge.grade-x, .q-badge.failed { color: var(--down-text); border-color: var(--down); }
 .lev-line { font-size: var(--fs-sm); color: var(--muted); }
 .q-details { margin-top: 10px; display: grid; gap: 6px; font-size: var(--fs-sm); }
 .q-summary { color: var(--text); font-weight: 600; }
@@ -529,6 +529,8 @@ a:hover { color: #6db8ff; }
 .diag-block { margin-bottom: 20px; }
 .diag-title { color: var(--muted); font-family: var(--font-body); font-size: var(--fs-sm); font-weight: 500; margin: 0 0 10px; text-transform: lowercase; }
 .diag-title::first-letter { text-transform: uppercase; }
+.diag-title.keep-case { text-transform: none; }
+#tab-market .table td { white-space: normal; }
 .diag-ok { color: var(--up-text); }
 .diag-bad { color: var(--down-text); }
 .diag-recent { color: var(--muted); font-size: var(--fs-xs); }
