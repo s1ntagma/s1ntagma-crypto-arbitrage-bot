@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:media="http://search.yahoo.com/mrss/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:wfw="http://wellformedweb.org/CommentAPI/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:sy="http://purl.org/rss/1.0/modules/syndication/" xmlns:slash="http://purl.org/rss/1.0/modules/slash/">
+  <channel>
+    <title>Cointelegraph.com News</title>
+    <link>https://cointelegraph.com</link>
+    <atom:link href="https://cointelegraph.com/rss" rel="self" type="application/rss+xml"/>
+    <description>Cointelegraph covers fintech, blockchain and Bitcoin bringing you the latest crypto news and analyses on the future of money.</description>
+    <generator>cointelegraph.com</generator>
+    <lastBuildDate>Thu, 08 Oct 2026 13:13:25 +0000</lastBuildDate>
+    <language>en</language>
+    <sy:updatePeriod>hourly</sy:updatePeriod>
+    <sy:updateFrequency>1</sy:updateFrequency>
+    <image>
+      <title>Cointelegraph.com News</title>
+      <link>https://cointelegraph.com</link>
+      <url>https://s3.cointelegraph.com/storage/uploads/view/b9ea15d46738b4df64e6e100ab59b373.png</url>
+      <description>Cointelegraph covers fintech, blockchain and Bitcoin bringing you the latest crypto news and analyses on the future of money.</description>
+    </image>
+    <item>
+      <title>Here’s what happened in crypto today</title>
+      <pubDate>Thu, 08 Oct 2026 12:58:01 +0000</pubDate>
+      <atom:updated>Thu, 08 Oct 2026 13:01:46 +0000</atom:updated>
+      <guid isPermaLink="true">https://cointelegraph.com/news/what-happened-in-crypto-today</guid>
+      <link><![CDATA[https://cointelegraph.com/news/what-happened-in-crypto-today?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound]]></link>
+      <description><![CDATA[<p style="float:right; margin:0 0 10px 15px; width:240px;"><img src="https://s3-images.ctmedia.io/media/article-covers/article-covers-110589-what-happened-in-crypto-today.jpg" alt="Here’s what happened in crypto today" class="type:primaryImage"></p><p>Need to know what happened in crypto today? Here is the latest news on daily trends and events impacting Bitcoin price, blockchain, DeFi, Web3 and crypto regulation.</p>]]></description>
+      <dc:creator>Cointelegraph by Yohan Yun</dc:creator>
+      <media:content url="https://s3-images.ctmedia.io/media/article-covers/article-covers-110589-what-happened-in-crypto-today.jpg" fileSize="848525" type="image/jpeg" medium="image" height="966" width="1450">
+        <credit>Cointelegraph</credit>
+        <media:credit role="publishing company">Cointelegraph</media:credit>
+      </media:content>
+      <enclosure url="https://s3-images.ctmedia.io/media/article-covers/article-covers-110589-what-happened-in-crypto-today.jpg" length="848525" type="image/jpeg"/>
+      <category>Latest News</category>
+    </item>
+    <item>
+      <title>EU lawmakers push crypto onto anti-corruption agenda</title>
+      <pubDate>Thu, 08 Oct 2026 12:54:21 +0000</pubDate>
+      <atom:updated>Thu, 08 Oct 2026 12:56:11 +0000</atom:updated>
+      <guid isPermaLink="true">https://cointelegraph.com/news/eu-lawmakers-crypto-anti-corruption</guid>
+      <link><![CDATA[https://cointelegraph.com/news/eu-lawmakers-crypto-anti-corruption?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound]]></link>
+      <description><![CDATA[<p style="float:right; margin:0 0 10px 15px; width:240px;"><img src="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M4DRPQDAKZJCFPBHT0CSH4QT/hi-international-association-of-trusted-blockchain-applications-eu.jpg" alt="EU lawmakers push crypto onto anti-corruption agenda" class="type:primaryImage"></p><p>MEPs also called for stronger asset recovery, while the Commission plans to adopt its first anti-corruption strategy by the end of this year.</p>]]></description>
+      <dc:creator>Cointelegraph by Yohan Yun</dc:creator>
+      <media:content url="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M4DRPQDAKZJCFPBHT0CSH4QT/hi-international-association-of-trusted-blockchain-applications-eu.jpg" fileSize="309306" type="image/jpeg" medium="image" height="966" width="1450">
+        <credit>Cointelegraph</credit>
+        <media:credit role="publishing company">Cointelegraph</media:credit>
+      </media:content>
+      <enclosure url="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M4DRPQDAKZJCFPBHT0CSH4QT/hi-international-association-of-trusted-blockchain-applications-eu.jpg" length="309306" type="image/jpeg"/>
+      <category>Latest News</category>
+    </item>
+    <item>
+      <title>Sui’s Hashi to launch with $500M in Bitcoin finance commitments</title>
+      <pubDate>Thu, 08 Oct 2026 12:03:28 +0000</pubDate>
+      <atom:updated>Thu, 08 Oct 2026 12:05:53 +0000</atom:updated>
+      <guid isPermaLink="true">https://cointelegraph.com/news/sui-hashi-bitcoin-finance-commitments</guid>
+      <link><![CDATA[https://cointelegraph.com/news/sui-hashi-bitcoin-finance-commitments?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound]]></link>
+      <description><![CDATA[<p style="float:right; margin:0 0 10px 15px; width:240px;"><img src="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M4DNKQ04726V0SJFRMWH6S5G/hi-a-beginners-guide-to-understanding-wrapped-tokens-and-wrapped-bitcoin.jpg" alt="Sui’s Hashi to launch with $500M in Bitcoin finance commitments" class="type:primaryImage"></p><p>Hashi has more than $500M in commitments ahead of mainnet launch, while Anchorage offers institutions settlement and self-custody.</p>]]></description>
+      <dc:creator>Cointelegraph by Yohan Yun</dc:creator>
+      <media:content url="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M4DNKQ04726V0SJFRMWH6S5G/hi-a-beginners-guide-to-understanding-wrapped-tokens-and-wrapped-bitcoin.jpg" fileSize="445632" type="image/jpeg" medium="image" height="966" width="1450">
+        <credit>Cointelegraph</credit>
+        <media:credit role="publishing company">Cointelegraph</media:credit>
+      </media:content>
+      <enclosure url="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M4DNKQ04726V0SJFRMWH6S5G/hi-a-beginners-guide-to-understanding-wrapped-tokens-and-wrapped-bitcoin.jpg" length="445632" type="image/jpeg"/>
+      <category>Latest News</category>
+    </item>
+    <item>
+      <title>US government moves $770M of seized Bitcoin to Coinbase Prime </title>
+      <pubDate>Thu, 08 Oct 2026 11:03:36 +0000</pubDate>
+      <atom:updated>Thu, 08 Oct 2026 11:06:15 +0000</atom:updated>
+      <guid isPermaLink="true">https://cointelegraph.com/news/us-government-moves-770m-seized-bitcoin-coinbase</guid>
+      <link><![CDATA[https://cointelegraph.com/news/us-government-moves-770m-seized-bitcoin-coinbase?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound]]></link>
+      <description><![CDATA[<p style="float:right; margin:0 0 10px 15px; width:240px;"><img src="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M4DJ3V1RSDPDYAETXYR8NEK1/hi-us-government-has-shut-down-bitcoin-crypto.jpg" alt="US government moves $770M of seized Bitcoin to Coinbase Prime " class="type:primaryImage"></p><p>The US government moved 9,261 Bitcoin to Coinbase Prime, including 2,456 BTC in newly discovered funds pointing to federal law enforcement seizures.</p>]]></description>
+      <dc:creator>Cointelegraph by Zoltan Vardai</dc:creator>
+      <media:content url="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M4DJ3V1RSDPDYAETXYR8NEK1/hi-us-government-has-shut-down-bitcoin-crypto.jpg" fileSize="424246" type="image/jpeg" medium="image" height="966" width="1450">
+        <credit>Cointelegraph</credit>
+        <media:credit role="publishing company">Cointelegraph</media:credit>
+      </media:content>
+      <enclosure url="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M4DJ3V1RSDPDYAETXYR8NEK1/hi-us-government-has-shut-down-bitcoin-crypto.jpg" length="424246" type="image/jpeg"/>
+      <category>Latest News</category>
+    </item>
+    
+  </channel>
+</rss>

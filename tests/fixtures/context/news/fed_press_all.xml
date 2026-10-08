@@ -1,0 +1,58 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<rss version="2.0">
+    <channel>
+        <title>FRB: Press Release - All Releases</title>
+        <link><![CDATA[https://www.federalreserve.gov/feeds/feeds.htm]]></link>
+        <description><![CDATA[All recent press releases from the Federal Reserve Board]]></description>
+        <language>en</language>
+        <item>
+            <title>Minutes of the Federal Open Market Committee, September 15-16, 2026</title>
+            <link><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/monetary20261007a.htm]]></link>
+            <guid><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/monetary20261007a.htm]]></guid>
+            <description><![CDATA[Minutes of the Federal Open Market Committee, September 15-16, 2026]]></description>
+            <category>Monetary Policy</category>
+            <pubDate><![CDATA[Wed, 7 Oct 2026 18:00:00 GMT]]></pubDate>    
+        </item>
+        <item>
+            <title>Federal Reserve Board announces approval of application by Isabella Bank Corporation</title>
+            <link><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/orders20261005a.htm]]></link>
+            <guid><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/orders20261005a.htm]]></guid>
+            <description><![CDATA[Federal Reserve Board announces approval of application by Isabella Bank Corporation]]></description>
+            <category>Orders on Banking Applications</category>
+            <pubDate><![CDATA[Mon, 5 Oct 2026 20:30:00 GMT]]></pubDate>    
+        </item>
+        <item>
+            <title>Federal Reserve Board announces approval of application by Fleur Capital Corporation</title>
+            <link><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/orders20261002a.htm]]></link>
+            <guid><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/orders20261002a.htm]]></guid>
+            <description><![CDATA[Federal Reserve Board announces approval of application by Fleur Capital Corporation]]></description>
+            <category>Orders on Banking Applications</category>
+            <pubDate><![CDATA[Fri, 2 Oct 2026 20:45:00 GMT]]></pubDate>    
+        </item>
+        <item>
+            <title>Federal Reserve Board announces it will extend, until November 4, the comment period on its proposal to modernize Regulation O</title>
+            <link><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/bcreg20261002a.htm]]></link>
+            <guid><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/bcreg20261002a.htm]]></guid>
+            <description><![CDATA[Federal Reserve Board announces it will extend, until November 4, the comment period on its proposal to modernize Regulation O]]></description>
+            <category>Banking and Consumer Regulatory Policy</category>
+            <pubDate><![CDATA[Fri, 2 Oct 2026 20:00:00 GMT]]></pubDate>    
+        </item>
+        <item>
+            <title>Federal Reserve Board issues enforcement action with Ontario Bancorporation, Inc.</title>
+            <link><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/enforcement20261002a.htm]]></link>
+            <guid><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/enforcement20261002a.htm]]></guid>
+            <description><![CDATA[Federal Reserve Board issues enforcement action with Ontario Bancorporation, Inc.]]></description>
+            <category>Enforcement Actions</category>
+            <pubDate><![CDATA[Fri, 2 Oct 2026 15:00:00 GMT]]></pubDate>    
+        </item>
+        <item>
+            <title>Federal Reserve Board finalizes changes to enhance the transparency and public accountability of its stress test and reduce volatility in its stress test-related capital requirements</title>
+            <link><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/bcreg20260930a.htm]]></link>
+            <guid><![CDATA[https://www.federalreserve.gov/newsevents/pressreleases/bcreg20260930a.htm]]></guid>
+            <description><![CDATA[Federal Reserve Board finalizes changes to enhance the transparency and public accountability of its stress test and reduce volatility in its stress test-related capital requirements]]></description>
+            <category>Banking and Consumer Regulatory Policy</category>
+            <pubDate><![CDATA[Wed, 30 Sep 2026 13:00:00 GMT]]></pubDate>    
+        </item>
+        
+    </channel>
+</rss>

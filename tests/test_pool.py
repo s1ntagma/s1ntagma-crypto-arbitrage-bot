@@ -313,9 +313,11 @@ async def test_pool_cap_keeps_includes_and_largest():
 # stability / funding / venues / 1-minute jumps
 # --------------------------------------------------------------------------- #
 async def test_missing_stability_excludes_only_when_fn_given():
-    pool = make_pool(http=FakeHttp(), api_key="k", listings_fn=lambda: LISTINGS, stability_fn=lambda a: None)
+    # the source answers for NEAR but has nothing for SOL -> SOL stays out (missing data never passes)
+    stab = {"NEAR": {"days": 30, "btc_corr": 0.9, "hour_jumps": 1, "max_7d_move_pct": 20}}
+    pool = make_pool(http=FakeHttp(), api_key="k", listings_fn=lambda: LISTINGS, stability_fn=stab.get)
     await pool.poll_once()
-    assert pool.assets() == ["BTC", "ETH"]
+    assert pool.contains("NEAR") and not pool.contains("SOL")
     assert "нет данных о стабильности" in pool.get("SOL").reasons
     assert "SOL" in pool.candidates()  # it passed everything before stability: bars should fetch its candles
 
@@ -522,10 +524,11 @@ async def test_cache_roundtrip_and_no_refetch_after_restart(tmp_path):
     assert xrp.stability["origin"] == "cache" and any("стабильность из кэша" in r for r in xrp.reasons)
     assert not second.due() and second.due(clock.mono() + 11 * 3600.0 + 1.0)  # fresh cache: no call on restart
     assert "кэш" in second.snapshot()["steps"]["market"]
-    # a stale measurement is no longer data
+    # a stale measurement is no longer data; with the source still silent the step is skipped (outage),
+    # it does not empty the pool
     clock.advance(POOL_DEFAULTS["stability_max_age_h"] * 3600.0)
     second.reevaluate()
-    assert second.assets() == ["BTC", "ETH"]
+    assert "временно пропущен" in second.snapshot()["steps"]["stability"]
 
 
 def test_corrupt_cache_falls_back(tmp_path):
@@ -538,3 +541,18 @@ def test_corrupt_cache_falls_back(tmp_path):
 def test_pool_asset_to_dict():
     d = PoolAsset(asset="BTC", rank=1, included=True, reasons=["в пуле: ранг #1"]).to_dict()
     assert d["asset"] == "BTC" and d["included"] is True and d["source"] == "fallback" and d["jump"] == {}
+
+
+def test_stability_source_down_does_not_empty_the_pool(tmp_path):
+    from latbot.clock import SimClock
+    from latbot.config import Settings
+    from latbot.universe.pool import AssetPool
+
+    pool = AssetPool(Settings(), SimClock(), None, cache_path=tmp_path / "p.json", stability_fn=lambda a: None)
+    pool.reevaluate()
+    assert len(pool.assets()) > 2  # not just BTC/ETH
+    assert "временно пропущен" in pool.snapshot()["steps"]["stability"]
+    measured = {"SOL": {"days": 30, "hours": 720, "btc_corr": 0.1, "hour_jumps": 99, "max_7d_move_pct": 20.0, "ts": 1_700_000_000.0}}
+    pool2 = AssetPool(Settings(), SimClock(), None, cache_path=tmp_path / "q.json", stability_fn=measured.get)
+    pool2.reevaluate()
+    assert "SOL" not in pool2.assets()  # once the source answers, the step applies again

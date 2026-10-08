@@ -56,6 +56,8 @@ def make_settings(tmp_path: Path, **over: Any) -> Settings:
         min_movers=2,
         ticker_poll_enabled=False,
         record_market_data=False,
+        context_enabled=False,  # no network in tests (the context layer has its own offline tests)
+        min_quality_score=0,  # execution mechanics; the quality gate has its own tests
         auto_confirm=False,
         default_opp_duration_s=30.0,
         max_risk_per_trade_pct=10.0,

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xml:base="https://www.bls.gov/feeds" xmlns:dc="http://purl.org/dc/elements/1.1/">
+	<channel>
+		<title>Major Economic Indicators Latest Numbers</title>
+		<link>https://www.bls.gov/bls/</link>
+		<description>Latest Numbers for Major Economic Indicators, U.S. Bureau of Labor Statistics</description>
+		<language>en</language>
+		<item>
+			<title>Major Economic Indicators Latest Numbers</title>
+			<link>https://www.bls.gov/bls/</link>
+			<description><![CDATA[													<p>Consumer Price Index (CPI):								<br>
+																					<strong><span title="All items, U.S. city average, all urban consumers, 1982-84=100, 1-month percent change, seasonally adjusted" class="data">+0.4%  in Aug 2026</span></strong><br>													<a href="https://www.bls.gov/news.release/cpi.toc.htm">News Release</a><br>		
+																										<a href="https://data.bls.gov/pdq/SurveyOutputServlet?data_tool=latest_numbers&amp;series_id=CUSR0000SA0&amp;output_view=pct_1mth">Historical Data</a>
+							</p>
+																																			<p>Unemployment Rate:								<br>
+																					<strong><span title="In percent, seasonally adjusted" class="data">4.2%  in Sep 2026</span></strong><br>													<a href="https://www.bls.gov/news.release/empsit.toc.htm">News Release</a><br>		
+																		<a href="https://data.bls.gov/pdq/SurveyOutputServlet?data_tool=latest_numbers&amp;series_id=LNS14000000">Historical Data</a>
+							</p>
+																												<p>Payroll Employment:								<br>
+																					<strong><span title="Number of jobs, 1-month net change, seasonally adjusted" class="data">+29,000(p)  in Sep 2026</span></strong><br>													<a href="https://www.bls.gov/news.release/empsit.toc.htm">News Release</a><br>		
+																										<a href="https://data.bls.gov/pdq/SurveyOutputServlet?data_tool=latest_numbers&amp;series_id=CES0000000001&amp;output_view=net_1mth">Historical Data</a>
+							</p>
+																												<p>Average Hourly Earnings:								<br>
+																					<strong><span title="For all employees, seasonally adjusted" class="data">+$0.05(p)  in Sep 2026</span></strong><br>													<a href="https://www.bls.gov/news.release/empsit.toc.htm">News Release</a><br>		
+																										<a href="https://data.bls.gov/pdq/SurveyOutputServlet?data_tool=latest_numbers&amp;series_id=CES0500000003&amp;output_view=net_1mth">Historical Data</a>
+							</p>
+																																			<p>Producer Price Index - Final Demand:								<br>
+																					<strong><span title="Final Demand, 1-month percent change, seasonally adjusted" class="data">+0.4%(p)  in Aug 2026</span></strong><br>													<a href="https://www.bls.gov/news.release/ppi.toc.htm">News Release</a><br>		
+																										<a href="https://data.bls.gov/pdq/SurveyOutputServlet?data_tool=latest_numbers&amp;series_id=WPSFD4&amp;output_view=pct_1mth">Historical Data</a>
+							</p>
+																																			<p>Employment Cost Index (ECI):								<br>
+																					<strong><span title="Compensation, all civilian workers, quarterly percent change, seasonally adjusted" class="data">+0.9%  in 2nd Qtr of 2026</span></strong><br>													<a href="https://www.bls.gov/news.release/eci.toc.htm">News Release</a><br>		
+																		<a href="https://data.bls.gov/pdq/SurveyOutputServlet?data_tool=latest_numbers&amp;series_id=CIS1010000000000Q">Historical Data</a>
+							</p>
+																																			<p>Productivity:								<br>
+																					<strong><span title="Output per hour, nonfarm business, percent change from previous quarter at annual rate, seasonally adjusted" class="data">+1.4%  in 2nd Qtr of 2026</span></strong><br>													<a href="https://www.bls.gov/news.release/prod2.toc.htm">News Release</a><br>		
+																		<a href="https://data.bls.gov/pdq/SurveyOutputServlet?data_tool=latest_numbers&amp;series_id=PRS85006092">Historical Data</a>
+							</p>
+																																			<p>U.S. Import Price Index:								<br>
+																					<strong><span title="All imports, 1-month percent change, not seasonally adjusted" class="data">+0.7%  in Aug 2026</span></strong><br>													<a href="https://www.bls.gov/news.release/ximpim.toc.htm">News Release</a><br>		
+																										<a href="https://data.bls.gov/pdq/SurveyOutputServlet?data_tool=latest_numbers&amp;series_id=EIUIR&amp;output_view=pct_1mth">Historical Data</a>
+							</p>
+																												<p>U.S. Export Price Index:								<br>
+																					<strong><span title="All exports, 1-month percent change, not seasonally adjusted" class="data">+0.6%  in Aug 2026</span></strong><br>													<a href="https://www.bls.gov/news.release/ximpim.toc.htm">News Release</a><br>		
+																										<a href="https://data.bls.gov/pdq/SurveyOutputServlet?data_tool=latest_numbers&amp;series_id=EIUIQ&amp;output_view=pct_1mth">Historical Data</a>
+							</p>
+																									<p><strong>p</strong>- preliminary</p>				]]></description>
+			<pubDate>Fri,  2 Oct 2026 08:32:11 -0400</pubDate>
+			<dc:creator>U.S. Bureau of Labor Statistics</dc:creator>
+		</item>
+	</channel>
+</rss>

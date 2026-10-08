@@ -40,6 +40,7 @@ from .backtest.recorder import MarketRecorder
 from .clock import Clock
 from .config import Secrets, Settings, load_secrets, load_settings, save_settings
 from .engine.diagnostics import Diagnostics
+from .engine.metalabel import MetaLabelStore
 from .engine.duration import DurationEstimator
 from .engine.shadow import ShadowTrader
 from .engine.mover import MoveDetector
@@ -49,6 +50,7 @@ from .engine.stats import StatsStore
 from .events import EventBus
 from .exchanges.base import ExchangeAdapter
 from .exchanges.registry import (
+    listing_map,
     AdapterFactory,
     build_execution_adapters,
     build_market_adapters,
@@ -117,6 +119,12 @@ class AppContext:
     watchlist: list[str] = field(default_factory=list)
     poll_assets: list[str] = field(default_factory=list)
     poller: Any = None  # market.poller.TickerPoller when available
+    # Phase 3: narrow pool, market context (context.hub.ContextHub), meta-label store, shared HTTP client
+    pool: Any = None
+    context: Any = None
+    metalabel: Any = None
+    http: Any = None
+    listings: dict[str, dict[str, float | None]] = field(default_factory=dict)
     server: Any = None  # uvicorn Server while serving
     server_port: int | None = None  # bound port (port=0 -> OS assigned)
     stop_reason: str = ""
@@ -125,6 +133,106 @@ class AppContext:
     @property
     def mode(self) -> Mode:
         return self.settings.mode()
+
+
+def _build_context_layer(settings: Settings, secrets: Secrets, clock: Clock, db: Any, state: MarketState, stats: Any,
+                         metalabel: Any, listings: dict[str, dict[str, float | None]], http: Any) -> tuple[Any, Any, Any]:
+    """Phase 3: the asset pool (always - it works offline from its bundled fallback) and, with
+    ``context_enabled``, the context collectors + ContextHub.  Best effort: a failing component is
+    logged and left out (its factors then say "нет данных")."""
+    data = _data_dir(settings)
+    signal_venues = [e.name for e in settings.exchanges if e.enabled and e.role.value == "signal"]
+
+    def price_fn(asset: str) -> float | None:
+        # USD-quoted signal venues (Binance, KuCoin, ...): median of FRESH mids; None = the minute is not written
+        return state.median_mid(asset, clock.mono(), max(float(settings.max_data_age_ms), 5000.0), signal_venues)
+
+    bars = derivs = None
+    context_on = bool(getattr(settings, "context_enabled", True))
+    if context_on and http is None:
+        from .context.base import AiohttpGetter
+
+        http = AiohttpGetter()
+    if context_on:
+        try:
+            from .context.bars import MinuteBars
+            from .context.derivs import Derivatives
+
+            bars = MinuteBars(settings, clock, price_fn, http)
+            derivs = Derivatives(settings, clock, http, db=db)
+        except Exception:  # noqa: BLE001
+            log.exception("minute bars / derivatives not created")
+    pool = None
+    try:
+        from .universe.pool import AssetPool
+
+        pool = AssetPool(
+            settings, clock, http if context_on else None, cache_path=data / "asset_pool.json",
+            api_key=secrets.coingecko_api_key, listings_fn=lambda: listings,
+            stability_fn=bars.stability if bars is not None else None,
+            funding_interval_fn=derivs.funding_interval_h if derivs is not None else None,
+        )
+        if derivs is not None and hasattr(derivs, "_assets_fn"):
+            derivs._assets_fn = pool.assets
+    except Exception:  # noqa: BLE001
+        log.exception("asset pool not created; every asset is scanned")
+    if not context_on:
+        return pool, None, http
+    parts: dict[str, Any] = {"bars": bars, "derivs": derivs, "pool": pool, "metalabel": metalabel, "stats": stats}
+    builders: list[tuple[str, Callable[[], Any]]] = []
+
+    def calendar() -> Any:
+        from .context.calendar import BlsActuals, MacroCalendar
+
+        cal = MacroCalendar(settings, clock, http, cache_path=data / "macro_calendar.json")
+        parts["actuals"] = BlsActuals(settings, clock, http, cal, api_key=getattr(secrets, "bls_api_key", ""))
+        return cal
+
+    def markets() -> Any:
+        from .context.markets import TradFiMarkets
+
+        return TradFiMarkets(settings, clock, http)
+
+    def fear_greed() -> Any:
+        from .context.derivs import FearGreed
+
+        return FearGreed(settings, clock, http)
+
+    def etf() -> Any:
+        from .context.derivs import EtfFlows
+
+        return EtfFlows(settings, clock, http)
+
+    def reactions() -> Any:
+        from .context.reactions import EventReactionStore
+
+        return EventReactionStore(settings, clock, price_fn, db)
+
+    def news() -> Any:
+        from .context.classify import ClaudeClassifier, HeadlineClassifier, RuleClassifier
+        from .context.news import NewsFeed
+
+        claude = ClaudeClassifier(settings, clock, api_key=secrets.anthropic_api_key)
+        classifier = HeadlineClassifier(settings, clock, rules=RuleClassifier(), claude=claude)
+        return NewsFeed(settings, clock, http, classifier=classifier, db=db,
+                        assets_fn=pool.assets if pool is not None else (lambda: []))
+
+    builders = [("calendar", calendar), ("markets", markets), ("fear_greed", fear_greed), ("etf", etf),
+                ("reactions", reactions), ("news", news)]
+    for name, build in builders:
+        try:
+            parts[name] = build()
+        except Exception:  # noqa: BLE001
+            log.exception("context component %s not created; its factors will say 'нет данных'", name)
+            parts[name] = None
+    try:
+        from .context.hub import ContextHub
+
+        hub = ContextHub(settings, clock, **parts)
+    except Exception:  # noqa: BLE001
+        log.exception("context hub not created; quality uses the engine components only")
+        hub = None
+    return pool, hub, http
 
 
 def _data_dir(settings: Settings) -> Path:
@@ -152,6 +260,7 @@ def build_context(
     adapter_factory: AdapterFactory | None = None,
     config_path: str | os.PathLike[str] = "config.json",
     stop_flag: str | os.PathLike[str] | None = None,
+    http: Any = None,
 ) -> AppContext:
     """Wire every module together.  Touches no network (adapters connect in
     ``run_app``).  Optional components (Telegram, recorder, ticker poller, HTTP
@@ -167,7 +276,13 @@ def build_context(
     opps = OpportunityManager(settings, bus, clock, db=db, stats=stats)
     adapters = build_market_adapters(settings, secrets, bus, clock, adapter_factory=adapter_factory)
     pipeline = Pipeline(settings, bus, clock, state, detector, stats, opps, adapters, duration, db=db, diag=diag)
-    shadow = ShadowTrader(settings, bus, clock, db=db, diag=diag)
+    metalabel = MetaLabelStore(settings, clock, db=db)
+    shadow = ShadowTrader(settings, bus, clock, db=db, diag=diag, metalabel=metalabel)
+    pipeline.metalabel = metalabel
+    listings: dict[str, dict[str, float | None]] = {}
+    pool, hub, http = _build_context_layer(settings, secrets, clock, db, state, stats, metalabel, listings, http)
+    pipeline.pool = pool if getattr(settings, "pool_enabled", True) else None
+    pipeline.context = hub
     exec_adapters = build_execution_adapters(settings, secrets, bus, clock, adapters, db, adapter_factory=adapter_factory)
     risk = RiskManager(settings, db, clock, bus)
     execution = ExecutionEngine(settings, bus, clock, pipeline, opps, exec_adapters, risk, db, stats)
@@ -225,6 +340,11 @@ def build_context(
         config_path=cfg_path,
         stop_flag=Path(stop_flag) if stop_flag is not None else None,
         poller=poller,
+        pool=pool,
+        context=hub,
+        metalabel=metalabel,
+        http=http,
+        listings=listings,
     )
     try:
         ctx.app = create_app(ctx, config_path=cfg_path)
@@ -283,6 +403,9 @@ async def _upgrade_poll_universe(ctx: AppContext) -> None:
     for _attempt in range(_UNIVERSE_ATTEMPTS):
         poll = await _resolve_poll_assets(ctx)
         if poll:
+            await _refresh_listings(ctx)
+            if ctx.pipeline.pool is not None:
+                poll = [a for a in poll if ctx.pipeline.scanned(a)]  # Phase 3: only the narrow pool is polled
             ctx.poll_assets = poll
             assets = list(dict.fromkeys([*ctx.watchlist, *poll]))
             set_assets = getattr(ctx.poller, "set_assets", None)
@@ -293,6 +416,24 @@ async def _upgrade_poll_universe(ctx: AppContext) -> None:
         await asyncio.sleep(delay)
         delay = min(_UNIVERSE_RETRY_MAX_S, delay * 2.0)
     log.info("poll universe not resolved; polling the watchlist only")
+
+
+async def _refresh_listings(ctx: AppContext) -> None:
+    """asset -> {exchange: 24h volume} for the pool's venue step (best effort)."""
+    try:
+        fresh = await asyncio.wait_for(listing_map(ctx.settings, ctx.adapters), _UNIVERSE_TIMEOUT_S)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.info("listings unavailable (%s)", type(exc).__name__)
+        return
+    ctx.listings.clear()
+    ctx.listings.update(fresh)
+    if ctx.pool is not None:
+        try:
+            ctx.pool.reevaluate()
+        except Exception:  # noqa: BLE001
+            log.exception("pool reevaluate after listings failed")
 
 
 def _accepts_kwarg(func: Any, name: str) -> bool:
@@ -522,6 +663,12 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
     try:
         # ---- universe --------------------------------------------------
         ctx.watchlist = await _resolve_watchlist(ctx)
+        if ctx.pipeline.pool is not None:
+            narrowed = [a for a in ctx.watchlist if ctx.pipeline.scanned(a)]
+            dropped = [a for a in ctx.watchlist if a not in narrowed]
+            if dropped:
+                log.info("watchlist: outside the narrow pool, not streamed: %s", ", ".join(dropped))
+            ctx.watchlist = narrowed or ["BTC"]
         log.info("watchlist: %s", ", ".join(ctx.watchlist))
 
         # ---- adapters (background, never block the UI) -------------------
@@ -549,6 +696,8 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
                 raise
             except Exception:  # noqa: BLE001
                 log.exception("ticker poller start failed; WebSocket coverage only")
+        if ctx.context is not None:
+            helpers.append(asyncio.create_task(ctx.context.run(stop), name="latbot-context"))
         try:
             await ctx.bus.publish(events.DASHBOARD, ctx.pipeline.dashboard())
         except Exception:  # noqa: BLE001
@@ -606,6 +755,8 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
         stops = [_guarded(f"{a.name} stop", a.stop(), timeout_s=_SERVER_STOP_S) for a, _ in _adapters_to_start(ctx)]
         if stops:
             await asyncio.gather(*stops, return_exceptions=True)
+        if ctx.http is not None and hasattr(ctx.http, "close"):
+            await _guarded("context http close", ctx.http.close())
         try:
             ctx.stats.save()
         except Exception:  # noqa: BLE001

@@ -53,6 +53,7 @@ class Secrets:
     telegram_chat_id: str = ""
     coingecko_api_key: str = ""
     anthropic_api_key: str = ""  # optional: screenshot / trade analysis through the Claude API
+    bls_api_key: str = ""  # optional: BLS API v2 key (US jobs / CPI actuals); the public feeds work without it
     exchanges: dict[str, ExchangeCredentials] = field(default_factory=dict)
 
     def creds(self, exchange: str) -> ExchangeCredentials:
@@ -67,7 +68,9 @@ def load_secrets(env_path: str | os.PathLike[str] | None = ".env") -> Secrets:
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
         coingecko_api_key=os.getenv("COINGECKO_API_KEY", "").strip(),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
+        bls_api_key=os.getenv("BLS_API_KEY", "").strip(),
     )
+    register_secret(s.bls_api_key)
     register_secret(s.telegram_bot_token)
     register_secret(s.coingecko_api_key)
     register_secret(s.anthropic_api_key)

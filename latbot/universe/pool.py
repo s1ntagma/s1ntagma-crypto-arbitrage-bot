@@ -527,6 +527,10 @@ class AssetPool(PollingCollector):
         for a in include:
             if a not in cand:
                 cand.append(a)
+        # Stability source down (OKX unreachable, first minute after start): no candidate has a measurement.
+        # Then the step is skipped and noted - otherwise an outage would empty the pool to BTC/ETH.
+        self._skip_stability = bool(self._stability_fn is not None and cand
+                                    and not any(self._stability(a, now)[0] is not None for a in cand if a not in include))
 
         evals: dict[str, _Eval] = {}
         for a in cand:
@@ -642,7 +646,9 @@ class AssetPool(PollingCollector):
             return _Eval(pa=pa, fails=fails, notes=notes, pre_ok=False)  # already out: no stability noise
 
         # (4) stability
-        if self._stability_fn is not None:
+        if self._stability_fn is not None and getattr(self, "_skip_stability", False):
+            notes.append("стабильность: источник пока не дал данных ни по одной монете - шаг временно пропущен")
+        elif self._stability_fn is not None:
             st, age, origin = self._stability(asset, now)
             if st is None:
                 fails.append("нет данных о стабильности")
@@ -893,6 +899,8 @@ class AssetPool(PollingCollector):
         steps["turnover"] = "оборот целевой площадки проверяется на каждом сигнале (min_target_volume_quote)"
         if self._stability_fn is None:
             steps["stability"] = "источник стабильности не подключён: шаг пропущен"
+        elif getattr(self, "_skip_stability", False):
+            steps["stability"] = "OKX 1H: данных пока нет ни по одной монете - шаг временно пропущен"
         else:
             have = sum(1 for e in evals.values() if e.pa.stability)
             steps["stability"] = f"OKX 1H за 30 дн: данные есть для {have} из {len(evals)}"
