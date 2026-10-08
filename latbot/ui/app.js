@@ -502,6 +502,31 @@
   }
 
   // ------------------------------------------------------------------ renderers
+  // Icons are built with the DOM (never with markup strings).
+  function svgIcon(shapes) {
+    var NS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(NS, 'svg');
+    var attrs = { 'class': 'ico', viewBox: '0 0 24 24', width: '18', height: '18', fill: 'none', stroke: 'currentColor',
+      'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' };
+    Object.keys(attrs).forEach(function (k) { svg.setAttribute(k, attrs[k]); });
+    shapes.forEach(function (sh) {
+      var el = document.createElementNS(NS, sh[0]);
+      Object.keys(sh[1]).forEach(function (k) { el.setAttribute(k, sh[1][k]); });
+      svg.appendChild(el);
+    });
+    return svg;
+  }
+  function iconStop() {
+    return svgIcon([['polygon', { points: '7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2' }],
+      ['line', { x1: '12', y1: '8', x2: '12', y2: '12' }], ['line', { x1: '12', y1: '16', x2: '12.01', y2: '16' }]]);
+  }
+  function iconPlay() { return svgIcon([['polygon', { points: '6 4 20 12 6 20 6 4' }]]); }
+  function setButtonLabel(btn, icon, text) {
+    clear(btn);
+    btn.appendChild(icon);
+    btn.appendChild(h('span', { text: text }));
+  }
+
   function renderTopbar() {
     var badge = $('mode-badge');
     var live = state.mode === 'live';
@@ -520,13 +545,13 @@
     var closeBtn = $('close-positions-btn');
     var banner = $('emergency-banner');
     if (state.emergency) {
-      btn.textContent = '▶ RESUME TRADING';
+      setButtonLabel(btn, iconPlay(), 'RESUME TRADING');
       btn.className = 'btn btn-warn';
       closeBtn.classList.remove('hidden');
-      banner.textContent = '🛑 EMERGENCY STOP ACTIVE — new AUTO trades are blocked' + (state.emergencyReason ? ' · reason: ' + state.emergencyReason : '');
+      banner.textContent = 'EMERGENCY STOP ACTIVE — new AUTO trades are blocked' + (state.emergencyReason ? ' · reason: ' + state.emergencyReason : '');
       banner.classList.remove('hidden');
     } else {
-      btn.textContent = '🛑 EMERGENCY STOP';
+      setButtonLabel(btn, iconStop(), 'EMERGENCY STOP');
       btn.className = 'btn btn-danger';
       closeBtn.classList.add('hidden');
       banner.classList.add('hidden');
@@ -809,7 +834,7 @@
     });
 
     card.appendChild(h('div', { class: 'card-head' },
-      h('span', { class: 'card-pair', text: (opts.best ? '🔥 ' : '') + pairName(o), title: pairName(o) }),
+      h('span', { class: 'card-pair', text: pairName(o), title: pairName(o) }),
       h('span', { class: 'card-side ' + (side === 'LONG' ? 'long' : 'short'), text: side }),
       h('span', { class: 'tag ' + (o.mode === 'live' ? 'live' : 'paper'), text: String(o.mode || '').toUpperCase() }),
       h('span', { class: 'state-badge', text: o.state }),

@@ -482,7 +482,7 @@ def test_ui_contains_spec_elements(client):
     js = client.get("/static/app.js").text
     for needle in ("TOO FAST FOR HUMAN", "OPPORTUNITY EXPIRED", "CURRENT NET", "EXPECTED PROFIT", "#opp\\/", "hashchange", "300", "textContent",
                    # SELL step of an open manual position is never "too fast"; it can be resumed after a reload
-                   "IN POSITION", "WINDOW CLOSED", "in_position", "REPORT EXIT",
+                   "IN POSITION", "WINDOW CLOSED", "in_position", "Я УШЁЛ СО СДЕЛКИ", "Я ЗАШЁЛ", "Я КУПИЛ", "restoreOpenSession",
                    # backing out of the AUTO confirmation is not a cancel
                    "auto/deselect",
                    # unchecked risk / balance is grey, never green
