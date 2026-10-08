@@ -559,9 +559,7 @@ class Pipeline:
             self.diag.opportunity()
             q = opp.quality or {}
             if q:
-                vetoes = q.get("vetoes") or []
-                reason = str(vetoes[0]) if vetoes else f"качество {q.get('score')}/100 ниже {q.get('min_score', getattr(s, 'min_quality_score', 60))}"
-                self.diag.quality(bool(q.get("passed")), "" if q.get("passed") else reason)
+                self.diag.quality(bool(q.get("passed")), "" if q.get("passed") else _quality_reason_key(q))
             await self._opps.transition(opp.id, OppState.VALIDATING, "economics computed")
             await self._opps.transition(opp.id, OppState.VALID, f"net {econ.net_pct:+.2f}% on real book")
         if signal.target_move_pct * signal.direction >= s.move_threshold_pct:
@@ -749,3 +747,15 @@ class Pipeline:
                         if c.get(extra) is not None:
                             d[extra] = c[extra]
         return d
+
+
+def _quality_reason_key(q: dict[str, Any]) -> str:
+    """DIAG groups quality rejections by cause, not by text: veto texts carry countdowns and
+    numbers ("CPI через 90 с"), so the key is the vetoing factor's label or "score below minimum"."""
+    vetoes = [str(v) for v in (q.get("vetoes") or [])]
+    if vetoes:
+        v = vetoes[0]
+        if v.startswith("NET"):
+            return "вето: NET после издержек ≤ 0"
+        return "вето: " + (v.split(":", 1)[0].strip() if ":" in v else v)[:60]
+    return f"оценка ниже минимума {q.get('min_score', '')}".strip()

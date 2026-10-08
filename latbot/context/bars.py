@@ -251,6 +251,7 @@ class MinuteBars:
         self._hourly: dict[str, tuple[float, dict[int, float]]] = {}  # "BTC" -> (fetched_mono, closes)
         self._stability: dict[str, tuple[float, dict[str, Any]]] = {}  # asset -> (computed_mono, metrics)
         self.unavailable: dict[str, str] = {}  # asset -> why OKX has no data for it
+        self._stab_tried: set[str] = set()  # stability fetch attempted (measured, failed or no candles)
         # OKX pacing / backoff
         self._req_lock = asyncio.Lock()
         self._last_req_mono: float | None = None
@@ -699,6 +700,17 @@ class MinuteBars:
         due = [a for a in names if a not in self._stability or now_mono - self._stability[a][0] >= refresh_s]
         if not due or self._blocked():
             return 0
+        return await self._refresh_stability(due, now_mono, refresh_s)
+
+    def stability_pending(self, asset: str) -> bool:
+        """True while the stability of ``asset`` is unknown because it was never tried yet (first
+        start, new pool candidate, OKX not reached yet, a rate-limited pass that stopped early).
+        The pool then defers the stability step for it instead of excluding it; once a try
+        failed it is False (no data -> out)."""
+        a = _norm_asset(asset)
+        return self.stability(a) is None and a not in self._stab_tried
+
+    async def _refresh_stability(self, due: list[str], now_mono: float, refresh_s: float) -> int:
         n_hours = max(48, int(self._cfg("stability_days", 30.0) * 24))
         self.status.last_attempt_ts = self._clock.wall()
 
@@ -738,8 +750,10 @@ class MinuteBars:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                self._stab_tried.add(asset)
                 self._on_asset_error(asset, e)
                 continue
+            self._stab_tried.add(asset)
             self._on_ok()
             metrics = stability_metrics(rows, btc, jump_pct=jump, min_n=min_n,
                                         now_ts=self._clock.wall(), asset=asset)

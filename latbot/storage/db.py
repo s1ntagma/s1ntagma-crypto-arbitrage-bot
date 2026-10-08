@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS deriv_samples (
     json TEXT NOT NULL,
     PRIMARY KEY (asset, venue, ts)
 );
+CREATE INDEX IF NOT EXISTS ix_deriv_asset_ts ON deriv_samples(asset, ts);
 
 CREATE TABLE IF NOT EXISTS metalabel_outcomes (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -545,6 +546,23 @@ class Database:
         rows = self._json_rows("SELECT json FROM metalabel_outcomes ORDER BY seq DESC LIMIT ?", (int(limit),))
         rows.reverse()
         return rows
+
+    def prune_context(self, now_ts: float, *, deriv_days: float = 31.0, news_days: float = 30.0,
+                      reaction_days: float = 730.0, metalabel_keep: int = 20000) -> dict[str, int]:
+        """Phase 3 tables grow every minute: drop what no reader asks for any more
+        (derivative samples beyond the percentile window, old news, very old reactions,
+        meta-label outcomes beyond the store's own limit).  Returns rows deleted per table."""
+        out: dict[str, int] = {}
+        with self._lock:
+            for table, sql, args in (
+                ("deriv_samples", "DELETE FROM deriv_samples WHERE ts < ?", (now_ts - deriv_days * 86400.0,)),
+                ("news_items", "DELETE FROM news_items WHERE ts < ?", (now_ts - news_days * 86400.0,)),
+                ("event_reactions", "DELETE FROM event_reactions WHERE event_ts < ?", (now_ts - reaction_days * 86400.0,)),
+                ("metalabel_outcomes", "DELETE FROM metalabel_outcomes WHERE seq <= (SELECT MAX(seq) FROM metalabel_outcomes) - ?",
+                 (max(1, int(metalabel_keep)),)),
+            ):
+                out[table] = int(self._conn.execute(sql, args).rowcount or 0)
+        return out
 
     def journal_summary(self) -> dict[str, dict[str, Any]]:
         """trade_id -> {note, screenshots, analyzed} for the trades table."""

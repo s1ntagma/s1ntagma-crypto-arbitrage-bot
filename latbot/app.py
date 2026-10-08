@@ -76,6 +76,9 @@ _UNIVERSE_TIMEOUT_S = 60.0
 _UNIVERSE_RETRY_MIN_S = 15.0
 _UNIVERSE_RETRY_MAX_S = 120.0
 _UNIVERSE_ATTEMPTS = 20
+_POOL_FOLLOW_S = 30.0  # Phase 3: how often the REST poll set is matched to the pool
+_LISTINGS_REFRESH_S = 3600.0  # listings (asset -> venues, 24h volume) for the pool's venue step
+_LISTINGS_RETRY_S = 300.0
 _ADAPTER_START_TIMEOUT_S = 120.0
 _ADAPTER_RETRY_MIN_S = 5.0
 _ADAPTER_RETRY_MAX_S = 60.0
@@ -170,6 +173,7 @@ def _build_context_layer(settings: Settings, secrets: Secrets, clock: Clock, db:
             settings, clock, http if context_on else None, cache_path=data / "asset_pool.json",
             api_key=secrets.coingecko_api_key, listings_fn=lambda: listings,
             stability_fn=bars.stability if bars is not None else None,
+            stability_pending_fn=getattr(bars, "stability_pending", None) if bars is not None else None,
             funding_interval_fn=derivs.funding_interval_h if derivs is not None else None,
         )
         if derivs is not None and hasattr(derivs, "_assets_fn"):
@@ -178,7 +182,7 @@ def _build_context_layer(settings: Settings, secrets: Secrets, clock: Clock, db:
         log.exception("asset pool not created; every asset is scanned")
     if not context_on:
         return pool, None, http
-    parts: dict[str, Any] = {"bars": bars, "derivs": derivs, "pool": pool, "metalabel": metalabel, "stats": stats}
+    parts: dict[str, Any] = {"bars": bars, "derivs": derivs, "pool": pool, "metalabel": metalabel, "stats": stats, "db": db}
     builders: list[tuple[str, Callable[[], Any]]] = []
 
     def calendar() -> Any:
@@ -402,10 +406,7 @@ async def _upgrade_poll_universe(ctx: AppContext) -> None:
     delay = _UNIVERSE_RETRY_MIN_S
     for _attempt in range(_UNIVERSE_ATTEMPTS):
         poll = await _resolve_poll_assets(ctx)
-        if poll:
-            await _refresh_listings(ctx)
-            if ctx.pipeline.pool is not None:
-                poll = [a for a in poll if ctx.pipeline.scanned(a)]  # Phase 3: only the narrow pool is polled
+        if poll:  # (pool disabled: with the pool on, _follow_pool owns the poll set)
             ctx.poll_assets = poll
             assets = list(dict.fromkeys([*ctx.watchlist, *poll]))
             set_assets = getattr(ctx.poller, "set_assets", None)
@@ -418,7 +419,7 @@ async def _upgrade_poll_universe(ctx: AppContext) -> None:
     log.info("poll universe not resolved; polling the watchlist only")
 
 
-async def _refresh_listings(ctx: AppContext) -> None:
+async def _refresh_listings(ctx: AppContext) -> bool:
     """asset -> {exchange: 24h volume} for the pool's venue step (best effort)."""
     try:
         fresh = await asyncio.wait_for(listing_map(ctx.settings, ctx.adapters), _UNIVERSE_TIMEOUT_S)
@@ -426,7 +427,10 @@ async def _refresh_listings(ctx: AppContext) -> None:
         raise
     except Exception as exc:  # noqa: BLE001
         log.info("listings unavailable (%s)", type(exc).__name__)
-        return
+        return False
+    if not fresh:
+        log.info("listings: no exchange answered; the pool keeps its previous venue data")
+        return False
     ctx.listings.clear()
     ctx.listings.update(fresh)
     if ctx.pool is not None:
@@ -434,6 +438,43 @@ async def _refresh_listings(ctx: AppContext) -> None:
             ctx.pool.reevaluate()
         except Exception:  # noqa: BLE001
             log.exception("pool reevaluate after listings failed")
+    return True
+
+
+async def _follow_pool(ctx: AppContext, stop: asyncio.Event) -> None:
+    """Phase 3: the pool changes at runtime (CoinGecko answers, stability gets measured, every
+    pool_refresh_h).  Every 30 s the REST poll set is matched to watchlist + pool, so an asset that
+    enters the pool is polled and can be detected; listings for the pool's venue step are refreshed
+    hourly whether or not ticker polling is on.  WebSocket subscriptions stay as started."""
+    applied: set[str] | None = None
+    next_listings = 0.0
+    while not stop.is_set():
+        try:
+            mono = ctx.clock.mono()
+            if ctx.adapters and mono >= next_listings:
+                ok = await _refresh_listings(ctx)
+                next_listings = mono + (_LISTINGS_REFRESH_S if ok else _LISTINGS_RETRY_S)
+            pool = ctx.pipeline.pool
+            set_assets = getattr(ctx.poller, "set_assets", None)
+            if pool is not None and callable(set_assets) and ctx.settings.ticker_poll_enabled:
+                pool_assets = list(pool.assets())
+                wanted = list(dict.fromkeys([*ctx.watchlist, *pool_assets]))
+                if set(wanted) != applied:
+                    added = sorted(set(wanted) - (applied or set()))
+                    removed = sorted((applied or set()) - set(wanted))
+                    set_assets(wanted)
+                    ctx.poll_assets = [a for a in wanted if a not in ctx.watchlist]
+                    applied = set(wanted)
+                    log.info("ticker polling follows the pool: %d assets (+%s -%s)", len(wanted),
+                             ",".join(added) or "0", ",".join(removed) or "0")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("pool follow-up failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=_POOL_FOLLOW_S)
+        except asyncio.TimeoutError:
+            pass
 
 
 def _accepts_kwarg(func: Any, name: str) -> bool:
@@ -668,6 +709,12 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
             dropped = [a for a in ctx.watchlist if a not in narrowed]
             if dropped:
                 log.info("watchlist: outside the narrow pool, not streamed: %s", ", ".join(dropped))
+            # free WebSocket slots go to the next pool assets (the rest of the pool is REST-polled)
+            try:
+                extra = [a for a in ctx.pipeline.pool.assets() if a not in narrowed]
+            except Exception:  # noqa: BLE001
+                extra = []
+            narrowed += extra[: max(0, int(settings.ws_assets) - len(narrowed))]
             ctx.watchlist = narrowed or ["BTC"]
         log.info("watchlist: %s", ", ".join(ctx.watchlist))
 
@@ -690,12 +737,14 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
             # Phase-2 gates need); widen to the common universe once exchanges answer.
             try:
                 await _maybe_await(ctx.poller.start(list(ctx.watchlist)))
-                if settings.ticker_poll_enabled:
+                if settings.ticker_poll_enabled and ctx.pipeline.pool is None:
                     helpers.append(asyncio.create_task(_upgrade_poll_universe(ctx), name="latbot-universe"))
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
                 log.exception("ticker poller start failed; WebSocket coverage only")
+        if ctx.pool is not None:  # listings for the pool + (pool enabled) the REST poll set follows it
+            helpers.append(asyncio.create_task(_follow_pool(ctx, stop), name="latbot-pool-follow"))
         if ctx.context is not None:
             helpers.append(asyncio.create_task(ctx.context.run(stop), name="latbot-context"))
         try:

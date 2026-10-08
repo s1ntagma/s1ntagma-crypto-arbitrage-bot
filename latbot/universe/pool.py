@@ -323,6 +323,7 @@ class AssetPool(PollingCollector):
         stability_fn: Callable[[str], dict | None] | None = None,
         funding_interval_fn: Callable[[str], float | None] | None = None,
         fallback_path: Path | None = None,
+        stability_pending_fn: Callable[[str], bool] | None = None,
     ) -> None:
         refresh_h = _num(getattr(settings, "pool_refresh_h", POOL_DEFAULTS["pool_refresh_h"]))
         super().__init__(settings, clock, http, interval_s=max(60.0, (refresh_h or 12.0) * 3600.0))
@@ -331,6 +332,7 @@ class AssetPool(PollingCollector):
         self._listings_fn = listings_fn
         self._bars_fn = bars_fn
         self._stability_fn = stability_fn
+        self._stability_pending_fn = stability_pending_fn
         self._funding_interval_fn = funding_interval_fn
         self._fallback = load_fallback(fallback_path)
         fb = self._fallback
@@ -650,7 +652,14 @@ class AssetPool(PollingCollector):
             notes.append("стабильность: источник пока не дал данных ни по одной монете - шаг временно пропущен")
         elif self._stability_fn is not None:
             st, age, origin = self._stability(asset, now)
-            if st is None:
+            pending = st is None and self._stability_pending(asset)
+            if pending and asset in self._included_set:
+                # already in the pool, not measured yet (first start, refresh running): it stays until
+                # measured - otherwise the pool collapses to BTC/ETH while OKX is queried one by one
+                notes.append("стабильность: замер ещё не выполнялся - монета остаётся до замера")
+            elif pending:
+                fails.append("стабильность ещё не измерена (замер в очереди)")  # a NEW asset enters only measured
+            elif st is None:
                 fails.append("нет данных о стабильности")
             else:
                 pa.stability = dict(st, origin=origin, age_s=round(age, 1) if age is not None else None)
@@ -741,6 +750,17 @@ class AssetPool(PollingCollector):
         elif abs(mv) > lim:
             out.append(f"памп/дамп: макс. движение за 7 дн {abs(mv):.0f}% > {lim:g}%")
         return out
+
+    def _stability_pending(self, asset: str) -> bool:
+        """The stability source has not tried this asset yet (first start, new candidate):
+        the step is deferred, not failed - otherwise the pool collapses while it is measured."""
+        if self._stability_pending_fn is None:
+            return False
+        try:
+            return bool(self._stability_pending_fn(asset))
+        except Exception as e:  # noqa: BLE001
+            log.debug("asset pool: stability_pending_fn(%s) failed: %s", asset, e)
+            return False
 
     def _stability(self, asset: str, now: float) -> tuple[dict | None, float | None, str]:
         """(measurement, age_s, "live" | "cache"): stability_fn first, else the measurement

@@ -51,6 +51,7 @@ QUADRANTS = ("NEW_LONGS", "NEW_SHORTS", "SHORT_COVERING", "LONG_LIQUIDATION", "Q
 
 LIQ_PAGE_LIMIT = 100  # OKX max for liquidation-orders
 LIQ_MAX_PAGES = 3  # per asset per poll (pagination with after=<oldest ts>)
+_GET_TTL_S = 1.0  # get() memo: the hot path asks several times per book update
 LIQ_KEEP_S = 1200.0  # keep events a bit longer than the 15 m window
 LS_MAX_AGE_S = 900.0  # rubik 5 m bars: older than 3 bars -> no data
 INSTRUMENTS_REFRESH_S = 3600.0
@@ -228,6 +229,7 @@ class Derivatives(PollingCollector):
         self._ls: dict[str, tuple[float, float]] = {}  # asset -> (ratio, ts)
         self._ls_next_mono: dict[str, float] = {}
         self._loaded: set[str] = set()
+        self._get_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}  # asset -> (mono, get())
         self._opt_backoff_until = 0.0  # rate limited: all per-asset calls paused
         self._kind_pause_until = {"liquidations": 0.0, "long_short": 0.0}  # one part keeps failing
         self._db_warned = False
@@ -243,15 +245,29 @@ class Derivatives(PollingCollector):
 
     # ------------------------------------------------------------------ public
     def get(self, asset: str) -> dict[str, Any] | None:
-        """Latest fresh derivatives state of ``asset`` or None (no / stale data)."""
+        """Latest fresh derivatives state of ``asset`` or None (no / stale data).
+
+        Called on the hot path (quality score on every target-book refresh): the result is
+        memoised for ``_GET_TTL_S`` (the inputs change at most every poll, >= 30 s)."""
         a = str(asset or "").strip().upper()
+        mono = self._clock.mono()
+        hit = self._get_cache.get(a)
+        if hit is not None and 0.0 <= mono - hit[0] < _GET_TTL_S:
+            return None if hit[1] is None else dict(hit[1])
+        out = self._get(a)
+        if len(self._get_cache) > 500:
+            self._get_cache.clear()
+        self._get_cache[a] = (mono, out)
+        return None if out is None else dict(out)
+
+    def _get(self, a: str) -> dict[str, Any] | None:
         now = self._clock.wall()
         f = self._fresh_funding(a, now)
         o = self._fresh_oi(a, now)
         if f is None and o is None:
             return None
         ts = max(x for x in ((f or {}).get("funding_ts"), (o or {}).get("oi_ts")) if x is not None)
-        pct = self.funding_percentile(a)
+        pct, n_samples = self._funding_stats(a, now, f)
         ls = self._fresh_ls(a, now)
         out: dict[str, Any] = {
             "asset": a,
@@ -265,8 +281,8 @@ class Derivatives(PollingCollector):
             "next_funding_ts": f["next_funding_ts"] if f else None,
             "funding_cap": f["funding_cap"] if f else None,
             "funding_at_cap": f["funding_at_cap"] if f else None,
-            "funding_pct": pct[0] if pct else None,
-            "funding_n": self.funding_samples(a),
+            "funding_pct": pct,
+            "funding_n": n_samples,
             "funding_min_n": self.min_samples,
             "oi_usd": o["oi_usd"] if o else None,
             "oi_ccy": o["oi_ccy"] if o else None,
@@ -283,24 +299,32 @@ class Derivatives(PollingCollector):
         None when there is no fresh funding or fewer than ``derivs_min_samples`` samples."""
         a = str(asset or "").strip().upper()
         now = self._clock.wall()
-        f = self._fresh_funding(a, now)
-        if f is None or f["funding_rate_8h"] is None:
-            return None
-        vals = [v for ts, v in self._fund_hist.get(a, ()) if ts >= now - self.history_s]
-        n = len(vals)
-        if n < self.min_samples:
-            return None
-        cur = f["funding_rate_8h"]
+        pct, n = self._funding_stats(a, now, self._fresh_funding(a, now))
+        return None if pct is None else (pct, n)
+
+    def _funding_stats(self, a: str, now: float, f: dict[str, Any] | None) -> tuple[float | None, int]:
+        """(percentile of the current 8h funding or None, samples in the window) in ONE pass."""
+        lo = now - self.history_s
+        cur = None if f is None else f["funding_rate_8h"]
         tol = 1e-12
-        below = sum(1 for v in vals if v < cur - tol)
-        equal = sum(1 for v in vals if abs(v - cur) <= tol)
+        n = below = equal = 0
+        for ts, v in self._fund_hist.get(a, ()):
+            if ts < lo:
+                continue
+            n += 1
+            if cur is not None:
+                if v < cur - tol:
+                    below += 1
+                elif v <= cur + tol:
+                    equal += 1
+        if cur is None or n < self.min_samples:
+            return None, n
         return round(100.0 * (below + 0.5 * equal) / n, 1), n
 
     def funding_samples(self, asset: str) -> int:
         """Number of stored funding samples in the history window (for "история копится N/288")."""
         a = str(asset or "").strip().upper()
-        lo = self._clock.wall() - self.history_s
-        return sum(1 for ts, _ in self._fund_hist.get(a, ()) if ts >= lo)
+        return self._funding_stats(a, self._clock.wall(), None)[1]
 
     def funding_interval_h(self, asset: str) -> float | None:
         """Funding interval (hours) of the OKX USDT perpetual - known for EVERY listed perp, not only
@@ -365,6 +389,12 @@ class Derivatives(PollingCollector):
 
     # ------------------------------------------------------------------ polling
     async def poll_once(self) -> int:
+        try:
+            return await self._poll_once()
+        finally:
+            self._get_cache.clear()  # new data: the hot-path memo must not serve the old state
+
+    async def _poll_once(self) -> int:
         now_mono = self._clock.mono()
         tracked = self._tracked_assets()
         self._tracked = tracked
@@ -643,7 +673,8 @@ class Derivatives(PollingCollector):
 
     async def _load_history(self, asset: str) -> None:
         try:
-            rows = await _maybe_await(self._history_rows(asset))
+            # 30 days of samples: SQLite read + JSON decoding off the event loop (the feeds keep flowing)
+            rows = await _maybe_await(await asyncio.to_thread(self._history_rows, asset))
         except Exception as e:  # noqa: BLE001
             log.warning("derivs: cannot load samples of %s: %s", asset, _err(e))
             rows = None
@@ -653,6 +684,7 @@ class Derivatives(PollingCollector):
     def _ingest(self, asset: str, rows: Any) -> None:
         if not rows:
             return
+        self._get_cache.pop(asset, None)
         fh: list[tuple[float, float]] = list(self._fund_hist.get(asset, ()))
         oh: list[tuple[float, float]] = list(self._oi_hist.get(asset, ()))
         last = self._last_sample_ts.get(asset)

@@ -29,6 +29,9 @@ from typing import Any
 from .. import events
 from ..models import TERMINAL_STATES, Opportunity, OppState
 
+# expiry reasons that mean the last seen price is old (pipeline / OpportunityManager.sweep)
+_STALE_REASONS = frozenset({"target book stale", "no updates"})
+
 log = logging.getLogger(__name__)
 
 
@@ -66,7 +69,7 @@ class ShadowTrade:
     leverage_max: float = 1.0  # LeveragePlan.max_by_signal at entry (what the signal justified)
     stop_pct: float = 1.0
     stop_price: float = 0.0
-    barrier: str = ""  # "target" | "stop" | "time"
+    barrier: str = ""  # "target" | "stop" | "time" | "no_data" (closed without a fresh price: not learned)
     pnl_leveraged_quote: float | None = None
 
     def net_at(self, exit_price: float) -> float:
@@ -96,6 +99,7 @@ class ShadowTrader:
         self._closed: list[ShadowTrade] = []
         self.opened = 0
         self.closed = 0
+        self.no_data = 0  # closed without a fresh price (outcome unknown, not learned)
         self.skipped: dict[str, int] = {}
         self._unsubs = [
             bus.subscribe(events.OPP_NEW, self._on_new),
@@ -187,7 +191,14 @@ class ShadowTrader:
         except ValueError:
             return
         if state in TERMINAL_STATES:
-            self._close(t, t.last_exit_price, f"opportunity {state.value.lower()}: sold at last market price", "time")
+            reason = str(payload.get("reason") or "")
+            age_s = self._clock.wall() - t.last_update_ts
+            if reason in _STALE_REASONS or age_s > 2.0 * float(self._settings.move_window_s):
+                # the last price is old: the outcome is unknown - not a win, not a loss, never learned
+                self._close(t, t.last_exit_price, f"opportunity {state.value.lower()} ({reason or 'no fresh price'}): "
+                            "no fresh price, outcome unknown", "no_data")
+            else:
+                self._close(t, t.last_exit_price, f"opportunity {state.value.lower()}: sold at last market price", "time")
 
     # ---- bookkeeping -------------------------------------------------------
     def _skip(self, reason: str) -> None:
@@ -200,12 +211,17 @@ class ShadowTrader:
         t.exit_price = price
         t.exit_reason = reason
         t.barrier = barrier
-        t.actual_net_pct = t.net_at(price)
-        t.pnl_quote = t.capital_quote * t.actual_net_pct / 100.0
-        t.pnl_leveraged_quote = t.pnl_quote * max(1.0, t.leverage_max)
         self._closed.append(t)
         del self._closed[:-500]
         self.closed += 1
+        if barrier == "no_data":
+            self.no_data += 1
+            self._save(t)
+            log.info("shadow close %s %s@%s without a fresh price (not learned) - %s", t.id, t.asset, t.target, reason)
+            return
+        t.actual_net_pct = t.net_at(price)
+        t.pnl_quote = t.capital_quote * t.actual_net_pct / 100.0
+        t.pnl_leveraged_quote = t.pnl_quote * max(1.0, t.leverage_max)
         self._save(t)
         self._learn(t)
         log.info("shadow close %s %s@%s net %+.2f%% (expected %+.2f%%) - %s",
@@ -281,6 +297,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     closed = [r for r in rows if r.get("closed_ts") is not None and r.get("actual_net_pct") is not None]
     out = _stats(closed)
     out["open"] = sum(1 for r in rows if r.get("closed_ts") is None)
+    out["no_data"] = sum(1 for r in rows if r.get("barrier") == "no_data")
     out["by_target"] = _group(closed, "target")
     out["by_asset"] = _group(closed, "asset")
     graded = [dict(r, grade=r.get("grade") or "unknown") for r in closed]

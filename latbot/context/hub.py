@@ -61,16 +61,22 @@ def _ok(component: Any) -> bool:
 class ContextHub:
     def __init__(self, settings: Any, clock: Any, *, pool: Any = None, calendar: Any = None, news: Any = None,
                  markets: Any = None, derivs: Any = None, fear_greed: Any = None, etf: Any = None, bars: Any = None,
-                 reactions: Any = None, actuals: Any = None, stats: Any = None, metalabel: Any = None) -> None:
+                 reactions: Any = None, actuals: Any = None, stats: Any = None, metalabel: Any = None,
+                 db: Any = None) -> None:
         self._settings = settings
         self._clock = clock
         self.pool, self.calendar, self.news, self.markets = pool, calendar, news, markets
         self.derivs, self.fear_greed, self.etf, self.bars = derivs, fear_greed, etf, bars
         self.reactions, self.actuals, self.stats, self.metalabel = reactions, actuals, stats, metalabel
+        self.db = db
         self._watched: set[str] = set()
         self._surprised: set[str] = set()
         self._last_pool_mono = -1e18
-        self._last_stability_mono = -1e18
+        self._next_stability_mono = -1e18
+        self._stability_running = False
+        self._stability_asked: set[str] = set()
+        self._last_prune_mono = -1e18
+        self._corr_cache: dict[str, tuple[float, float | None]] = {}  # tradfi key -> (mono, corr with BTC)
         self._bootstrapped: set[str] = set()
         self._bg: set[asyncio.Task] = set()
 
@@ -156,22 +162,54 @@ class ContextHub:
                 if new and hasattr(self.bars, "bootstrap"):
                     self._bootstrapped.update(new)
                     self._spawn(self.bars.bootstrap(new), "context-bars-bootstrap")
-        refresh_s = self._s("stability_refresh_h", 24.0) * 3600.0
         if (self.bars is not None and self.pool is not None and hasattr(self.bars, "refresh_stability")
-                and mono - self._last_stability_mono >= refresh_s):
-            self._last_stability_mono = mono
+                and not self._stability_running):
             cands = list(self.pool.candidates()) if hasattr(self.pool, "candidates") else pool_assets
-            if cands:
+            fresh = [a for a in cands if a not in self._stability_asked]
+            # bars measures only what is due (missing, failed or older than stability_refresh_h): a pass
+            # with nothing due costs no request, so failed / new candidates are retried every few minutes
+            if cands and (mono >= self._next_stability_mono or fresh):
+                self._stability_running = True
+                self._stability_asked.update(cands)
+                self._next_stability_mono = mono + self._s("stability_retry_s", 600.0)
                 self._spawn(self._stability_then_reevaluate(cands), "context-stability")
+        self._propagate_surprises(now)
+        if self.db is not None and hasattr(self.db, "prune_context") and mono - self._last_prune_mono >= 3600.0:
+            self._last_prune_mono = mono
+            self._spawn(self._prune(now), "context-prune")
 
     async def _stability_then_reevaluate(self, assets: list[str]) -> None:
         try:
             await self.bars.refresh_stability(assets)
         finally:
+            self._stability_running = False
             try:
                 self.pool.reevaluate()
             except Exception:  # noqa: BLE001
                 log.exception("pool reevaluate after stability failed")
+
+    async def _prune(self, now: float) -> None:
+        try:
+            deleted = await asyncio.to_thread(
+                self.db.prune_context, now, deriv_days=self._s("derivs_history_days", 30.0) + 1.0,
+                news_days=self._s("news_keep_days", 30.0), metalabel_keep=int(self._s("metalabel_keep", 20000)))
+            if any(deleted.values()):
+                log.info("context tables pruned: %s", deleted)
+        except Exception:  # noqa: BLE001
+            log.exception("context table pruning failed")
+
+    def _propagate_surprises(self, now: float) -> None:
+        """The calendar's surprise sign (actual vs forecast from BLS, or an accepted squawk) is the
+        authoritative one: copy it to the reaction samples of recent releases (idempotent)."""
+        if self.calendar is None or self.reactions is None or not hasattr(self.reactions, "set_surprise"):
+            return
+        try:
+            recent = self.calendar.recent(now, 7200.0, "high")
+        except Exception:  # noqa: BLE001
+            return
+        for ev in recent:
+            if ev.surprise is not None and f"macro:{ev.id}" in self._watched:
+                self.reactions.set_surprise(f"macro:{ev.id}", ev.surprise)
 
     def _register_events(self, now: float, pool_assets: list[str]) -> None:
         majors = list(dict.fromkeys(["BTC", "ETH", *pool_assets[:5]]))
@@ -207,8 +245,8 @@ class ContextHub:
                         continue
                     for ev in cal.recent(now, 1800.0, "medium"):
                         if ev.event_type == m.get("event_type") and abs(float(m.get("ts", now)) - ev.ts) <= 900.0:
-                            cal.set_surprise(ev.id, int(m["surprise"]))
-                            self.reactions.set_surprise(f"macro:{ev.id}", int(m["surprise"]))
+                            if cal.set_surprise(ev.id, int(m["surprise"])):  # refused: an actual-based sign exists
+                                self.reactions.set_surprise(f"macro:{ev.id}", int(m["surprise"]))
                             self._surprised.add(m.get("id"))
                             break
         if len(self._watched) > 5000:
@@ -301,8 +339,20 @@ class ContextHub:
                     return {**row, "asset": a}
         return None
 
+    def _news_ok(self, now: float, whale: bool = False) -> bool:
+        n = self.news
+        if n is None:
+            return False
+        fn = getattr(n, "available", None)
+        if callable(fn):
+            try:
+                return bool(fn(now, whale=whale))
+            except Exception:  # noqa: BLE001
+                return False
+        return _ok(n)
+
     def _news(self, asset: str, d: int, now: float) -> Factor:
-        if self.news is None or not _ok(self.news):
+        if not self._news_ok(now):
             return self._f("news", False, detail="новостные источники недоступны")
         window = self._s("news_window_s", 1800.0)
         half = self._s("news_half_life_s", 900.0)
@@ -321,7 +371,7 @@ class ContextHub:
                        items=[it.id for it in used[:5]])
 
     def _whale(self, asset: str, d: int, now: float) -> Factor:
-        if self.news is None or not hasattr(self.news, "whale_flows") or not _ok(self.news):
+        if self.news is None or not hasattr(self.news, "whale_flows") or not self._news_ok(now, whale=True):
             return self._f("whale", False, detail="Whale Alert недоступен")
         net = 0.0
         flows = self.news.whale_flows(asset, now, 3600.0)
@@ -396,14 +446,13 @@ class ContextHub:
         mk = self.markets
         if mk is None or self.bars is None:
             return self._f("tradfi", False, detail="рынки США: нет источника")
-        btc_r = self.bars.returns("BTC", 240)
         parts, notes = [], []
         for key, scale, name in (("SPX_FUT", 0.3, "S&P фьючерс"), ("DXY", 0.15, "DXY")):
             q = mk.quote(key, now)
             if not q or not q.get("market_open"):
                 continue
             chg = _num(q.get("chg_15m_pct"))
-            corr = correlation(btc_r, mk.returns_1m(key, 240), 30) if hasattr(mk, "returns_1m") else None
+            corr = self._btc_corr(key)
             if chg is None or corr is None or abs(corr) < 0.2:
                 continue
             parts.append(_clip(chg / scale) * corr * d)
@@ -411,6 +460,20 @@ class ContextHub:
         if not parts:
             return self._f("tradfi", False, detail="рынки США закрыты, нет данных или связь с BTC слабая")
         return self._f("tradfi", True, score=_clip(sum(parts) / len(parts)), detail="; ".join(notes) + " (данные с задержкой ~10 мин)")
+
+    def _btc_corr(self, key: str) -> float | None:
+        """4 h correlation of 1-minute returns BTC vs a TradFi series; the hot path asks on every
+        book update, the inputs change once a minute -> cached for 60 s."""
+        mono = self._clock.mono()
+        hit = self._corr_cache.get(key)
+        if hit is not None and 0.0 <= mono - hit[0] < 60.0:
+            return hit[1]
+        mk = self.markets
+        corr = None
+        if mk is not None and self.bars is not None and hasattr(mk, "returns_1m"):
+            corr = correlation(self.bars.returns("BTC", 240), mk.returns_1m(key, 240), 30)
+        self._corr_cache[key] = (mono, corr)
+        return corr
 
     def _sentiment(self, asset: str, d: int, now: float) -> Factor:
         fg = self.fear_greed.get() if self.fear_greed is not None else None
@@ -427,6 +490,8 @@ class ContextHub:
     def _event_reaction(self, asset: str, d: int, now: float) -> Factor:
         if self.reactions is None or self.news is None:
             return self._f("event_reaction", False, detail="история реакций недоступна")
+        if not self._news_ok(now):
+            return self._f("event_reaction", False, detail="новостные источники недоступны: события не видны")
         recent = [it for it in self.news.relevant(asset, now, 1800.0, 0.7) if it.category not in ("market_move", "whale_transfer")]
         if not recent:
             return self._f("event_reaction", True, detail="свежих важных событий нет")
@@ -500,9 +565,8 @@ class ContextHub:
         for a in ("BTC", "ETH"):
             regime[a] = self.asset_stats(a)
         if self.bars is not None and self.markets is not None and hasattr(self.markets, "returns_1m"):
-            btc_r = self.bars.returns("BTC", 240)
-            regime["corr_btc_spx"] = correlation(btc_r, self.markets.returns_1m("SPX_FUT", 240), 30)
-            regime["corr_btc_dxy"] = correlation(btc_r, self.markets.returns_1m("DXY", 240), 30)
+            regime["corr_btc_spx"] = self._btc_corr("SPX_FUT")
+            regime["corr_btc_dxy"] = self._btc_corr("DXY")
         return {
             "ts": now,
             "event_window": self.event_window(now),

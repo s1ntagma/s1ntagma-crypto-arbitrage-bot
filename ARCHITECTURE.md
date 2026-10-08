@@ -971,8 +971,11 @@ margin venue); `recommended` includes the venue.  Funding (perp) = notional·rat
 * `Settings`: every field above; `ExchangeConfig`: `max_leverage=1.0`, `margin_kind="spot"`,
   `maintenance_margin_rate=0.005`, `borrow_rate_daily_pct=0.0`, `margin_open_fee_pct=0.0`;
   `Secrets`: optional `BLS_API_KEY`.  `min_target_volume_quote` default 500 000; `min_net_pct_show` stays 0.1.
-* Universe: when `pool_enabled`, the WS watchlist and the REST poll universe are the pool (∩ markets);
-  the mover ignores non-pool assets.
+* Universe: when `pool_enabled`, the WS watchlist = configured watchlist ∩ pool, free `ws_assets` slots
+  filled with the next pool assets (subscriptions fixed until restart); the REST poll set = watchlist ∪ pool
+  and follows the pool every 30 s (`app._follow_pool`, which also refreshes listings hourly); the mover
+  ignores non-pool assets.  Stability not tried yet (`bars.stability_pending`) keeps an asset that is already IN
+  the pool until measured (noted); a new candidate enters only measured; a failed try is "нет данных" → out; the hub retries failed/new candidates every 10 min.
 * `Opportunity` gets `quality: dict` (QualityReport.to_dict) and `leverage: dict` (LeveragePlan.to_dict),
   computed in the pipeline enricher on every upsert/refresh (no I/O: hub.factors is in-memory).
 * Shadow trading = training: every opportunity with NET ≥ `shadow_min_net_pct=0.1` is traded virtually

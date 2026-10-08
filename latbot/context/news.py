@@ -525,6 +525,27 @@ class NewsFeed(PollingCollector):
             n_tg = sum(1 for x in self._src.values() if x.kind == "telegram")
             self.status.note = f"{n_tg} telegram channels, {len(self._src) - n_tg} rss feeds"
 
+    # ------------------------------------------------------------------ availability
+    def available(self, now_wall: float | None = None, *, whale: bool = False) -> bool:
+        """True while at least one enabled source (``whale``: a Whale Alert channel) answered within
+        3x its own interval.  A feed whose sources are all down says "нет данных", never "нет новостей"."""
+        now = self._clock.wall() if now_wall is None else now_wall
+        for s in self._src.values():
+            if whale and not s.name.lower().startswith("whale_alert"):
+                continue
+            last = s.status.last_ok_ts
+            if s.status.enabled and last is not None and 0.0 <= now - last <= 3.0 * max(60.0, s.interval_s):
+                return True
+        return False
+
+    async def step(self) -> bool:
+        ok = await super().step()
+        if ok:  # a poll with no source due "succeeds" without fetching: the feed status follows its sources
+            lasts = [s.status.last_ok_ts for s in self._src.values() if s.status.last_ok_ts is not None]
+            self.status.ok = self.available()
+            self.status.last_ok_ts = max(lasts) if lasts else None
+        return ok
+
     # ------------------------------------------------------------------ polling
     async def poll_once(self) -> int:
         if self._http is None:
