@@ -567,7 +567,7 @@
   function tile(label, valueNode, cls) {
     return h('div', { class: 'tile' + (cls ? ' ' + cls : '') },
       h('div', { class: 'tile-label', text: label }),
-      h('div', { class: 'tile-value' }, valueNode));
+      h('div', { class: 'tile-value', title: valueNode instanceof Node ? valueNode.textContent : String(valueNode) }, valueNode));
   }
 
   function renderDashboard() {
@@ -717,6 +717,11 @@
     if (best && old && id === uiMemo.bestId) {
       flashChanged(old, fresh, '.card-net-value, .kv-v');
       markLightChanges(old, fresh);
+      // Keep the live chart node (and its focused/pressed window button) across card updates:
+      // only refreshChart()/setChartSeconds() redraw it.
+      var oc = old.querySelector('.lag-chart');
+      var nc = fresh.querySelector('.lag-chart');
+      if (oc && nc && oc.dataset.id === id) nc.parentNode.replaceChild(oc, nc);
     }
     clear(box);
     box.appendChild(fresh);
@@ -726,10 +731,12 @@
   }
 
   // ------------------------------------------------------------------ lag chart (best opportunity)
-  // Real mid prices of the movers and the target (GET /api/opportunities/{id}/chart), % from the window start.
-  // No history -> an honest empty state; nothing is interpolated or invented.
-  var chartCache = { id: null, seconds: 0, data: null, at: 0, busy: false };
+  // Real mid prices of the movers and the target (GET /api/opportunities/{id}/chart), all lines in %
+  // from one pre-move reference. No history -> an honest empty state; nothing is invented.
+  var chartCache = { id: null, seconds: 0, data: null, raw: '', at: 0 };
+  var chartBusy = false;
   var SVG_NS = 'http://www.w3.org/2000/svg';
+  var CHART_WINDOWS = [15, 30, 60];
 
   function svgNode(tag, attrs) {
     var el = document.createElementNS(SVG_NS, tag);
@@ -743,28 +750,30 @@
     return (t.slice(0, 2) || '?').toUpperCase();
   }
 
+  function chartVisible() {
+    return state.tab === 'opps' && !document.hidden && modalHidden('manual');
+  }
+
   function refreshChart(force) {
     var best = computeBest();
-    if (!best || chartCache.busy) return;
-    var now = Date.now();
+    if (!best || chartBusy || !chartVisible()) return;
     var same = chartCache.id === best.id && chartCache.seconds === state.chartSeconds;
-    if (!force && same && now - chartCache.at < 1800) return;
-    chartCache.busy = true;
+    if (!force && same && Date.now() - chartCache.at < 1800) return;
+    chartBusy = true;
     var id = best.id;
     var secs = state.chartSeconds;
     api('GET', oppPath(id, '/chart?seconds=' + secs)).then(function (r) {
-      chartCache.busy = false;
-      if (!r.ok) return;
-      chartCache = { id: id, seconds: secs, data: r.data, at: Date.now(), busy: false };
+      chartBusy = false;
       var cur = computeBest();
-      if (cur && cur.id === id && secs === state.chartSeconds) replaceChart(cur);
+      if (r.ok) {
+        var raw = JSON.stringify(r.data);
+        var unchanged = chartCache.id === id && chartCache.seconds === secs && chartCache.raw === raw;
+        chartCache = { id: id, seconds: secs, data: r.data, raw: raw, at: Date.now() };
+        if (!unchanged && cur && cur.id === id && secs === state.chartSeconds) updateChart(cur);
+      }
+      // The best opportunity or the window changed while this request was in flight: ask again now.
+      if (cur && (cur.id !== id || state.chartSeconds !== secs)) refreshChart(true);
     });
-  }
-
-  function replaceChart(o) {
-    var old = document.querySelector('#best-body .lag-chart');
-    if (!old || old.dataset.id !== o.id) return;
-    old.parentNode.replaceChild(renderLagChart(o), old);
   }
 
   function setChartSeconds(sec) {
@@ -772,68 +781,80 @@
     state.chartSeconds = sec;
     try { window.localStorage.setItem('latbot.chartSeconds', String(sec)); } catch (e) { /* storage blocked */ }
     var best = computeBest();
-    if (best) replaceChart(best);
+    if (best) updateChart(best);
     refreshChart(true);
   }
 
+  // Redraw legend + plot inside the existing chart node; the window buttons stay (focus and clicks survive).
+  function updateChart(o) {
+    var node = document.querySelector('#best-body .lag-chart');
+    if (!node || node.dataset.id !== o.id) return;
+    var parts = chartParts(o);
+    var oldLegend = node.querySelector('.chart-legend');
+    var oldFrame = node.querySelector('.chart-frame');
+    if (oldLegend) oldLegend.parentNode.replaceChild(parts.legend, oldLegend);
+    if (oldFrame) oldFrame.parentNode.replaceChild(parts.frame, oldFrame);
+    node.querySelectorAll('.tf').forEach(function (b) {
+      b.setAttribute('aria-pressed', num(b.dataset.sec) === state.chartSeconds ? 'true' : 'false');
+    });
+  }
+
+  function seriesOrder(series) {
+    return series.slice().sort(function (a, b) { return (a.role === 'target' ? 1 : 0) - (b.role === 'target' ? 1 : 0); });
+  }
+
   function chartPlot(data) {
-    var W = 600, H = 170, padL = 6, padR = 6, padT = 12, padB = 20;
+    // preserveAspectRatio=none stretches the plot to the frame; text and dots are HTML on top, so they never distort.
+    var W = 600, H = 150, padT = 10, padB = 10;
     var secs = num(data.seconds) || state.chartSeconds;
     var lo = 0, hi = 0;
     data.series.forEach(function (s) { s.points.forEach(function (p) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); }); });
     var span = hi - lo;
     if (span < 0.02) { lo -= 0.01; hi += 0.01; span = hi - lo; }
     lo -= span * 0.08; hi += span * 0.08;
-    var X = function (t) { return padL + ((t + secs) / secs) * (W - padL - padR); };
+    var X = function (t) { return ((t + secs) / secs) * W; };
     var Y = function (v) { return padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB); };
-    var svg = svgNode('svg', { 'class': 'chart-svg', viewBox: '0 0 ' + W + ' ' + H, preserveAspectRatio: 'none', role: 'img' });
+    var pctX = function (t) { return Math.max(0, Math.min(100, (X(t) / W) * 100)).toFixed(2) + '%'; };
+    var pctY = function (v) { return ((Y(v) / H) * 100).toFixed(2) + '%'; };
+    var plot = h('div', { class: 'chart-plot' });
+    var svg = svgNode('svg', { 'class': 'chart-svg', viewBox: '0 0 ' + W + ' ' + H, preserveAspectRatio: 'none', 'aria-hidden': 'true', focusable: 'false' });
     var grad = svgNode('linearGradient', { id: 'chart-fill-target', x1: '0', y1: '0', x2: '0', y2: '1' },
       svgNode('stop', { offset: '0%', style: 'stop-color:var(--neon);stop-opacity:0.32' }),
       svgNode('stop', { offset: '100%', style: 'stop-color:var(--neon);stop-opacity:0' }));
     svg.appendChild(svgNode('defs', {}, grad));
     for (var g = 1; g <= 3; g++) {
       var gy = padT + (g / 4) * (H - padT - padB);
-      svg.appendChild(svgNode('line', { 'class': 'chart-grid', x1: padL, x2: W - padR, y1: gy, y2: gy, 'vector-effect': 'non-scaling-stroke' }));
+      svg.appendChild(svgNode('line', { 'class': 'chart-grid', x1: 0, x2: W, y1: gy, y2: gy, 'vector-effect': 'non-scaling-stroke' }));
     }
-    svg.appendChild(svgNode('line', { 'class': 'chart-zero', x1: padL, x2: W - padR, y1: Y(0), y2: Y(0), 'vector-effect': 'non-scaling-stroke' }));
+    svg.appendChild(svgNode('line', { 'class': 'chart-zero', x1: 0, x2: W, y1: Y(0), y2: Y(0), 'vector-effect': 'non-scaling-stroke' }));
     var det = num(data.detected_at_s);
-    if (Number.isFinite(det) && det >= -secs && det <= 0) {
-      svg.appendChild(svgNode('line', { 'class': 'chart-detect', x1: X(det), x2: X(det), y1: padT, y2: H - padB, 'vector-effect': 'non-scaling-stroke' }));
-    }
+    var showDet = Number.isFinite(det) && det >= -secs && det <= 0;
+    if (showDet) svg.appendChild(svgNode('line', { 'class': 'chart-detect', x1: X(det), x2: X(det), y1: 0, y2: H, 'vector-effect': 'non-scaling-stroke' }));
     var signalIdx = 0;
-    var ordered = data.series.slice().sort(function (a, b) { return (a.role === 'target' ? 1 : 0) - (b.role === 'target' ? 1 : 0); });
-    ordered.forEach(function (s) {
+    seriesOrder(data.series).forEach(function (s) {
       var d = s.points.map(function (p, i) { return (i ? 'L' : 'M') + X(p[0]).toFixed(1) + ' ' + Y(p[1]).toFixed(1); }).join(' ');
       var cls = 'chart-line ' + s.role;
       if (s.role === 'signal') { signalIdx++; if (signalIdx > 1) cls += ' s' + Math.min(signalIdx, 3); }
       if (s.role === 'target') {
         var first = s.points[0], last = s.points[s.points.length - 1];
         svg.appendChild(svgNode('path', { 'class': 'chart-area', fill: 'url(#chart-fill-target)',
-          d: d + ' L' + X(last[0]).toFixed(1) + ' ' + (H - padB) + ' L' + X(first[0]).toFixed(1) + ' ' + (H - padB) + ' Z' }));
+          d: d + ' L' + X(last[0]).toFixed(1) + ' ' + H + ' L' + X(first[0]).toFixed(1) + ' ' + H + ' Z' }));
       }
       svg.appendChild(svgNode('path', { 'class': cls, d: d }));
       var end = s.points[s.points.length - 1];
-      svg.appendChild(svgNode('circle', { 'class': 'chart-end ' + s.role, cx: X(end[0]).toFixed(1), cy: Y(end[1]).toFixed(1), r: 4 }));
+      plot.appendChild(h('span', { class: 'chart-dot ' + s.role, 'aria-hidden': 'true', style: 'left:' + pctX(end[0]) + ';top:' + pctY(end[1]) }));
     });
-    var t1 = svgNode('text', { 'class': 'chart-axis', x: padL, y: H - 4 }); t1.textContent = '-' + secs + 's';
-    var t2 = svgNode('text', { 'class': 'chart-axis', x: W - padR, y: H - 4, 'text-anchor': 'end' }); t2.textContent = 'now';
-    svg.appendChild(t1); svg.appendChild(t2);
-    svg.setAttribute('aria-label', 'Price change over the last ' + secs + ' seconds: ' + data.series.map(function (s) {
-      var e = s.points[s.points.length - 1];
-      return exchangeLabel(s.exchange) + ' ' + fmtPct(e[1]);
-    }).join(', '));
-    return svg;
+    plot.insertBefore(svg, plot.firstChild);
+    if (showDet) plot.appendChild(h('span', { class: 'chart-tag', 'aria-hidden': 'true', text: 'signal', style: 'left:' + pctX(det) }));
+    var axis = h('div', { class: 'chart-axis', 'aria-hidden': 'true' }, h('span', { text: '-' + secs + ' s' }),
+      h('span', { text: data.unit === 'pct_from_pre_move' ? '0 % = price before the move' : '0 % = window start' }), h('span', { text: 'now' }));
+    var label = 'Price change over the last ' + secs + ' seconds: ' + data.series.map(function (s) {
+      return exchangeLabel(s.exchange) + ' ' + fmtPct(s.points[s.points.length - 1][1]);
+    }).join(', ');
+    return h('div', { class: 'chart-wrap', role: 'img', 'aria-label': label }, plot, axis);
   }
 
-  function renderLagChart(o) {
-    var wrap = h('div', { class: 'lag-chart', 'data-id': o.id });
-    var toggle = h('div', { class: 'chart-toggle', role: 'group', 'aria-label': 'Chart window' });
-    [15, 30, 60].forEach(function (sec) {
-      toggle.appendChild(h('button', {
-        class: 'tf', type: 'button', text: sec + 's', 'aria-pressed': state.chartSeconds === sec ? 'true' : 'false',
-        onclick: function () { setChartSeconds(sec); }
-      }));
-    });
+  function chartParts(o) {
     var ready = chartCache.id === o.id && chartCache.seconds === state.chartSeconds && chartCache.data;
     var frame = h('div', { class: 'chart-frame' });
     var legend = h('div', { class: 'chart-legend' });
@@ -843,16 +864,30 @@
       frame.appendChild(h('div', { class: 'chart-empty', text: 'Not enough real price points in this window yet. The chart shows only measured prices; nothing is drawn without data.' }));
     } else {
       frame.appendChild(chartPlot(chartCache.data));
-      chartCache.data.series.slice().sort(function (a, b) { return (a.role === 'target' ? 1 : 0) - (b.role === 'target' ? 1 : 0); }).forEach(function (s) {
+      seriesOrder(chartCache.data.series).forEach(function (s) {
         var last = s.points[s.points.length - 1][1];
         legend.appendChild(h('span', { class: 'chart-chip ' + s.role },
           h('span', { class: 'badge', 'aria-hidden': 'true', text: initials(s.exchange) }),
           h('span', { class: 'cn', text: exchangeLabel(s.exchange) + (s.role === 'target' ? ' (target)' : '') }),
-          h('span', { class: 'cv ' + (last >= 0 ? 'pos' : 'neg'), text: fmtPct(last) })));
+          h('span', { class: 'cv ' + (last > 0 ? 'pos' : last < 0 ? 'neg' : 'muted'), text: fmtPct(last) })));
       });
     }
-    wrap.appendChild(h('div', { class: 'chart-head' }, legend, toggle));
-    wrap.appendChild(frame);
+    return { frame: frame, legend: legend };
+  }
+
+  function renderLagChart(o) {
+    // aria-live off: the chart refreshes every 2 s and must not be re-announced inside the polite best panel.
+    var wrap = h('div', { class: 'lag-chart', 'data-id': o.id, 'aria-live': 'off' });
+    var toggle = h('div', { class: 'chart-toggle', role: 'group', 'aria-label': 'Chart window' });
+    CHART_WINDOWS.forEach(function (sec) {
+      toggle.appendChild(h('button', {
+        class: 'tf', type: 'button', text: sec + 's', 'data-sec': String(sec), 'aria-pressed': state.chartSeconds === sec ? 'true' : 'false',
+        onclick: function () { setChartSeconds(sec); }
+      }));
+    });
+    var parts = chartParts(o);
+    wrap.appendChild(h('div', { class: 'chart-head' }, parts.legend, toggle));
+    wrap.appendChild(parts.frame);
     return wrap;
   }
 
@@ -1317,6 +1352,7 @@
   function setTab(name) {
     state.tab = name;
     placeStrips(name);
+    if (name === 'opps') setTimeout(function () { refreshChart(true); }, 0);
     document.querySelectorAll('.tab').forEach(function (b) { b.setAttribute('aria-selected', b.dataset.tab === name ? 'true' : 'false'); });
     ['opps', 'trades', 'stats', 'diag'].forEach(function (n) { $('tab-' + n).classList.toggle('hidden', n !== name); });
     if (name === 'trades' && !state.tradesLoaded) loadTrades();
@@ -1427,7 +1463,7 @@
       kvRows($('tsum-body'), [
         ['Trades', String(t.trades || 0)], ['Finished', String(t.finished || 0)], ['Open', String(t.open || 0)],
         ['Win rate', rateOrDash(t.win_rate)], ['Avg expected NET', pctOrDash(t.avg_expected_net_pct)],
-        ['Avg actual NET', pctOrDash(t.avg_actual_net_pct)], ['Realized P&L', fmtMoney(t.pnl_quote || 0, '', { sign: true })]
+        ['Avg actual NET', pctOrDash(t.avg_actual_net_pct)], ['Realized P&L', fmtMoney(t.pnl_quote || 0, displayQuote(), { sign: true })]
       ]);
     });
     api('GET', '/api/shadow?limit=100').then(function (r) {
@@ -1438,7 +1474,7 @@
         ['Status', d.enabled ? 'ON (no orders, virtual)' : 'OFF (shadow_trading=false)'],
         ['Open', String(s.open || 0)], ['Closed', String(s.closed || 0)], ['Win rate', rateOrDash(s.win_rate)],
         ['Avg expected NET', pctOrDash(s.avg_expected_net_pct)], ['Avg actual NET', pctOrDash(s.avg_actual_net_pct)],
-        ['Target reached', String(s.target_reached || 0)], ['Virtual P&L', fmtMoney(s.pnl_quote || 0, '', { sign: true })],
+        ['Target reached', String(s.target_reached || 0)], ['Virtual P&L', fmtMoney(s.pnl_quote || 0, displayQuote(), { sign: true })],
         ['Skipped', Object.keys(s.skipped || {}).map(function (k) { return k + ': ' + s.skipped[k]; }).join(', ') || '0']
       ]);
       var sb = $('strategy-body');
@@ -1453,7 +1489,7 @@
             h('td', { class: 'num', text: pctOrDash(g.avg_expected_net_pct) }),
             h('td', { class: 'num ' + (num(g.avg_actual_net_pct) >= 0 ? 'pos' : 'neg'), text: pctOrDash(g.avg_actual_net_pct) }),
             h('td', { class: 'num', text: String(g.target_reached) }),
-            h('td', { class: 'num', text: fmtMoney(g.pnl_quote || 0, '', { sign: true }) })));
+            h('td', { class: 'num', text: fmtMoney(g.pnl_quote || 0, displayQuote(), { sign: true }) })));
         });
       });
       var body = $('shadow-body');
@@ -1836,7 +1872,7 @@
       var t = m.trade || {};
       var pnl = num(t.realized_pnl_quote);
       var rep = num(t.user_reported_pnl_quote);
-      m.refs.returnIn = h('span', { class: 'big' });
+      m.refs.returnIn = h('span', { class: 'strong' });
       body.appendChild(h('div', { class: 'result' },
         h('div', { class: 'alert ok', text: 'Сделка завершена и сохранена' }),
         h('div', { class: 'big ' + (pnl >= 0 ? 'pos' : 'neg'), text: fmtMoney(t.realized_pnl_quote, q, { sign: true }) + ' по твоей цене выхода' }),
@@ -2238,7 +2274,7 @@
       body.appendChild(h('div', { class: 'modal-actions' },
         h('button', { class: 'btn btn-ghost', type: 'button', text: 'CANCEL', title: 'close without executing — nothing is cancelled, the opportunity stays on the board', disabled: a.busy, onclick: closeAuto }),
         h('button', { class: 'btn btn-ghost', type: 'button', text: 'RE-CHECK', disabled: a.busy, onclick: function () { openAuto(a.id); } }),
-        h('button', { class: 'btn btn-auto', type: 'button', text: a.busy ? 'EXECUTING…' : 'EXECUTE', disabled: a.busy || invalid, onclick: confirmAuto })));
+        h('button', { class: 'btn btn-primary', type: 'button', text: a.busy ? 'EXECUTING…' : 'EXECUTE', disabled: a.busy || invalid, onclick: confirmAuto })));
       return;
     }
     // executing / done
@@ -2504,9 +2540,16 @@
     });
     $('hero-scroll').addEventListener('click', function () {
       var target = $('filters');
-      if (target && target.scrollIntoView) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      // #filters has scroll-margin-top = sticky top bar height, so the chips are not hidden behind it.
+      if (target && target.scrollIntoView) target.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' });
     });
     $('hero-diag').addEventListener('click', function () { setTab('diag'); window.scrollTo(0, 0); });
+    document.querySelector('.brand').addEventListener('click', function (ev) {
+      ev.preventDefault();
+      setTab('opps');
+      window.scrollTo(0, 0);
+    });
     $('trades-refresh').addEventListener('click', loadTrades);
     $('stats-refresh').addEventListener('click', loadStats);
     $('diag-refresh').addEventListener('click', loadDiag);

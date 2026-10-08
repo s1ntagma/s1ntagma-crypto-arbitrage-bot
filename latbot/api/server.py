@@ -146,36 +146,75 @@ def _decimate(points: list[tuple[float, float]], limit: int) -> list[tuple[float
     return out
 
 
+def _finite(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _chart_lines(settings: Any, opp: Any) -> list[tuple[str, str]]:
+    """First mover, then the strongest other REAL movers (moved >= move_threshold_pct in the
+    signal's direction), then the target.  ``signal.reacted`` holds every fresh exchange,
+    flat and opposite ones included, so it is filtered here."""
+    d = 1 if int(getattr(opp, "direction", 1) or 1) >= 0 else -1
+    thr = float(getattr(settings, "move_threshold_pct", 0.0) or 0.0)
+    reacted = dict(getattr(getattr(opp, "signal", None), "reacted", None) or {})
+    skip = {opp.first_mover, opp.target_exchange}
+    extra = sorted(
+        ((ex, float(m)) for ex, m in reacted.items() if ex not in skip and _finite(m) and float(m) * d >= thr),
+        key=lambda kv: (-kv[1] * d, kv[0]),
+    )
+    lines = [] if opp.first_mover == opp.target_exchange else [(opp.first_mover, "signal")]
+    lines += [(ex, "signal") for ex, _ in extra[:_CHART_MAX_MOVERS]]
+    lines.append((opp.target_exchange, "target"))
+    return lines
+
+
 def build_chart(ctx: Any, opp: Any, seconds: int) -> dict[str, Any]:
     """Real mid-price history of the movers and the target around an opportunity.
 
-    Each line is the % change from its first point INSIDE the window, x = seconds
-    relative to the anchor (now, or the expiry of a finished opportunity).  A
-    stream with fewer than two real points is not a line; nothing is interpolated.
+    x = seconds relative to the anchor (now, or the expiry of a finished opportunity).
+    y = % change from ONE shared reference: the last real price of each exchange before the
+    move started (``first_move_start_mono - move_window_s``), so the vertical gap between the
+    movers and the target is the lag the card quotes, even when the move is older than the
+    window.  When that reference is no longer in the history (trimmed) every line falls back
+    to its first point in the window.  The price in effect at the window's left edge is the
+    last real observation before it (carried forward, never interpolated).  A stream with
+    fewer than two real points is not a line.
     """
     state = getattr(ctx, "state", None)
     settings = getattr(ctx, "settings", None)
     history_s = int(getattr(settings, "price_history_s", 60) or 60)
     seconds = max(5, min(int(seconds), history_s))
     expired = getattr(opp, "expired_mono", None)
-    anchor = float(expired) if getattr(opp, "is_terminal", False) and expired else _now(ctx)
+    anchor = float(expired) if getattr(opp, "is_terminal", False) and _finite(expired) else _now(ctx)
     out: dict[str, Any] = {
         "opp_id": opp.id, "asset": opp.asset, "seconds": seconds, "unit": "pct_from_window_start",
-        "detected_at_s": round(float(opp.first_seen_mono) - anchor, 3), "series": [], "has_data": False,
+        "detected_at_s": round(float(opp.first_seen_mono) - anchor, 3), "move_started_at_s": None,
+        "series": [], "has_data": False,
     }
-    if state is None or not hasattr(state, "mid_series"):
+    if state is None or not hasattr(state, "mid_series") or not hasattr(state, "mid_at"):
         return out
-    reacted = [x for x in (getattr(opp.signal, "reacted", None) or {}) if x != opp.target_exchange]
-    movers = [opp.first_mover] + [x for x in reacted if x != opp.first_mover]
-    lines = [(x, "signal") for x in movers[: 1 + _CHART_MAX_MOVERS] if x != opp.target_exchange]
-    lines.append((opp.target_exchange, "target"))
+    start = getattr(getattr(opp, "signal", None), "first_move_start_mono", None)
+    ref = float(start) - float(getattr(settings, "move_window_s", 0.0) or 0.0) if _finite(start) else None
+    if _finite(start):
+        out["move_started_at_s"] = round(float(start) - anchor, 3)
     lo = anchor - seconds
-    for exchange, role in lines:
-        window = [(m, p) for m, p in state.mid_series(exchange, opp.asset) if lo <= m <= anchor and p > 0]
+    raw: list[tuple[str, str, list[tuple[float, float]], float | None]] = []
+    for exchange, role in _chart_lines(settings, opp):
+        series = list(state.mid_series(exchange, opp.asset))
+        window = [(m, p) for m, p in series if lo <= m <= anchor and _finite(p) and p > 0]
+        edge = state.mid_at(exchange, opp.asset, lo)
+        if _finite(edge) and edge > 0 and (not window or window[0][0] > lo):
+            window.insert(0, (lo, float(edge)))
         if len(window) < 2:
             continue
-        base = window[0][1]
-        pts = _decimate([(round(m - anchor, 3), round((p / base - 1.0) * 100.0, 4)) for m, p in window], _CHART_MAX_POINTS)
+        base = state.mid_at(exchange, opp.asset, ref) if ref is not None else None
+        raw.append((exchange, role, window, float(base) if _finite(base) and base > 0 else None))
+    shared = bool(raw) and all(b is not None for *_, b in raw)
+    if shared:
+        out["unit"] = "pct_from_pre_move"
+    for exchange, role, window, base in raw:
+        b = base if shared and base is not None else window[0][1]
+        pts = _decimate([(round(m - anchor, 3), round((p / b - 1.0) * 100.0, 4)) for m, p in window], _CHART_MAX_POINTS)
         out["series"].append({"exchange": exchange, "role": role, "points": [list(p) for p in pts]})
     out["has_data"] = bool(out["series"])
     return out

@@ -133,6 +133,21 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             await page.wait_for_selector("#tab-opps:not(.hidden) #strip-slot #strips", timeout=3000)
             await page.click("#hero-scroll")
             await page.wait_for_function("document.getElementById('filters').getBoundingClientRect().top < 300", timeout=3000)
+            await page.wait_for_timeout(600)  # smooth scroll settles
+            assert await page.evaluate(
+                "document.getElementById('filters').getBoundingClientRect().top >= document.querySelector('.topbar').getBoundingClientRect().bottom - 1"
+            ), "filters scrolled under the sticky top bar"
+            # chart window buttons keep keyboard focus across the 2 s refreshes and card updates
+            await page.evaluate("window.scrollTo(0, 0)")
+            await page.focus("#best-body .tf[data-sec='60']")
+            await page.keyboard.press("Enter")
+            await page.wait_for_selector("#best-body .tf[data-sec='60'][aria-pressed='true']", timeout=3000)
+            await page.wait_for_timeout(2600)
+            assert await page.evaluate("document.activeElement && document.activeElement.dataset.sec") == "60"
+            await page.click("#best-body .tf[data-sec='30']")
+            await page.wait_for_selector("#best-body .tf[data-sec='30'][aria-pressed='true']", timeout=3000)
+            # the closed settings drawer is not focusable
+            assert await page.evaluate("getComputedStyle(document.getElementById('settings-drawer')).visibility") == "hidden"
 
             # 3. filters really filter
             await page.fill("#f-minnet", "50")  # nothing has NET >= 50 %
@@ -168,6 +183,10 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             await page.wait_for_selector("#trades-body tr", timeout=5000)
             row = page.locator("#trades-body tr").first
             assert "EXECUTING" in await row.inner_text()
+            chart_calls: list[str] = []
+            page.on("request", lambda req: chart_calls.append(req.url) if "/chart" in req.url else None)
+            await page.wait_for_timeout(2600)
+            assert chart_calls == [], f"lag chart polled while hidden: {chart_calls}"
 
             # 5. JOURNAL: note saved on the server, ANALYZE honestly disabled without a key
             await row.locator("button:has-text('JOURNAL')").click()
@@ -206,6 +225,8 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             assert "BTC" in await page.locator("#shadow-body").inner_text()
             assert "ON" in await page.locator("#shadow-sum-body").inner_text()
             assert "Trades" in await page.locator("#tsum-body").inner_text()
+            assert "$" not in await page.locator("#tsum-body").inner_text()  # money in the venue's EUR, not '$'
+            assert "€" in await page.locator("#shadow-sum-body").inner_text()
 
             # 8. the session comes back by itself after a reload, escorts to the target, saves the actual result
             await page.reload(wait_until="domcontentloaded")
