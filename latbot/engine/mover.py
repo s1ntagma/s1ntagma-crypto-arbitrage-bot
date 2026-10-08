@@ -322,13 +322,23 @@ class MoveDetector:
 
         # ---- step 4: learning (execution exchanges crossing later) ---------
         exec_exchanges = set(s.execution_exchanges())
-        first_move_now = moves[ep.first_mover][0] if ep.first_mover in moves else 0.0
+        if s.simple_mode:
+            # the lag is measured against the leader, so the catch-up must be too (same reference)
+            ref_ex = self._leader(asset)
+            rc = cross.get(ref_ex) if ref_ex is not None else None
+            ref_ok = bool(ref_ex in moves and rc is not None and rc.crossed and rc.direction == direction)
+            ref_start = rc.cross_mono if ref_ok and rc is not None else ep.start_mono
+        else:
+            ref_ex, ref_ok, ref_start = ep.first_mover, ep.first_mover in moves, ep.start_mono
+        first_move_now = moves[ref_ex][0] if ref_ok else 0.0
         for ex in new_crossings:
-            if ex == ep.first_mover or ex in ep.reacted or ex not in exec_exchanges:
+            if ex == ep.first_mover or ex == ref_ex or ex in ep.reacted or ex not in exec_exchanges:
                 continue
             if cross[ex].direction != direction:
                 continue
-            delay = max(0.0, now - ep.start_mono)
+            if s.simple_mode and not ref_ok:
+                continue  # the leader has not moved yet: nothing to measure this reaction against
+            delay = max(0.0, now - ref_start)
             ref = first_move_now * direction
             if ref > 0:
                 ratio = (moves[ex][0] * direction) / ref

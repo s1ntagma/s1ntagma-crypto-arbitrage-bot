@@ -68,6 +68,16 @@ class RidePosition:
     target_peak: float | None = None  # best exit price on the target since the entry
     peak_net_pct: float = field(default=float("-inf"))
     last_fresh_mono: float | None = None
+    first_move_pct: float | None = None  # the leader's signed move when the position was opened
+    target_move_pct: float | None = None  # the target's signed move when the position was opened
+
+    def set_anchors(self, leader_mid: float | None, target_mid: float | None) -> None:
+        """Pre-move prices from the signed moves measured at the entry: price / (1 + move / 100).  An
+        anchor whose price is missing now stays unset and is filled from a later view."""
+        if self.leader_anchor is None and leader_mid and self.first_move_pct is not None:
+            self.leader_anchor = leader_mid / (1.0 + float(self.first_move_pct) / 100.0)
+        if self.target_anchor is None and target_mid and self.target_move_pct is not None:
+            self.target_anchor = target_mid / (1.0 + float(self.target_move_pct) / 100.0)
 
     def net_at(self, exit_price: float) -> float:
         if self.entry_price <= 0 or exit_price <= 0:

@@ -70,7 +70,13 @@ class DurationEstimator:
         if opp is not None:
             result = max(result, age + 0.1)
         if getattr(s, "simple_mode", False):
-            # simple mode: the window never exceeds the hold limit (ride: the entry window)
-            cap = float(s.ride_entry_max_age_s) if getattr(s, "ride_enabled", False) else float(s.simple_max_hold_s)
-            result = min(result, cap)
+            # simple mode: the window never exceeds the hold limit (ride: the entry window, which is measured
+            # from the leader's move - an offer created late in it gets only what is left)
+            if getattr(s, "ride_enabled", False):
+                first_seen = opp.first_seen_mono if opp is not None else now_mono
+                start = float(signal.first_move_start_mono or first_seen)
+                cap = float(s.ride_entry_max_age_s) - max(0.0, first_seen - start)
+            else:
+                cap = float(s.simple_max_hold_s)
+            result = min(result, max(0.0, cap))
         return result

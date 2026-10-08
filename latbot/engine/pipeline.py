@@ -776,32 +776,56 @@ class Pipeline:
         await self._bus.publish(events.DASHBOARD, self.dashboard())
         return expired
 
-    def market_view(self, asset: str, target: str, leader: str, base_amount: float, direction: int) -> dict[str, Any] | None:
-        """Latest prices for an open position (ride the leader): the exit VWAP on the target for
-        ``base_amount`` (book, or the ticker's bid/ask on a REST-only venue), the target mid and the
-        leader mid.  None when either side has no fresh data - no data, no decision."""
-        now = self._clock.mono()
-        bound = max(2.0 * self._freshness_bound("poll"), 5000.0)
-        if not (self._state.is_fresh(target, asset, now, bound) and self._state.is_fresh(leader, asset, now, bound)):
-            return None
+    def _view_bound_ms(self) -> float:
+        return max(2.0 * self._freshness_bound("poll"), 5000.0)
+
+    def leader_price(self, asset: str, leader: str, now_mono: float | None = None) -> float | None:
+        """The leader's latest price when it is fresh (its own last point, else a fresh ticker); None
+        otherwise - a frozen stream must not look like a leader that stopped falling."""
+        now = self._clock.mono() if now_mono is None else now_mono
+        bound = self._view_bound_ms()
+        series = self._state.mid_series(leader, asset)
+        if series and (now - series[-1][0]) * 1000.0 <= bound and self._state.is_fresh(leader, asset, now, bound):
+            return float(series[-1][1])
+        t = self._state.ticker(leader, asset)
+        if t is not None and t.bid and t.ask and (now - t.ts.recv_mono) * 1000.0 <= bound:
+            return (float(t.bid) + float(t.ask)) / 2.0
+        return None
+
+    def target_exit_price(self, book: OrderBook | None, ticker: Ticker | None, base_amount: float, direction: int,
+                          now_mono: float, bound_ms: float) -> tuple[float, float, bool] | None:
+        """(exit VWAP for ``base_amount``, mid, approximate) on the target - never for a size the visible book
+        cannot carry (hard rule 2).  A REST-only venue has only a ticker: its top of book is charged the
+        whole max_slippage_pct budget and flagged approximate."""
         d = 1 if direction >= 0 else -1
-        exit_px = mid = None
-        book = self._state.book(target, asset)
-        if book is not None and book.bids and book.asks and book.age_ms(now) <= bound:
+        if book is not None and book.bids and book.asks and book.age_ms(now_mono) <= bound_ms:
             levels = book.bids if d > 0 else book.asks
             w = walk_book(levels, base_amount=max(0.0, float(base_amount)) or None, side=Side.SELL if d > 0 else Side.BUY)
-            exit_px = w.vwap or levels[0].price
-            mid = (book.bids[0].price + book.asks[0].price) / 2.0
-        else:
-            t = self._state.ticker(target, asset)
-            if t is not None and t.bid and t.ask:
-                exit_px = t.bid if d > 0 else t.ask
-                mid = (t.bid + t.ask) / 2.0
-        series = self._state.mid_series(leader, asset)
-        leader_mid = series[-1][1] if series else None
-        if not exit_px or not leader_mid:
+            if w.exhausted or not w.vwap:
+                return None
+            return float(w.vwap), (book.bids[0].price + book.asks[0].price) / 2.0, False
+        if ticker is not None and ticker.bid and ticker.ask and (now_mono - ticker.ts.recv_mono) * 1000.0 <= bound_ms:
+            slip = max(0.0, float(self._settings.max_slippage_pct)) / 100.0
+            px = float(ticker.bid) * (1.0 - slip) if d > 0 else float(ticker.ask) * (1.0 + slip)
+            return px, (float(ticker.bid) + float(ticker.ask)) / 2.0, True
+        return None
+
+    def market_view(self, asset: str, target: str, leader: str, base_amount: float, direction: int) -> dict[str, Any] | None:
+        """Latest prices for an open position (ride the leader): the exit price on the target for
+        ``base_amount`` (see target_exit_price), the target mid and the leader price (None when the leader
+        is not fresh - stop / trailing / time still work on the target alone).  None when the target has
+        no fresh price for this size - no data, no decision."""
+        now = self._clock.mono()
+        bound = self._view_bound_ms()
+        if not self._state.is_fresh(target, asset, now, bound):
             return None
-        return {"target_exit": float(exit_px), "target_mid": float(mid or exit_px), "leader_mid": float(leader_mid)}
+        priced = self.target_exit_price(self._state.book(target, asset), self._state.ticker(target, asset),
+                                        base_amount, direction, now, bound)
+        if priced is None:
+            return None
+        exit_px, mid, approx = priced
+        return {"target_exit": exit_px, "target_mid": mid, "leader_mid": self.leader_price(asset, leader, now),
+                "approx": approx}
 
     def diagnostics(self) -> dict[str, Any]:
         """Funnel snapshot + "why no signals" (see engine.diagnostics)."""

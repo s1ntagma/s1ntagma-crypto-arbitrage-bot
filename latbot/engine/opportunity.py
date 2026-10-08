@@ -303,7 +303,8 @@ class OpportunityManager:
                 continue
             reason = ""
             ride = bool(getattr(s, "simple_mode", False) and getattr(s, "ride_enabled", False))
-            if ride and opp.age_s(now_mono) >= float(s.ride_entry_max_age_s):
+            start = float(getattr(opp.signal, "first_move_start_mono", 0.0) or opp.first_seen_mono)
+            if ride and now_mono - start >= float(s.ride_entry_max_age_s):  # from the leader's move, not the card
                 reason = f"entry window {float(s.ride_entry_max_age_s):g} s over"  # positions keep riding on their own
             elif not ride and getattr(s, "simple_mode", False) and opp.age_s(now_mono) >= float(s.simple_max_hold_s):
                 reason = f"hold limit {float(s.simple_max_hold_s):g} s"  # simple mode: not caught up in time -> out

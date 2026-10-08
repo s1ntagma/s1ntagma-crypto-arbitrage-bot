@@ -952,8 +952,8 @@ class ExecutionEngine:
         cfg = RideConfig.from_settings(s)
         d = opp.direction
         pos = RidePosition(direction=d, entry_price=entry_avg, cost_pct=2.0 * self._taker_fee(trade.exchange) * 100.0,
-                           entry_mono=self._clock.mono(), last_fresh_mono=self._clock.mono())
-        anchored = False
+                           entry_mono=self._clock.mono(), last_fresh_mono=self._clock.mono(),
+                           first_move_pct=float(opp.signal.first_move_pct), target_move_pct=float(opp.signal.target_move_pct))
         reason = ""
         while True:
             now = self._clock.mono()
@@ -964,17 +964,9 @@ class ExecutionEngine:
             if abort is not None:
                 reason = f"cancel requested ({abort})"
                 break
-            try:
-                view = self._pipeline.market_view(opp.asset, opp.target_exchange, opp.first_mover, amount, d)
-            except Exception:  # noqa: BLE001
-                log.exception("market view failed for AUTO %s", opp.id)
-                view = None
+            view = await self._ride_view(opp, adapter, trade, amount)
             if view:
-                if not anchored:
-                    sig = opp.signal
-                    pos.leader_anchor = view["leader_mid"] / (1.0 + d * float(sig.first_move_pct) / 100.0)
-                    pos.target_anchor = view["target_mid"] / (1.0 + d * float(sig.target_move_pct) / 100.0)
-                    anchored = True
+                pos.set_anchors(view["leader_mid"], view["target_mid"])
                 decision = decide(pos, now, view["target_exit"], view["leader_mid"], cfg, target_mid=view["target_mid"])
                 if decision.sell:
                     reason = decision.text
@@ -986,6 +978,32 @@ class ExecutionEngine:
         await self._note(trade, f"ride exit: {reason} - exiting at market")
         trade.exit_order = await self._exit_market(adapter, trade, amount)
         return trade.exit_order
+
+    async def _ride_view(self, opp: Opportunity, adapter: ExchangeAdapter, trade: TradeRecord, amount: float) -> dict[str, Any] | None:
+        """Prices for the AUTO ride decision: the target book no older than max_data_age_ms (one throttled
+        REST snapshot otherwise - hard rule 4 before the exit order), the leader from the pipeline."""
+        s = self._settings
+        try:
+            book, age = await self._fresh_book(adapter, trade.symbol, throttle_s=s.max_data_age_ms / 1000.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("fresh book failed for AUTO %s", opp.id)
+            return None
+        if book is None or age is None or age > s.max_data_age_ms:
+            return None
+        priced_fn = getattr(self._pipeline, "target_exit_price", None)
+        now = self._clock.mono()
+        try:
+            priced = priced_fn(book, None, amount, opp.direction, now, float(s.max_data_age_ms)) if callable(priced_fn) else None
+            leader_fn = getattr(self._pipeline, "leader_price", None)
+            leader = leader_fn(opp.asset, opp.first_mover, now) if callable(leader_fn) else None
+        except Exception:  # noqa: BLE001
+            log.exception("ride prices failed for AUTO %s", opp.id)
+            return None
+        if priced is None:
+            return None
+        return {"target_exit": priced[0], "target_mid": priced[1], "leader_mid": leader}
 
     def _ride_advice(self, opp: Opportunity, manual: TradeRecord, entry: float, taker: float) -> Decision | None:
         """Ride the leader: hold / sell for the owner's MANUAL position from the latest target and
@@ -1008,9 +1026,9 @@ class ExecutionEngine:
         if pos is None:
             sig = opp.signal
             pos = RidePosition(direction=d, entry_price=entry, cost_pct=2.0 * taker * 100.0, entry_mono=now,
-                               leader_anchor=view["leader_mid"] / (1.0 + d * float(sig.first_move_pct) / 100.0),
-                               target_anchor=view["target_mid"] / (1.0 + d * float(sig.target_move_pct) / 100.0))
+                               first_move_pct=float(sig.first_move_pct), target_move_pct=float(sig.target_move_pct))
             self._ride_manual[opp.id] = pos
+        pos.set_anchors(view["leader_mid"], view["target_mid"])
         return decide(pos, now, view["target_exit"], view["leader_mid"], RideConfig.from_settings(s), target_mid=view["target_mid"])
 
     async def manual_entered(self, opp_id: str, price: float, quote_amount: float) -> dict[str, Any]:
@@ -1381,6 +1399,11 @@ class ExecutionEngine:
             why = "; ".join(fresh.bot.reasons) or fresh.bot.label
             return fail(f"Bot light is RED: {why}")
         quality = getattr(fresh, "quality", None)
+        ride_on = getattr(s, "ride_active", None)
+        if callable(ride_on) and ride_on():
+            start = float(getattr(fresh.signal, "first_move_start_mono", 0.0) or 0.0)
+            if start and self._clock.mono() - start > float(s.ride_entry_max_age_s):
+                return fail(f"entry window over: the leader's move began {self._clock.mono() - start:.0f} s ago")
         proven = getattr(fresh, "proven", None)
         if isinstance(proven, dict) and proven and proven.get("enforced") and not proven.get("proven"):
             # simple mode: AUTO only on pairs that proved themselves on the bot's own virtual trades
@@ -1576,7 +1599,11 @@ class ExecutionEngine:
             return False, 0.0
         trade.capital_quote = float(econ.executable_quote)
         trade.expected_profit_quote = trade.capital_quote * trade.expected_net_pct / 100.0
-        await self._transition(opp, OppState.EXECUTING, "revalidated")
+        if opp.state != OppState.AUTO_SELECTED or not await self._transition(opp, OppState.EXECUTING, "revalidated"):
+            # expired / withdrawn while revalidation waited on the network (e.g. the leader reversed): no entry
+            why = getattr(opp, "expire_reason", "") or opp.state.value
+            await self._cancelled(opp, trade, f"opportunity no longer selectable ({why})", registered=False)
+            return False, 0.0
         self._risk.register_open(trade.id, trade.exchange, trade.asset, trade.capital_quote, trade.mode)
         registered = True
         holder = _OpenPosition(adapter=adapter, trade=trade, base_open=0.0)

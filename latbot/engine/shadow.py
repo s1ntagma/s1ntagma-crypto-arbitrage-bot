@@ -113,6 +113,10 @@ class ShadowTrader:
         self.skipped: dict[str, int] = {}
         self._period_start: float | None = self._load_period()
         self._period_pnl = self._load_period_pnl()  # virtual balance = start + this
+        self._close_orphans()
+        follow = getattr(self._proven, "follow_period", None)
+        if callable(follow):
+            follow(self._period_start)  # proven pairs count the same period as Stats
         self._unsubs = [
             bus.subscribe(events.OPP_NEW, self._on_new),
             bus.subscribe(events.OPP_UPDATE, self._on_update),
@@ -148,11 +152,18 @@ class ShadowTrader:
         if float(e.net_pct) < float(getattr(self._settings, "shadow_min_net_pct", 0.1)):
             self._skip("NET below training threshold")
             return
-        size = _best_size(opp)
-        stake = float(size["capital_quote"]) if size else float(e.executable_quote)
-        if not getattr(self._settings, "shadow_unlimited", False) and stake > self._free_balance() + 1e-9:
-            self._skip("no free virtual balance")  # like a real account: open stakes are not available
+        if self._ride_on() and any(o.asset == opp.asset and o.target == opp.target_exchange and o.direction == int(opp.direction)
+                                   for o in self._open.values()):
+            self._skip("position already riding on this pair")  # one market move is one trial, as live
             return
+        size = _best_size(opp)
+        if not getattr(self._settings, "shadow_unlimited", False):
+            free = self._free_balance()
+            if size and float(size["capital_quote"]) > free + 1e-9:
+                size = None  # the best size does not fit the virtual account: the card capital, if it fits
+            if float(size["capital_quote"] if size else e.executable_quote) > free + 1e-9:
+                self._skip("no free virtual balance")  # like a real account: open stakes are not available
+                return
         now = self._clock.wall()
         quality = opp.quality if isinstance(getattr(opp, "quality", None), dict) else {}
         lev = opp.leverage if isinstance(getattr(opp, "leverage", None), dict) else {}
@@ -192,6 +203,11 @@ class ShadowTrader:
         if t is None:
             return
         price = float(opp.econ.exit_vwap_now or 0.0)
+        if self._market is not None and abs(t.base_amount - float(opp.econ.base_amount or 0.0)) > 1e-9 * max(1.0, t.base_amount):
+            view = self._view(t)  # a best-size trade is priced for its own size, never at the card's size
+            if not view:
+                return
+            price = float(view["target_exit"])
         if price <= 0:
             return
         t.last_exit_price = price
@@ -246,12 +262,11 @@ class ShadowTrader:
         d = t.direction
         pos = RidePosition(direction=d, entry_price=t.entry_price,
                            cost_pct=t.entry_fee_pct + t.exit_fee_pct + t.execution_loss_pct,
-                           entry_mono=self._clock.mono(), last_fresh_mono=self._clock.mono())
+                           entry_mono=self._clock.mono(), last_fresh_mono=self._clock.mono(),
+                           first_move_pct=float(opp.signal.first_move_pct), target_move_pct=float(opp.signal.target_move_pct))
         view = self._view(t)
         if view:  # pre-move prices from the measured moves: lag = leader move - target move
-            sig = opp.signal
-            pos.leader_anchor = view["leader_mid"] / (1.0 + d * float(sig.first_move_pct) / 100.0)
-            pos.target_anchor = view["target_mid"] / (1.0 + d * float(sig.target_move_pct) / 100.0)
+            pos.set_anchors(view["leader_mid"], view["target_mid"])
             pos.update(self._clock.mono(), view["target_exit"], view["leader_mid"])
         return pos
 
@@ -273,6 +288,7 @@ class ShadowTrader:
                     self._ride.pop(oid, None)
                     self._close(t, t.last_exit_price, f"no fresh price for {stale_s:g} s: outcome unknown", "no_data")
                 continue
+            pos.set_anchors(view["leader_mid"], view["target_mid"])  # a leader that was not fresh at the entry
             price = view["target_exit"]
             t.last_exit_price = price
             t.last_update_ts = self._clock.wall()
@@ -368,6 +384,27 @@ class ShadowTrader:
             log.exception("stats period not available; counting every trade")
             return None
 
+    def _close_orphans(self) -> None:
+        """Virtual positions left open by a previous run cannot be resumed (their prices and leader state
+        are gone): they are closed as "no data" - never guessed into a result."""
+        fn = getattr(self._db, "list_shadow", None) if self._db is not None else None
+        if fn is None or not hasattr(self._db, "save_shadow"):
+            return
+        try:
+            rows = fn(5000)
+        except Exception:  # noqa: BLE001
+            log.exception("list_shadow failed")
+            return
+        now = self._clock.wall()
+        for r in rows:
+            if r.get("closed_ts") is None:
+                r.update(closed_ts=now, barrier="no_data", exit_reason="process restarted: outcome unknown",
+                         actual_net_pct=None, pnl_quote=None, open=False)
+                try:
+                    self._db.save_shadow(r)
+                except Exception:  # noqa: BLE001
+                    log.exception("orphan shadow trade %s not closed", r.get("id"))
+
     def _balance_start(self) -> float:
         return float(getattr(self._settings, "shadow_balance_quote", 1000.0) or 0.0)
 
@@ -399,6 +436,12 @@ class ShadowTrader:
             kv_set(PERIOD_KEY, now)
         self._period_start = now
         self._period_pnl = 0.0  # the virtual balance starts again from shadow_balance_quote
+        reset = getattr(self._proven, "reset", None)
+        if callable(reset):
+            try:
+                reset(now)  # pairs are proven again on the new period's trades only
+            except Exception:  # noqa: BLE001
+                log.exception("proven pairs reset failed")
         log.info("stats: new period from %.0f", now)
         return now
 

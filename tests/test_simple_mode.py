@@ -153,3 +153,27 @@ def test_limits_are_sane(value):
     s = Settings(simple_mode=True, simple_entry_deadline_s=value, simple_max_hold_s=value)
     s.validate()
     assert s.simple_entry_deadline_s > 0 and s.simple_max_hold_s >= 1.0
+
+
+# ---- review fix: catch-up is learned against the leader (the same reference the lag uses) -------
+def test_reaction_is_measured_against_the_leader_not_the_first_crosser():
+    h = simple_harness()
+    h.warm_up()
+    h.clock.advance(1.0)
+    h.push("b", 100.4)  # a smaller venue crosses first: it is NOT the reference in simple mode
+    h.clock.advance(0.5)
+    assert len(h.push("a", 101.5)) == 1  # the leader: lag 1.5 % on c
+    h.clock.advance(0.5)
+    h.push("c", 100.6)  # c follows +0.6 % of the leader's +1.5 %
+    reactions = [c for c in h.stats.calls if c[0] == "reaction"]
+    assert reactions == [("reaction", "BTC", "c", 0.5, 0.4)]
+
+
+def test_no_reaction_sample_before_the_leader_moved():
+    h = simple_harness()
+    h.warm_up()
+    h.clock.advance(1.0)
+    h.push("b", 100.4)
+    h.clock.advance(0.5)
+    h.push("c", 100.5)  # the target crosses before the leader: nothing to measure against
+    assert not any(c[0] == "reaction" for c in h.stats.calls)

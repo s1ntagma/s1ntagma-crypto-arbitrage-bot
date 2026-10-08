@@ -118,6 +118,13 @@ async def test_auto_rides_and_exits_once_at_market_on_leader_reversal():
         def market_view(self, asset, target, leader, base, direction):
             return dict(prices)
 
+        def target_exit_price(self, book, ticker, base, direction, now, bound):
+            assert book is not None  # AUTO prices the exit on the fresh target book (hard rule 4)
+            return prices["target_exit"], prices["target_mid"], False
+
+        def leader_price(self, asset, leader, now=None):
+            return prices["leader_mid"]
+
     env = tx.make_env(tx.make_settings(simple_mode=True), pipeline=ViewPipeline(), market_price=104.0)
     opp = env.opps.add(tx.make_opp(env.clock))
     task = asyncio.create_task(tx.run_auto(env, opp))

@@ -686,7 +686,8 @@
     var p = o && o.proven;
     if (!p || p.n == null) return null;
     var cls = 'proven-badge ' + (p.status || 'training');
-    var word = p.status === 'proven' ? 'Proven ' + p.wins + '/' + p.n : p.status === 'failing' ? 'Failing ' + p.wins + '/' + p.n : 'Training ' + p.n + '/' + p.need;
+    var word = p.status === 'proven' ? 'Proven ' + p.wins + '/' + p.n : p.status === 'failing' ? 'Failing ' + p.wins + '/' + p.n
+      : p.n >= p.need ? 'Not convincing ' + p.wins + '/' + p.n : 'Training ' + p.n + '/' + p.need;
     return h('span', { class: cls, title: p.text || '', text: word });
   }
 
@@ -1177,6 +1178,11 @@
   }
 
   function leverageLine(o) {
+    var st = state.settings || {};
+    if (st.simple_mode && st.ride_enabled) {  // the ride exit rules decide, not the leverage plan's stop
+      return h('div', { class: 'lev-line' }, 'Exit by ride rules · stop NET -' + num(st.ride_stop_pct).toFixed(2) +
+        '% · leader turned -' + num(st.ride_reversal_pct).toFixed(2) + '% · spot venue, no leverage');
+    }
     var lv = o.leverage;
     if (!lv || lv.recommended == null) return null;
     var parts = [];
@@ -1705,10 +1711,15 @@
         : 'Period: all time';
       kvRows($('shadow-sum-body'), [
         ['Status', d.enabled ? 'ON (no orders, virtual)' : 'OFF (shadow_trading=false)'],
-        ['Virtual balance', s.balance_start == null ? '–' : fmtMoney(s.balance_start, displayQuote()) + ' → ' +
-          fmtMoney(s.balance_now, displayQuote()) + (s.balance_pct == null ? '' : ' (' + fmtPct(s.balance_pct) + ')')],
+        (state.settings && state.settings.shadow_unlimited)
+          ? ['Virtual P&L (unlimited stakes)', fmtMoney((s.balance_now || 0) - (s.balance_start || 0), displayQuote(), { sign: true }) +
+             (s.readiness && s.readiness.avg_net_pct != null ? ' · avg NET ' + fmtPct(num(s.readiness.avg_net_pct)) : '')]
+          : ['Virtual balance', s.balance_start == null ? '–' : fmtMoney(s.balance_start, displayQuote()) + ' → ' +
+             fmtMoney(s.balance_now, displayQuote()) + (s.balance_pct == null ? '' : ' (' + fmtPct(s.balance_pct) + ')')],
         ['Today', fmtMoney(s.today_pnl_quote || 0, displayQuote(), { sign: true }) + ' · ' + (s.today_closed || 0) + ' trades'],
-        ['Max drawdown', s.max_drawdown_pct == null ? '–' : num(s.max_drawdown_pct).toFixed(2) + '%'],
+        (state.settings && state.settings.shadow_unlimited)
+          ? ['Max drawdown (sum of NET %)', s.readiness && s.readiness.drawdown_pct != null ? num(s.readiness.drawdown_pct).toFixed(2) + '%' : '–']
+          : ['Max drawdown', s.max_drawdown_pct == null ? '–' : num(s.max_drawdown_pct).toFixed(2) + '%'],
         ['Open', String(s.open || 0)], ['Closed', String(s.closed || 0)], ['Win rate', rateOrDash(s.win_rate)],
         ['Avg expected NET', pctOrDash(s.avg_expected_net_pct)], ['Avg actual NET', pctOrDash(s.avg_actual_net_pct)],
         ['Target reached', String(s.target_reached || 0)], ['Stopped', String(s.stopped || 0)],

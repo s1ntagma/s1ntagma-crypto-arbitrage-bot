@@ -309,7 +309,8 @@ class Settings:
     # offered on the board, in Telegram and to AUTO; everything else keeps training (engine/proven.py)
     proven_gate_enabled: bool = True
     proven_min_trades: int = 30
-    proven_min_p10: float = 0.60  # worst-case (10th percentile) win probability
+    proven_min_p10: float = 0.60  # worst-case win probability (the proven_quantile of Beta(1+wins, 1+losses))
+    proven_quantile: float = 0.05  # 5th percentile: strict, the verdict is re-checked after every trade
     proven_min_avg_net_pct: float = 0.05
     # LIVE readiness checklist (Stats)
     ready_min_trades: int = 200
