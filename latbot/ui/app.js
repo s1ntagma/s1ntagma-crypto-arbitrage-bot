@@ -19,7 +19,8 @@
   };
   var SETTINGS_FIELDS = [
     'human_execution_time_s', 'telegram_profit_threshold_pct', 'capital_quote', 'max_trade_quote',
-    'min_net_pct_show', 'min_movers', 'auto_confirm', 'alert_human_only', 'telegram_require_executable'
+    'min_net_pct_show', 'min_movers', 'auto_confirm', 'alert_human_only', 'telegram_require_executable',
+    'min_quality_score', 'shadow_min_net_pct', 'max_leverage', 'pool_enabled', 'context_enabled'
   ];
 
   var state = {
@@ -36,7 +37,7 @@
     trades: new Map(),
     stats: [],
     balances: {},
-    filters: { quick: 'ALL', exchange: '', asset: '', minNet: '', minWindow: '', human: '', bot: '' },
+    filters: { quick: 'ALL', exchange: '', asset: '', minNet: '', minWindow: '', human: '', bot: '', lowq: false },
     tab: 'opps',
     diag: null,
     journal: null,
@@ -459,6 +460,7 @@
       if (isTerminal(o.state) || isExecuting(o.state)) return;
       if (lightOf(o, 'human') === 'red' && lightOf(o, 'bot') === 'red') return;
       if (remaining(o) <= 0) return;
+      if (!qualityPassed(o)) return;
       if (!best || netOf(o) > netOf(best)) best = o;
     });
     return best;
@@ -663,10 +665,17 @@
     sel.value = keep;
   }
 
+  // Phase 3: below the quality threshold (or vetoed) -> hidden by default; still traded virtually (training).
+  function qualityPassed(o) {
+    var q = o && o.quality;
+    return !q || q.score == null || q.passed !== false;
+  }
+
   function passesFilters(o) {
     var f = state.filters;
     var term = isTerminal(o.state);
     if (state.focusId === o.id) return true;
+    if (!f.lowq && !term && !qualityPassed(o) && !(state.manual && state.manual.id === o.id) && !hasOpenManualPosition(o)) return false;
     switch (f.quick) {
       case 'ALL': if (term) return false; break;
       case 'MANUAL': if (term || lightOf(o, 'human') === 'red') return false; break;
@@ -1031,6 +1040,7 @@
       h('span', { class: 'card-side ' + (side === 'LONG' ? 'long' : 'short'), text: side }),
       h('span', { class: 'tag ' + (o.mode === 'live' ? 'live' : 'paper'), text: String(o.mode || '').toUpperCase() }),
       h('span', { class: 'state-badge', text: String(o.state || '').replace(/_/g, ' ') }),
+      qualityBadge(o),
       h('span', { class: 'card-target', title: 'target exchange: ' + exchangeLabel(o.target_exchange) }, 'TARGET: ', h('b', { text: exchangeLabel(o.target_exchange) }))));
 
     card.appendChild(h('div', { class: 'card-net' },
@@ -1046,6 +1056,9 @@
       kv('SELL', fmtMoney(o.sell_price, q)),
       kv('CAPITAL', fmtMoney(econ.executable_quote, q) + (econ.liquidity_ok === false ? ' (thin book)' : '')),
       kv('EXPECTED PROFIT', fmtMoney(profit, q, { sign: true }), profit >= 0 ? 'pos' : 'neg')));
+
+    var levLine = leverageLine(o);
+    if (levLine) card.appendChild(levLine);
 
     if (term) {
       var dur = num(o.actual_duration_s);
@@ -1095,6 +1108,153 @@
     return card;
   }
 
+  function qualityBadge(o) {
+    var q = o.quality;
+    if (!q || q.score == null) return null;
+    var cls = 'q-badge grade-' + String(q.grade || 'D').toLowerCase() + (q.passed === false ? ' failed' : '');
+    var title = (q.passed === false ? 'below the quality threshold' : 'passed the quality check') + (q.summary ? ': ' + q.summary : '');
+    return h('span', { class: cls, title: title, text: 'Quality ' + q.score + ' · ' + (q.grade || '?') });
+  }
+
+  function leverageLine(o) {
+    var lv = o.leverage;
+    if (!lv || lv.recommended == null) return null;
+    var parts = [];
+    var rec = num(lv.recommended), sig = num(lv.max_by_signal);
+    parts.push('Leverage ' + (rec > 1 ? rec + 'x' : '1x') + (lv.venue_kind === 'spot' ? ' (spot venue)' : ''));
+    if (sig > 1 && sig > rec) parts.push('signal allows up to ' + sig + 'x');
+    if (Number.isFinite(num(lv.stop_pct))) parts.push('stop -' + num(lv.stop_pct).toFixed(2) + '%');
+    if (Number.isFinite(num(lv.liq_distance_pct)) && rec > 1) parts.push('liquidation -' + num(lv.liq_distance_pct).toFixed(1) + '%');
+    if (Number.isFinite(num(lv.rr))) parts.push('R:R ' + num(lv.rr).toFixed(1));
+    return h('div', { class: 'lev-line', title: (lv.reasons || []).join('; ') || lv.note || '' }, parts.join(' · '));
+  }
+
+  function qualityDetails(o) {
+    var q = o.quality;
+    if (!q || q.score == null) return null;
+    var box = h('div', { class: 'q-details' });
+    box.appendChild(h('div', { class: 'q-summary', text: 'Quality ' + q.score + '/100 (' + (q.grade || '?') + ')' + (q.summary ? ' - ' + q.summary : '') }));
+    (q.vetoes || []).forEach(function (v) { box.appendChild(h('div', { class: 'q-veto', text: 'Block: ' + v })); });
+    var list = h('ul', { class: 'q-factors' });
+    (q.components || []).forEach(function (c) {
+      list.appendChild(h('li', { class: c.available ? '' : 'na', text: c.label + ': ' + (c.available ? Math.round(num(c.value) * 100) + '/100' : 'no data') + (c.detail ? ' - ' + c.detail : '') }));
+    });
+    (q.factors || []).forEach(function (f) {
+      var sc = num(f.score);
+      var tag = !f.available ? 'no data' : f.veto ? 'BLOCK' : sc > 0.05 ? 'for' : sc < -0.05 ? 'against' : 'neutral';
+      list.appendChild(h('li', { class: !f.available ? 'na' : sc > 0.05 ? 'pos' : sc < -0.05 ? 'neg' : '', text: f.label + ' [' + tag + ']' + (f.detail ? ' - ' + f.detail : '') }));
+    });
+    box.appendChild(list);
+    return box;
+  }
+
+  // ------------------------------------------------------------------ MARKET tab (context behind every signal)
+  function loadMarket() {
+    return api('GET', '/api/context').then(function (r) {
+      if (!r.ok) { toast('Market: ' + r.error, 'err'); return; }
+      renderMarket(r.data || {});
+    });
+  }
+
+  function fmtCountdown(sec) {
+    var s = Math.abs(Math.round(num(sec)));
+    if (!Number.isFinite(s)) return '—';
+    if (s < 90) return s + ' s';
+    if (s < 5400) return Math.round(s / 60) + ' min';
+    if (s < 172800) return Math.floor(s / 3600) + ' h ' + Math.round((s % 3600) / 60) + ' min';
+    return Math.floor(s / 86400) + ' d';
+  }
+
+  function renderMarket(d) {
+    var st = $('market-status');
+    clear(st);
+    if (!d.enabled) {
+      st.appendChild(h('p', { class: 'why-line', text: d.reason || 'Market context is off.' }));
+    } else {
+      st.appendChild(h('p', { class: 'why-line', text: d.event_window
+        ? 'High-impact US release window: signals need a higher quality score and leverage is reduced.'
+        : 'No high-impact US release window right now.' }));
+    }
+    var macro = $('market-macro');
+    clear(macro);
+    var next = (d.macro && d.macro.next) || [];
+    if (!next.length) macro.appendChild(h('tr', null, h('td', { class: 'muted', text: d.enabled ? 'No upcoming releases in the calendar (or no data yet).' : 'Off.' })));
+    next.forEach(function (e) {
+      var prof = e.btc_profile && e.btc_profile['60'];
+      var hist = prof ? ('BTC 60 s: up ' + Math.round(num(prof.up_share) * 100) + '% of ' + prof.n) : 'no history yet';
+      macro.appendChild(h('tr', null,
+        h('td', { text: e.title + (e.impact === 'high' ? '' : ' (medium)') }),
+        h('td', { class: 'muted', text: 'forecast ' + (e.forecast || '—') + ' · prev ' + (e.previous || '—') + ' · ' + hist }),
+        h('td', { text: 'in ' + fmtCountdown(e.in_s) })));
+    });
+    var reg = $('market-regime');
+    clear(reg);
+    var rg = d.regime || {};
+    ['BTC', 'ETH'].forEach(function (a) {
+      var x = rg[a] || {};
+      reg.appendChild(h('tr', null, h('td', { text: a }),
+        h('td', { text: Number.isFinite(num(x.ret_15m_pct)) ? '15 min ' + fmtPct(x.ret_15m_pct) + ' · 1 h ' + fmtPct(x.ret_1h_pct) + ' · vol pct ' + (Number.isFinite(num(x.vol_pctile)) ? Math.round(num(x.vol_pctile) * 100) : '—') : 'no minute data yet' })));
+    });
+    var tf = d.tradfi && d.tradfi.quotes ? d.tradfi.quotes : (d.tradfi && d.tradfi.symbols) || null;
+    var quotes = [];
+    if (tf && typeof tf === 'object') Object.keys(tf).forEach(function (k) { if (tf[k] && typeof tf[k] === 'object') quotes.push(tf[k]); });
+    quotes.forEach(function (q) {
+      if (q.last == null) return;
+      var chg = q.is_yield && q.chg_1d_bp != null ? (num(q.chg_1d_bp) >= 0 ? '+' : '') + num(q.chg_1d_bp).toFixed(1) + ' bp today' : fmtPct(q.chg_1d_pct) + ' today';
+      reg.appendChild(h('tr', null, h('td', { text: q.key || q.symbol }), h('td', { text: String(q.last) + ' · ' + chg + ' · ' + (q.market_open ? 'open' : 'closed') + ', delayed' })));
+    });
+    if (rg.corr_btc_spx != null) reg.appendChild(h('tr', null, h('td', { text: 'corr BTC / S&P' }), h('td', { text: num(rg.corr_btc_spx).toFixed(2) + ' (4 h, 1 min)' })));
+    var news = $('market-news');
+    clear(news);
+    var items = (d.news && d.news.items) || [];
+    if (!items.length) news.appendChild(h('tr', null, h('td', { class: 'muted', colspan: '7', text: d.enabled ? 'No news yet (first poll in progress or sources unavailable).' : 'Off.' })));
+    items.slice(0, 50).forEach(function (it) {
+      var dir = num(it.direction);
+      news.appendChild(h('tr', null,
+        h('td', { class: 'mono', text: fmtTime(it.ts) }),
+        h('td', { text: it.channel || it.source }),
+        h('td', { class: 'wrap', text: it.title }),
+        h('td', { text: it.category }),
+        h('td', { text: (it.assets || []).join(', ') }),
+        h('td', { class: dir > 0 ? 'pos' : dir < 0 ? 'neg' : 'muted', text: dir > 0 ? 'bullish' : dir < 0 ? 'bearish' : 'unclear' }),
+        h('td', { class: 'num', text: Math.round(num(it.importance) * 100) + '%' })));
+    });
+    var der = $('market-derivs');
+    clear(der);
+    var rows = (d.derivs && d.derivs.assets) || [];
+    if (!rows.length) der.appendChild(h('tr', null, h('td', { class: 'muted', colspan: '7', text: d.enabled ? 'No derivatives data yet.' : 'Off.' })));
+    rows.forEach(function (x) {
+      var fr = num(x.funding_rate_8h);
+      der.appendChild(h('tr', null,
+        h('td', { text: x.asset }),
+        h('td', { class: 'num', text: Number.isFinite(fr) ? (fr * 100).toFixed(4) + '%' : '—' }),
+        h('td', { class: 'num', text: x.funding_pct != null ? Math.round(num(x.funding_pct)) + '' : (x.funding_n != null ? 'history ' + x.funding_n + '/' + (x.funding_min_n || 288) : '—') }),
+        h('td', { class: 'num', text: pctOrDash(x.oi_chg_15m_pct) }),
+        h('td', { class: 'num', text: x.liq_long_usd_5m == null ? '—' : fmtMoney(x.liq_long_usd_5m, 'USD') }),
+        h('td', { class: 'num', text: x.liq_short_usd_5m == null ? '—' : fmtMoney(x.liq_short_usd_5m, 'USD') }),
+        h('td', { class: 'muted', text: x.reason || '' })));
+    });
+    var pool = $('market-pool');
+    clear(pool);
+    var p = d.pool || {};
+    if (!p || p.enabled === false) pool.appendChild(h('tr', null, h('td', { class: 'muted', text: 'Pool is off: every listed coin is scanned.' })));
+    else {
+      pool.appendChild(h('tr', null, h('td', { text: 'In the pool (' + (p.size || 0) + ')' }), h('td', { class: 'wrap', text: (p.included || []).map(function (x) { return x.asset; }).join(', ') })));
+      (p.excluded || []).slice(0, 25).forEach(function (x) {
+        pool.appendChild(h('tr', null, h('td', { text: x.asset }), h('td', { class: 'wrap muted', text: (x.reasons || []).join('; ') })));
+      });
+    }
+    var src = $('market-sources');
+    clear(src);
+    (d.sources || []).forEach(function (x) {
+      src.appendChild(h('tr', null,
+        h('td', { text: x.name }),
+        h('td', { class: x.ok ? 'diag-ok' : 'diag-bad', text: x.ok ? 'ok' : (x.enabled === false ? 'off' : 'no data') }),
+        h('td', { class: 'wrap muted', text: x.last_error || x.note || '' })));
+    });
+    if (!(d.sources || []).length) src.appendChild(h('tr', null, h('td', { class: 'muted', text: d.enabled ? 'Starting…' : 'Off.' })));
+  }
+
   var PLAN_ORDER = ['header', 'movers', 'buy', 'sell', 'timing', 'caveat', 'updated'];
   function renderPlan(o) {
     var plan = o && o.plan;
@@ -1117,6 +1277,8 @@
     });
     details.appendChild(h('summary', { text: 'WHY?' }));
     details.appendChild(h('pre', { text: o.why || 'no explanation recorded' }));
+    var qd = qualityDetails(o);
+    if (qd) details.appendChild(qd);
     var reasons = [];
     (o.human && o.human.reasons || []).forEach(function (r) { reasons.push('HUMAN: ' + r); });
     (o.bot && o.bot.reasons || []).forEach(function (r) { reasons.push('BOT: ' + r); });
@@ -1354,7 +1516,8 @@
     placeStrips(name);
     if (name === 'opps') setTimeout(function () { refreshChart(true); }, 0);
     document.querySelectorAll('.tab').forEach(function (b) { b.setAttribute('aria-selected', b.dataset.tab === name ? 'true' : 'false'); });
-    ['opps', 'trades', 'stats', 'diag'].forEach(function (n) { $('tab-' + n).classList.toggle('hidden', n !== name); });
+    ['opps', 'market', 'trades', 'stats', 'diag'].forEach(function (n) { $('tab-' + n).classList.toggle('hidden', n !== name); });
+    if (name === 'market') loadMarket();
     if (name === 'trades' && !state.tradesLoaded) loadTrades();
     if (name === 'stats' && !state.statsLoaded) loadStats();
     if (name === 'diag') loadDiag();
@@ -1492,6 +1655,23 @@
             h('td', { class: 'num', text: fmtMoney(g.pnl_quote || 0, displayQuote(), { sign: true }) })));
         });
       });
+      var gb = $('grade-body');
+      clear(gb);
+      var grades = s.by_grade || {};
+      Object.keys(grades).sort().forEach(function (gname) {
+        var g = grades[gname];
+        gb.appendChild(h('tr', null,
+          h('td', { text: gname }),
+          h('td', { class: 'num', text: String(g.closed) }),
+          h('td', { class: 'num', text: rateOrDash(g.win_rate) }),
+          h('td', { class: 'num ' + (num(g.avg_actual_net_pct) >= 0 ? 'pos' : 'neg'), text: pctOrDash(g.avg_actual_net_pct) }),
+          h('td', { class: 'num', text: String(g.stopped || 0) }),
+          h('td', { class: 'num', text: fmtMoney(g.pnl_quote || 0, displayQuote(), { sign: true }) }),
+          h('td', { class: 'num', text: fmtMoney(g.pnl_leveraged_quote || 0, displayQuote(), { sign: true }) })));
+      });
+      if (!Object.keys(grades).length) gb.appendChild(h('tr', null, h('td', { class: 'muted', colspan: '7', text: 'No closed virtual trades yet: they appear as the bot trains.' })));
+      var lr = d.learning || {};
+      $('learning-note').textContent = lr.n ? ('Learning table: ' + lr.n + ' outcomes of comparable situations, base win rate ' + rateOrDash(lr.base_rate) + '. Weights are fixed; only measurements are learned.') : 'Learning table is empty: every closed virtual trade adds one outcome.';
       var body = $('shadow-body');
       clear(body);
       var rows = d.trades || [];
@@ -2533,7 +2713,8 @@
     bindFilter('f-human', 'human');
     bindFilter('f-bot', 'bot');
     $('filters-reset').addEventListener('click', function () {
-      state.filters = { quick: 'ALL', exchange: '', asset: '', minNet: '', minWindow: '', human: '', bot: '' };
+      state.filters = { quick: 'ALL', exchange: '', asset: '', minNet: '', minWindow: '', human: '', bot: '', lowq: false };
+      $('f-lowq').checked = false;
       ['f-exchange', 'f-asset', 'f-minnet', 'f-minwin', 'f-human', 'f-bot'].forEach(function (id) { $(id).value = ''; });
       state.focusId = null;
       scheduleRender('cards');
@@ -2550,6 +2731,8 @@
       setTab('opps');
       window.scrollTo(0, 0);
     });
+    $('f-lowq').addEventListener('change', function () { state.filters.lowq = $('f-lowq').checked; scheduleRender('cards'); });
+    $('market-refresh').addEventListener('click', loadMarket);
     $('trades-refresh').addEventListener('click', loadTrades);
     $('stats-refresh').addEventListener('click', loadStats);
     $('diag-refresh').addEventListener('click', loadDiag);

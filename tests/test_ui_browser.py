@@ -149,6 +149,16 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             # the closed settings drawer is not focusable
             assert await page.evaluate("getComputedStyle(document.getElementById('settings-drawer')).visibility") == "hidden"
 
+            # Phase 3: the card shows its quality and leverage; the Market tab explains the context (off in tests)
+            assert await page.locator("#cards .card .q-badge").count() == 1
+            assert "Leverage" in await page.locator("#cards .card .lev-line").inner_text()
+            await page.click("button.tab[data-tab='market']")
+            await page.wait_for_selector("#tab-market:not(.hidden) #market-status .why-line", timeout=5000)
+            assert "context_enabled" in await page.locator("#market-status").inner_text()
+            assert "BTC" in await page.locator("#market-pool").inner_text()
+            await assert_no_emoji(page, "market tab")
+            await page.click("button.tab[data-tab='opps']")
+
             # 3. filters really filter
             await page.fill("#f-minnet", "50")  # nothing has NET >= 50 %
             await page.wait_for_selector("#cards-empty:not(.hidden)", timeout=3000)

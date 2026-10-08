@@ -108,7 +108,10 @@ a:hover { color: #6db8ff; }
   -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); border-bottom: 1px solid var(--line);
 }
 .topbar.emergency { border-bottom-color: var(--down); }
-.topbar.emergency .build-stamp { display: none; }
+.topbar.emergency .tab { padding: 8px 8px; }
+.topbar.emergency .tab[aria-selected="true"]::after { left: 8px; right: 8px; }
+.topbar.emergency .tab-count { display: none; }
+.topbar.emergency #close-positions-btn, .topbar.emergency #emergency-btn { padding-left: 12px; padding-right: 12px; }
 .topbar.emergency #ws-label, .topbar.emergency #settings-btn span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .topbar-inner {
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 24px;
@@ -117,7 +120,9 @@ a:hover { color: #6db8ff; }
 .brand { display: inline-flex; align-items: center; gap: 12px; text-decoration: none; color: var(--text); }
 .brand:hover { color: var(--text); }
 .brand-logo { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 8px; background: var(--gradient); color: var(--on-neon); }
+.brand-text { display: flex; flex-direction: column; line-height: 1.1; }
 .brand-title { font-family: var(--font-display); font-weight: 700; font-size: 1.25rem; letter-spacing: -0.02em; }
+.brand-text .build-stamp { font-size: 0.66rem; }
 .topbar-actions { display: flex; align-items: center; gap: 12px; justify-content: flex-end; flex-wrap: wrap; }
 .build-stamp { color: var(--muted-2); font-size: var(--fs-xs); }
 .mode-badge { font-weight: 600; font-size: var(--fs-sm); padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--text); background: var(--surface); }
@@ -388,6 +393,21 @@ a:hover { color: #6db8ff; }
 .card-meta { display: flex; gap: 8px; flex-wrap: wrap; font-size: var(--fs-xs); color: var(--muted); min-width: 0; }
 .card-meta span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .state-badge { font-size: var(--fs-xs); color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; }
+/* Phase 3: quality badge, leverage line, quality details */
+.q-badge { font-size: var(--fs-xs); font-weight: 600; border-radius: 999px; padding: 0 9px; border: 1px solid var(--line-strong); color: var(--muted); white-space: nowrap; }
+.q-badge.grade-a { color: var(--up-text); border-color: var(--neon-line); background: var(--neon-dim); }
+.q-badge.grade-b { color: var(--accent-hover); border-color: var(--accent-line); background: var(--accent-dim); }
+.q-badge.grade-c { color: var(--warn-text); border-color: var(--warn); }
+.q-badge.grade-d, .q-badge.failed { color: var(--down-text); border-color: var(--down); }
+.lev-line { font-size: var(--fs-sm); color: var(--muted); }
+.q-details { margin-top: 10px; display: grid; gap: 6px; font-size: var(--fs-sm); }
+.q-summary { color: var(--text); font-weight: 600; }
+.q-veto { color: var(--down-text); }
+.q-factors { margin: 0; padding-left: 18px; color: var(--muted); display: grid; gap: 3px; }
+.q-factors li.pos { color: var(--up-text); }
+.q-factors li.neg { color: var(--down-text); }
+.q-factors li.na { color: var(--muted-2); }
+.filter-check { min-height: 42px; align-self: flex-end; flex: 0 0 auto; }
 
 /* Russian trading plan (engine.explain.build_plan) */
 .plan { display: grid; gap: 6px; font-size: var(--fs-sm); color: var(--muted); }
@@ -575,10 +595,15 @@ body.in-session { overflow: hidden; }
 }
 
 /* ---------- laptop / tablet ---------- */
+@media (max-width: 1600px) {
+  .tabs { gap: 2px; }
+  .tab { padding: 8px 10px; }
+  .tab[aria-selected="true"]::after { left: 10px; right: 10px; }
+  .ws-status #ws-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  #settings-btn span { display: none; }
+}
 @media (max-width: 1280px) {
   .topbar-inner { gap: 12px; }
-  .tab { padding: 8px 12px; }
-  .tab[aria-selected="true"]::after { left: 12px; right: 12px; }
   /* label stays for screen readers; the dot alone is not the only cue */
   .ws-status #ws-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #settings-btn span { display: none; }
@@ -602,9 +627,8 @@ body.in-session { overflow: hidden; }
   .topbar { -webkit-backdrop-filter: none; backdrop-filter: none; background: var(--bg); }
   .topbar-inner { grid-template-columns: auto minmax(0, 1fr); padding-top: 10px; padding-bottom: 10px; }
   .topbar-actions { gap: 8px; }
-  .build-stamp { display: none; }
   .tabs {
-    position: fixed; left: 0; right: 0; bottom: 0; z-index: 35; display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 35; display: grid; grid-template-columns: repeat(5, 1fr); gap: 0;
     padding: 6px 6px calc(6px + env(safe-area-inset-bottom)); background: var(--bg); border-top: 1px solid var(--line);
   }
   .tab { flex-direction: column; justify-content: center; gap: 2px; min-height: 54px; padding: 6px 2px; font-size: 0.7rem; border-radius: 10px; }

@@ -1266,10 +1266,39 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
         if shadow is None:
             return _json({"enabled": False, "trades": [], "summary": {}})
         try:
-            return _json({"enabled": bool(shadow.enabled), "trades": shadow.trades(limit), "summary": shadow.summary()})
+            ml = getattr(ctx, "metalabel", None)
+            learning = ml.snapshot() if ml is not None and hasattr(ml, "snapshot") else None
+            return _json({"enabled": bool(shadow.enabled), "trades": shadow.trades(limit), "summary": shadow.summary(),
+                          "learning": learning})
         except Exception:  # noqa: BLE001
             log.exception("shadow listing failed")
             return _error(500, "shadow listing failed")
+
+    # ---- Phase 3: market context + narrow pool --------------------------------
+    @app.get("/api/context")
+    async def api_context() -> JSONResponse:
+        """Macro calendar, news / Telegram, US markets, BTC/ETH regime, derivatives, sources (Market tab)."""
+        hub = getattr(ctx, "context", None)
+        pool = getattr(ctx, "pool", None)
+        if hub is None:
+            return _json({"enabled": False, "reason": "контекст выключен (context_enabled = false) или не создан",
+                          "pool": pool.snapshot() if pool is not None and hasattr(pool, "snapshot") else None})
+        try:
+            return _json({"enabled": True, **hub.snapshot()})
+        except Exception:  # noqa: BLE001
+            log.exception("context snapshot failed")
+            return _error(500, "context snapshot failed")
+
+    @app.get("/api/pool")
+    async def api_pool() -> JSONResponse:
+        pool = getattr(ctx, "pool", None)
+        if pool is None or not hasattr(pool, "snapshot"):
+            return _json({"enabled": False})
+        try:
+            return _json(pool.snapshot())
+        except Exception:  # noqa: BLE001
+            log.exception("pool snapshot failed")
+            return _error(500, "pool snapshot failed")
 
     @app.get("/api/trades/summary")
     async def api_trades_summary() -> JSONResponse:

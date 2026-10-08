@@ -14,16 +14,16 @@
     <div class="topbar-inner">
       <a class="brand" href="#" aria-label="latbot">
         <span class="brand-logo" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="15 7 21 7 21 13"/></svg></span>
-        <span class="brand-title">latbot</span>
+        <span class="brand-text"><span class="brand-title">latbot</span><span id="build-stamp" class="build-stamp mono" title="build: hash of the running code"></span></span>
       </a>
       <nav class="tabs" role="tablist" aria-label="Sections">
         <button class="tab" role="tab" type="button" data-tab="opps" aria-selected="true" aria-controls="tab-opps"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg><span class="tab-label">opportunities</span> <span class="tab-count" id="opps-count">0</span></button>
+        <button class="tab" role="tab" type="button" data-tab="market" aria-selected="false" aria-controls="tab-market"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg><span class="tab-label">market</span></button>
         <button class="tab" role="tab" type="button" data-tab="trades" aria-selected="false" aria-controls="tab-trades"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg><span class="tab-label">trades</span> <span class="tab-count" id="trades-count">0</span></button>
         <button class="tab" role="tab" type="button" data-tab="stats" aria-selected="false" aria-controls="tab-stats"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="tab-label">stats</span></button>
         <button class="tab" role="tab" type="button" data-tab="diag" aria-selected="false" aria-controls="tab-diag"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span class="tab-label">diagnostics</span></button>
       </nav>
       <div class="topbar-actions">
-        <span id="build-stamp" class="build-stamp mono" title="build: hash of the running code"></span>
         <div id="mode-badge" class="mode-badge paper" title="Execution mode">PAPER</div>
         <div id="ws-status" class="ws-status" role="status" title="WebSocket connection">
           <span id="ws-dot" class="dot red" aria-hidden="true"></span>
@@ -112,6 +112,7 @@
               <option value="red">red</option>
             </select>
           </label>
+          <label class="check filter-check"><input id="f-lowq" type="checkbox"> <span>Show low quality</span></label>
           <button id="filters-reset" class="btn btn-ghost btn-sm" type="button">Reset</button>
         </div>
       </div>
@@ -121,6 +122,52 @@
         <div class="scanner" aria-hidden="true"></div>
         <p class="empty-title" data-role="empty-title">Watching exchanges · no executable lag right now</p>
         <p class="empty-sub" data-role="empty-sub">Signals need ≥2 venues to move while a target lags. Every card is a measured lag: no data, no signal — nothing is invented to fill the grid.</p>
+      </div>
+    </section>
+
+    <section id="tab-market" class="tab-panel hidden" role="tabpanel" aria-label="Market context">
+      <div class="panel-head">
+        <h2 class="panel-title">MARKET · context behind every signal</h2>
+        <button id="market-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+      </div>
+      <div id="market-status" class="diag-why" aria-live="polite"></div>
+      <div class="diag-grid">
+        <div class="diag-block">
+          <h3 class="diag-title">US MACRO CALENDAR · next releases</h3>
+          <div class="table-wrap"><table class="table table-compact" id="market-macro-table"><tbody id="market-macro"></tbody></table></div>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title">REGIME · BTC / ETH and US markets (delayed)</h3>
+          <div class="table-wrap"><table class="table table-compact" id="market-regime-table"><tbody id="market-regime"></tbody></table></div>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">NEWS · Telegram channels and feeds, classified</h3>
+        <div class="table-wrap">
+          <table class="table" id="market-news-table">
+            <thead><tr><th>Time</th><th>Source</th><th>Headline</th><th>Category</th><th>Assets</th><th>Impact</th><th class="num">Importance</th></tr></thead>
+            <tbody id="market-news"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">DERIVATIVES · funding, open interest, liquidations</h3>
+        <div class="table-wrap">
+          <table class="table" id="market-derivs-table">
+            <thead><tr><th>Asset</th><th class="num">Funding / 8h</th><th class="num">Percentile</th><th class="num">OI change 15m</th><th class="num">Long liq 5m</th><th class="num">Short liq 5m</th><th>Note</th></tr></thead>
+            <tbody id="market-derivs"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-grid">
+        <div class="diag-block">
+          <h3 class="diag-title">POOL · coins the bot scans</h3>
+          <div class="table-wrap"><table class="table table-compact" id="market-pool-table"><tbody id="market-pool"></tbody></table></div>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title">SOURCES · status</h3>
+          <div class="table-wrap"><table class="table table-compact" id="market-sources-table"><tbody id="market-sources"></tbody></table></div>
+        </div>
       </div>
     </section>
 
@@ -173,6 +220,16 @@
           <h3 class="diag-title">SHADOW TRADING · every opportunity, virtual, real book</h3>
           <table class="table table-compact"><tbody id="shadow-sum-body"></tbody></table>
         </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">LEARNING · does the quality grade predict the result?</h3>
+        <div class="table-wrap">
+          <table class="table" id="grade-table">
+            <thead><tr><th>Grade</th><th class="num">Closed</th><th class="num">Win rate</th><th class="num">Avg actual NET</th><th class="num">Stopped</th><th class="num">P&amp;L</th><th class="num">P&amp;L with leverage</th></tr></thead>
+            <tbody id="grade-body"></tbody>
+          </table>
+        </div>
+        <p id="learning-note" class="muted"></p>
       </div>
       <div class="diag-block">
         <h3 class="diag-title">STRATEGY · shadow result by target exchange and asset</h3>
@@ -276,6 +333,17 @@
         <label class="field"><span class="field-label">Min movers (exchanges)</span>
           <input type="number" name="min_movers" step="1" min="1" inputmode="numeric"></label>
         <label class="check"><input type="checkbox" name="telegram_require_executable"> <span>Telegram requires an executable light</span></label>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend>Selectivity &amp; leverage</legend>
+        <label class="field"><span class="field-label">Min quality score (0-100) for display, Telegram, AUTO</span>
+          <input type="number" name="min_quality_score" step="1" min="0" max="100" inputmode="numeric"></label>
+        <label class="field"><span class="field-label">Training: virtual trade from NET %</span>
+          <input type="number" name="shadow_min_net_pct" step="0.05" min="0" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">Max leverage (advice; spot venues stay 1x)</span>
+          <input type="number" name="max_leverage" step="1" min="1" max="20" inputmode="numeric"></label>
+        <label class="check"><input type="checkbox" name="pool_enabled"> <span>Narrow pool: only predictable, liquid coins</span></label>
+        <label class="check"><input type="checkbox" name="context_enabled"> <span>Market context: macro, news, derivatives (restart to apply)</span></label>
       </fieldset>
       <fieldset class="fieldset">
         <legend>Automation</legend>
