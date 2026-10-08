@@ -177,7 +177,9 @@ a:hover { color: #67e8f9; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 4px;
 }
 .tile-value.flash, .kv-v.flash, .card-net-value.flash { animation: value-flash 700ms var(--ease-out) 1; }
-.tile-lights { display: flex; gap: 10px; }
+.tile-lights { display: flex; gap: 10px; flex-wrap: wrap; font-size: 1rem; }
+.tile.tile-wide { grid-column: span 2; }
+.tile.tile-wide .tile-value { overflow: visible; white-space: normal; }
 
 /* ---------- health strip ---------- */
 .health-strip {

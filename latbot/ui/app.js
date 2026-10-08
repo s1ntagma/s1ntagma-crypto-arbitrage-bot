@@ -550,7 +550,7 @@
     box.appendChild(tile('Lights', h('span', { class: 'tile-lights' },
       h('span', { class: 'light green', text: '🟢 ' + fmtInt(d.green) }),
       h('span', { class: 'light yellow', text: '🟡 ' + fmtInt(d.yellow) }),
-      h('span', { class: 'light red', text: '🔴 ' + fmtInt(d.red) }))));
+      h('span', { class: 'light red', text: '🔴 ' + fmtInt(d.red) })), 'tile-wide'));
     box.appendChild(tile('Human OK', fmtInt(d.human_executable)));
     box.appendChild(tile('Bot OK', fmtInt(d.bot_executable)));
     box.appendChild(tile('TG alerts', fmtInt(d.telegram_alerts)));
