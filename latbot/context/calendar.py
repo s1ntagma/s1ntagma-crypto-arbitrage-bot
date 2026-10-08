@@ -22,9 +22,13 @@
 ``BlsActuals`` (collector ``"bls_actuals"``, optional)
     For a few minutes after a mapped US release (CPI, Core CPI, PPI, NFP,
     Unemployment Rate) polls the BLS Atom feeds and parses the headline numbers
-    with strict regexes; with a BLS API key it later validates / fills values
-    (incl. Average Hourly Earnings) from the BLS API v2 (documented ~1 day lag).
-    Nothing found -> nothing set (honest "no data").
+    with strict regexes; with a BLS API key, values still missing (incl. Average
+    Hourly Earnings, which the Atom headline lacks) are filled later from the BLS
+    API v2 (documented ~1 day lag).  Nothing found -> nothing set (honest "no data").
+
+Note: several FF rows describe ONE release (CPI m/m + CPI y/y + Core CPI at 12:30;
+NFP + Unemployment Rate + AHE): consumers that learn per release should group by
+``(event_type family, ts)`` to avoid counting one market reaction several times.
 """
 from __future__ import annotations
 
@@ -321,15 +325,17 @@ def _looks_html(text: str) -> bool:
 
 def _check_ff_body(resp: Any, what: str) -> str:
     """HTTP status + body sanity for an FF export; raises RateLimitedSource / SourceError."""
+    text = resp.text or ""
+    is_html = _looks_html(text)
+    if is_html:
+        low = text.lower()
+        if "request denied" in low or "exceeded the limit" in low:  # FF export limit page (any status)
+            raise RateLimitedSource(FF_RATE_LIMIT_S, f"{what}: Request Denied (FF export limit)")
     try:
         check_response(resp, what, default_retry_s=FF_RATE_LIMIT_S)
     except RateLimitedSource as e:
         raise RateLimitedSource(max(FF_RATE_LIMIT_S, e.retry_after_s), str(e)) from None
-    text = resp.text or ""
-    if _looks_html(text):
-        low = text.lower()
-        if "request denied" in low or "exceeded the limit" in low or "too many requests" in low:
-            raise RateLimitedSource(FF_RATE_LIMIT_S, f"{what}: Request Denied (FF export limit)")
+    if is_html:
         raise SourceError(f"{what}: HTML instead of a calendar")
     if not text.strip():
         raise SourceError(f"{what}: empty body")
@@ -662,3 +668,392 @@ class MacroCalendar(PollingCollector):
 
 def _utc_date(ts: float) -> str:
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+# --------------------------------------------------------------------------- #
+# BLS actual values (optional)
+# --------------------------------------------------------------------------- #
+BLS_FEEDS: dict[str, str] = {
+    "cpi": "https://www.bls.gov/feed/cpi.rss",
+    "empsit": "https://www.bls.gov/feed/empsit.rss",
+    "ppi": "https://www.bls.gov/feed/ppi.rss",
+}
+BLS_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/{series}"
+
+# kind -> (Atom feed or None, BLS API series or None, API value mode)
+BLS_KINDS: dict[str, tuple[str | None, str | None, str | None]] = {
+    "cpi_mm": ("cpi", "CUSR0000SA0", "pct"),
+    "cpi_yy": ("cpi", None, None),  # official y/y needs the NSA index (series id not verified)
+    "core_cpi_mm": ("cpi", "CUSR0000SA0L1E", "pct"),
+    "core_cpi_yy": ("cpi", None, None),
+    "ppi_mm": ("ppi", "WPSFD4", "pct"),
+    "ppi_yy": ("ppi", None, None),
+    "nfp": ("empsit", "CES0000000001", "diff_k"),
+    "unemployment": ("empsit", "LNS14000000", "level_pct"),
+    "ahe_mm": (None, "CES0500000003", "pct"),  # not in the Atom headline
+}
+
+
+def bls_kind(event: MacroEvent) -> str | None:
+    """Which BLS headline number an FF event corresponds to (None: not a BLS-mapped release)."""
+    if event.country != "USD":
+        return None
+    t = _clean_title(event.title)
+    mm, yy = t.endswith("m/m"), t.endswith("y/y")
+    et = event.event_type
+    if et == "CPI":
+        return "cpi_mm" if mm else "cpi_yy" if yy else None
+    if et == "CORE_CPI":
+        return "core_cpi_mm" if mm else "core_cpi_yy" if yy else None
+    if et == "PPI":
+        return "ppi_mm" if mm else "ppi_yy" if yy else None
+    if et == "NFP":
+        return "nfp"
+    if et == "UNEMPLOYMENT":
+        return "unemployment"
+    if et == "EARNINGS":
+        return "ahe_mm" if mm else None
+    return None
+
+
+_ENTRY_RE = re.compile(r"<entry\b[^>]*>(.*?)</entry>", re.S | re.I)
+_TAG_STRIP_RE = re.compile(r"<[^>]+>")
+
+
+def _atom_text(block: str, name: str) -> str:
+    m = re.search(rf"<{name}\b[^>]*?(?:/>|>(.*?)</{name}>)", block, re.S | re.I)
+    if not m or m.group(1) is None:
+        return ""
+    v = m.group(1).strip()
+    c = _CDATA_RE.match(v)
+    v = c.group(1) if c else html.unescape(v)
+    v = html.unescape(_TAG_STRIP_RE.sub(" ", v)) if "<" in v else v
+    return _WS_RE.sub(" ", v).strip()
+
+
+def parse_bls_feed(text: str) -> list[dict[str, Any]]:
+    """BLS Atom feed -> entries: title, content, published_ts (None when unparsable), link, id."""
+    out: list[dict[str, Any]] = []
+    for m in _ENTRY_RE.finditer(text or ""):
+        block = m.group(1)
+        raw = _atom_text(block, "published") or _atom_text(block, "updated")
+        ts: float | None = None
+        try:
+            dt = datetime.fromisoformat(raw) if raw else None
+            if dt is not None and dt.tzinfo is not None:
+                ts = dt.timestamp()
+        except ValueError:
+            ts = None
+        link = re.search(r"<link\b[^>]*\bhref=\"([^\"]+)\"", block, re.I)
+        out.append({
+            "title": _atom_text(block, "title"), "content": _atom_text(block, "content") or _atom_text(block, "summary"),
+            "published_ts": ts, "link": link.group(1) if link else "", "id": _atom_text(block, "id"),
+        })
+    return out
+
+
+_UP = (r"(?:rose|increased|advanced|moved up|edged up|climbed|gained|rises|increases|advances|moves up|"
+       r"edges up|climbs|gains)")
+_DOWN = r"(?:fell|declined|decreased|moved down|edged down|dropped|falls|declines|decreases|moves down|edges down|drops)"
+_DOWN_RE = re.compile(rf"^{_DOWN}$", re.I)
+_MOVE = rf"(?P<verb>{_UP}|{_DOWN})"
+_NUM = r"(?P<num>\d+(?:\.\d+)?)"
+_MONTH = r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+_JOBS = r"(?P<num>\d{1,3}(?:,\d{3})*)"
+_FILLER = r"(?:[^.]|(?<=\d)\.(?=\d))*?"  # within one sentence (decimal points allowed)
+
+
+def _rx(*patterns: str) -> tuple[re.Pattern[str], ...]:
+    return tuple(re.compile(p, re.I) for p in patterns)
+
+
+_BLS_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "cpi_mm": _rx(
+        rf"Consumer Price Index for All Urban Consumers {_MOVE} {_NUM} percent(?: in {_MONTH})?, seasonally adjusted",
+        rf"Consumer Price Index for All Urban Consumers (?:was )?unchanged(?: in {_MONTH})?, seasonally adjusted",
+        rf"^CPI for all items {_MOVE} {_NUM}% in {_MONTH}\b",
+        rf"^CPI for all items (?:is )?unchanged in {_MONTH}\b",
+    ),
+    "cpi_yy": _rx(
+        rf"Consumer Price Index for All Urban Consumers {_FILLER}\b{_MOVE} {_NUM} percent over the last 12 months, "
+        r"not seasonally adjusted",
+        rf"^CPI for all items {_MOVE} {_NUM}% over (?:the last )?12 months\b",
+    ),
+    "core_cpi_mm": _rx(
+        rf"index for all items less food and energy {_MOVE} {_NUM} percent in {_MONTH} \(SA\)",
+        rf"index for all items less food and energy (?:was )?unchanged in {_MONTH} \(SA\)",
+    ),
+    "core_cpi_yy": _rx(
+        rf"index for all items less food and energy {_FILLER}\(SA\)[;,] (?P<dir>up|down) {_NUM} percent over the year \(NSA\)",
+        rf"index for all items less food and energy {_MOVE} {_NUM} percent over the year \(NSA\)",
+    ),
+    "ppi_mm": _rx(
+        rf"Producer Price Index for final demand {_MOVE} {_NUM} percent in {_MONTH}",
+        rf"Producer Price Index for final demand (?:was )?unchanged in {_MONTH}",
+        rf"^PPI for final demand {_MOVE} {_NUM}% in {_MONTH}\b",
+        rf"^PPI for final demand (?:is )?unchanged in {_MONTH}\b",
+    ),
+    "ppi_yy": _rx(
+        rf"(?:index for|prices for) final demand {_MOVE} {_NUM} percent for the 12 months ended in {_MONTH}",
+    ),
+    "nfp": _rx(
+        rf"payroll employment \((?P<sign>[+-]){_JOBS}\)",
+        rf"payroll employment (?:changed little|was little changed|{_UP}|{_DOWN}) in {_MONTH} \((?P<sign>[+-]){_JOBS}\)",
+        rf"payroll employment {_MOVE}(?: by)? {_JOBS} in {_MONTH}",
+    ),
+    "unemployment": _rx(
+        rf"unemployment rate \({_NUM}(?:%| percent)\)",
+        rf"unemployment rate (?:was unchanged|unchanged|changed little|changes little|was little changed|ticked up|"
+        rf"ticked down|ticks up|ticks down|{_UP}|{_DOWN})(?: in {_MONTH})? (?:at|to) {_NUM}(?:%| percent)",
+        rf"unemployment rate was {_NUM} percent",
+    ),
+}
+
+
+def _fmt_pct(v: float) -> str:
+    v = round(v, 1)
+    return f"{0.0 if v == 0 else v:.1f}%"
+
+
+def _fmt_k(jobs: float) -> str:
+    k = jobs / 1000.0
+    return f"{int(round(k))}K" if abs(k - round(k)) < 1e-9 else f"{k:.1f}K"
+
+
+def bls_headline(kind: str, title: str, content: str) -> str | None:
+    """Headline number of a BLS release entry in FF display format ("0.4%", "29K", "4.2%").
+
+    Every pattern match in title + content must agree; no match or a disagreement -> None."""
+    pats = _BLS_PATTERNS.get(kind)
+    if not pats:
+        return None
+    found: set[str] = set()
+    for text in (_WS_RE.sub(" ", title or "").strip(), _WS_RE.sub(" ", content or "").strip()):
+        for p in pats:
+            for m in p.finditer(text):
+                g = m.groupdict()
+                num = g.get("num")
+                if num is None:
+                    v = 0.0  # "unchanged"
+                else:
+                    v = float(num.replace(",", ""))
+                    if g.get("sign") == "-" or (g.get("dir") or "").lower() == "down" or (
+                            g.get("verb") and _DOWN_RE.match(g["verb"])):
+                        v = -v
+                found.add(_fmt_k(v) if kind == "nfp" else _fmt_pct(v))
+    return found.pop() if len(found) == 1 else None
+
+
+def _prev_month(y: int, m: int) -> tuple[int, int]:
+    return (y - 1, 12) if m == 1 else (y, m - 1)
+
+
+def bls_api_value(payload: Any, mode: str, release_ts: float) -> tuple[str | None, str]:
+    """BLS API v1/v2 single-series payload -> (FF-style value, state).
+
+    state: "ok", "not_yet" (reference month not published yet), "too_late" (a newer month is
+    already there), "bad" (gap / unparsable).  The reference month is the month before the
+    release date.  Raises SourceError / RateLimitedSource for an API-level failure."""
+    if not isinstance(payload, dict):
+        raise SourceError("BLS API: unexpected payload")
+    status = str(payload.get("status") or "")
+    if status != "REQUEST_SUCCEEDED":
+        msg = " ".join(str(x) for x in (payload.get("message") or []))[:200]
+        if "threshold" in msg.lower():
+            raise RateLimitedSource(6 * 3600.0, "BLS API: daily threshold reached")
+        raise SourceError(f"BLS API: {status or 'no status'} {msg}".strip())
+    try:
+        data = payload["Results"]["series"][0]["data"]
+    except (KeyError, IndexError, TypeError):
+        return None, "bad"
+    rows: list[tuple[int, int, float]] = []
+    for r in data or []:
+        try:
+            period = str(r.get("period") or "")
+            if not re.fullmatch(r"M(0[1-9]|1[0-2])", period):
+                continue
+            v = float(str(r.get("value")).replace(",", ""))
+            if math.isfinite(v):
+                rows.append((int(r.get("year")), int(period[1:]), v))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    if not rows:
+        return None, "bad"
+    rows.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    d = datetime.fromtimestamp(float(release_ts), tz=timezone.utc)
+    ref = _prev_month(d.year, d.month)
+    latest = (rows[0][0], rows[0][1])
+    if latest < ref:
+        return None, "not_yet"
+    if latest > ref:
+        return None, "too_late"
+    v = rows[0][2]
+    if mode == "level_pct":
+        return _fmt_pct(v), "ok"
+    if len(rows) < 2 or (rows[1][0], rows[1][1]) != _prev_month(*ref) or rows[1][2] == 0:
+        return None, "bad"
+    prev = rows[1][2]
+    if mode == "pct":
+        return _fmt_pct((v / prev - 1.0) * 100.0), "ok"
+    if mode == "diff_k":
+        return _fmt_k((v - prev) * 1000.0), "ok"
+    return None, "bad"
+
+
+class BlsActuals(PollingCollector):
+    """Fills ``actual`` of released NFP / CPI / Core CPI / PPI / Unemployment events (and
+    Average Hourly Earnings with an API key) from official BLS publications.
+
+    Atom feeds (keyless) are polled every ``bls_poll_s`` for ``bls_window_s`` after the
+    scheduled release; the matching entry (published within ``bls_match_s`` of the release)
+    is parsed with strict regexes.  With ``api_key`` missing values are retried on the BLS
+    API v2 from ``bls_api_delay_s`` to ``bls_api_max_age_s`` after the release.  Each found
+    value goes to ``calendar.set_actual``; nothing found -> nothing set."""
+
+    name = "bls_actuals"
+    max_results = 50
+
+    def __init__(self, settings: Any, clock: Any, http: Any, calendar: MacroCalendar, *, api_key: str = "") -> None:
+        super().__init__(settings, clock, http, interval_s=max(2.0, _num_setting(settings, "bls_poll_s", 10.0)),
+                         enabled=bool(getattr(settings, "bls_enabled", True)))
+        self._calendar = calendar
+        self._api_key = (api_key or "").strip()
+        if self._api_key:
+            register_secret(self._api_key)
+        self._attempted: set[str] = set()
+        self._atom_done: set[str] = set()
+        self._done: set[str] = set()
+        self._api_next: dict[str, float] = {}
+        self.results: list[dict[str, Any]] = []
+        if self.status.enabled and not self._api_key:
+            self.status.note = "без BLS_API_KEY: только Atom-ленты BLS"
+
+    @property
+    def has_api_key(self) -> bool:
+        return bool(self._api_key)
+
+    def _headers(self) -> dict[str, str]:
+        contact = str(getattr(self._settings, "bls_contact", "") or "").strip()
+        return {"User-Agent": USER_AGENT + (f" ({contact})" if contact else ""),
+                "Accept": "application/atom+xml,application/xml;q=0.9,*/*;q=0.5"}
+
+    def _record(self, ev: MacroEvent, kind: str, value: str | None, source: str, now: float, note: str = "") -> None:
+        self.results.append({
+            "event_id": ev.id, "title": ev.title, "event_type": ev.event_type, "kind": kind, "actual": value,
+            "source": source, "found_ts": now if value else None, "delay_s": (now - ev.ts) if value else None,
+            "note": note,
+        })
+        del self.results[:-self.max_results]
+
+    def _apply(self, ev: MacroEvent, kind: str, value: str, source: str, now: float) -> None:
+        self._calendar.set_actual(ev.id, value, source=source)
+        self._done.add(ev.id)
+        self._record(ev, kind, value, source, now)
+        log.info("BLS actual %s = %s (%s, %.0f s after the scheduled release)", ev.title, value, source, now - ev.ts)
+
+    async def poll_once(self) -> int:
+        now = self._clock.wall()
+        window = max(0.0, _num_setting(self._settings, "bls_window_s", 600.0))
+        api_delay = max(0.0, _num_setting(self._settings, "bls_api_delay_s", 3600.0))
+        api_max_age = max(api_delay, _num_setting(self._settings, "bls_api_max_age_s", 172800.0))
+        atom_need: dict[str, list[tuple[MacroEvent, str]]] = {}
+        api_need: list[tuple[MacroEvent, str, str, str]] = []
+        for ev in self._calendar.events():
+            if ev.id in self._done:
+                continue
+            kind = bls_kind(ev)
+            if kind is None or not self._calendar.is_time_known(ev.id):
+                continue
+            if ev.actual:  # already known (another source / manual)
+                self._done.add(ev.id)
+                continue
+            age = now - ev.ts
+            if age < 0:
+                continue
+            feed, series, mode = BLS_KINDS[kind]
+            if feed and ev.id not in self._atom_done:
+                if age <= window:
+                    atom_need.setdefault(feed, []).append((ev, kind))
+                    continue
+                self._atom_done.add(ev.id)
+                if ev.id in self._attempted:
+                    self._record(ev, kind, None, "bls_atom", now, "нет данных в ленте BLS за окно")
+                    log.info("BLS: no headline for %s within %.0f s - surprise stays unknown", ev.title, window)
+            if self._api_key and series and mode:
+                if age > api_max_age:
+                    self._done.add(ev.id)
+                    if ev.id in self._attempted:
+                        self._record(ev, kind, None, "bls_api", now, "нет данных в BLS API")
+                elif age >= api_delay and now >= self._api_next.get(ev.id, 0.0):
+                    api_need.append((ev, kind, series, mode))
+                continue
+            self._done.add(ev.id)
+
+        errors: list[str] = []
+        found = 0
+        for feed, items in atom_need.items():
+            try:
+                resp = await self._http.get(BLS_FEEDS[feed], headers=self._headers(), timeout_s=10.0)
+                check_response(resp, f"BLS {feed}")
+                entries = parse_bls_feed(resp.text)
+            except RateLimitedSource:
+                raise
+            except Exception as e:  # noqa: BLE001 - reported via status, retried next poll
+                errors.append(f"BLS {feed}: {type(e).__name__}: {e}" if str(e) else f"BLS {feed}: {type(e).__name__}")
+                continue
+            match_s = max(0.0, _num_setting(self._settings, "bls_match_s", 10800.0))
+            for ev, kind in items:
+                self._attempted.add(ev.id)
+                cands = [e for e in entries if e["published_ts"] is not None and abs(e["published_ts"] - ev.ts) <= match_s]
+                if len(cands) != 1:
+                    continue  # not published yet (or ambiguous) - keep polling inside the window
+                value = bls_headline(kind, cands[0]["title"], cands[0]["content"])
+                if value is not None:
+                    self._apply(ev, kind, value, "bls_atom", now)
+                    found += 1
+
+        retry = max(60.0, _num_setting(self._settings, "bls_api_retry_s", 3600.0))
+        for ev, kind, series, mode in api_need:
+            self._attempted.add(ev.id)
+            self._api_next[ev.id] = now + retry
+            try:
+                resp = await self._http.get(BLS_API_URL.format(series=series), params={"registrationkey": self._api_key},
+                                            headers=self._headers(), timeout_s=15.0)
+                check_response(resp, "BLS API")
+                value, state = bls_api_value(resp.json(), mode, ev.ts)
+            except RateLimitedSource as e:
+                for k in list(self._api_next):
+                    self._api_next[k] = max(self._api_next[k], now + e.retry_after_s)
+                errors.append(str(e))
+                break
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"BLS API {series}: {type(e).__name__}: {e}" if str(e) else f"BLS API {series}: error")
+                continue
+            if value is not None:
+                self._apply(ev, kind, value, "bls_api", now)
+                found += 1
+            elif state in ("too_late", "bad"):
+                self._done.add(ev.id)
+                self._record(ev, kind, None, "bls_api", now, f"BLS API: {state}")
+        if errors and not found:
+            raise SourceError("; ".join(errors))
+        notes = [] if self._api_key else ["без BLS_API_KEY: только Atom-ленты BLS"]
+        if atom_need:
+            notes.append(f"ждёт релиз: {sum(len(v) for v in atom_need.values())}")
+        self.status.note = "; ".join(notes)
+        return sum(1 for r in self.results if r["actual"])
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "enabled": self.status.enabled,
+            "api_key": self.has_api_key,  # presence only, never the key
+            "results": list(self.results),
+            "status": self.status.to_dict(),
+        }
+
+
+__all__ = [
+    "BLS_FEEDS", "BLS_KINDS", "EBASE_TYPES", "FF_JSON_URL", "FF_XML_URL", "IMPACT_RANK", "TITLE_TYPES",
+    "BlsActuals", "MacroCalendar", "bls_api_value", "bls_headline", "bls_kind", "classify_title",
+    "parse_bls_feed", "parse_ff_json", "parse_ff_xml", "parse_number", "surprise_of",
+]
