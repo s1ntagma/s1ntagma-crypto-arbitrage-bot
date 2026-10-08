@@ -83,6 +83,7 @@ def make_settings(**over) -> Settings:
         min_movers=2,
         price_sample_min_interval_ms=0.0,
         ui_push_interval_ms=50,
+        tick_outlier_pct=0.0,  # tests push synthetic 2 % ticker jumps directly into the state
     )
     base.update(over)
     return Settings(**base)

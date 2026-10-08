@@ -277,6 +277,10 @@ class CcxtAdapter(ExchangeAdapter):
         }
         if self.cfg.hostname:
             opts["hostname"] = self.cfg.hostname
+        if self.cfg.ccxt_name == "htx":
+            # default watchTicker channel 'detail' is 24h statistics (no bid/ask);
+            # 'ticker' carries bid/ask/last and does not flap
+            opts["options"]["watchTicker"] = {"name": "market.{marketId}.ticker"}
         return opts
 
     @staticmethod

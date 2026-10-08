@@ -313,7 +313,7 @@ class _StubState:
     def __init__(self) -> None:
         self.tickers: list[tuple[str, str, bool]] = []
 
-    def on_ticker(self, ticker: Any, *, append_mid: bool = True) -> None:
+    def on_ticker(self, ticker: Any, *, append_mid: bool = True, outlier_guard: bool = True) -> None:
         self.tickers.append((ticker.exchange, ticker.asset, append_mid))
 
 

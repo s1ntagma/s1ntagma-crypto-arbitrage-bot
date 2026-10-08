@@ -200,6 +200,7 @@ class Settings:
     confirm_with_rest_book: bool = True  # for polled assets fetch the target REST book before creating an opportunity
     rest_book_timeout_s: float = 2.0  # REST book confirmation: per-request timeout (single-flight, bounded per exchange)
     price_sample_min_interval_ms: float = 100.0  # throttle mid-price series appends per stream
+    tick_outlier_pct: float = 0.5  # a lone ticker tick this far from the series waits for a confirming tick (0 = off)
     # ---- signal quality --------------------------------------------------
     min_movers: int = 2  # at least this many exchanges must have moved (single-venue spikes revert)
     min_mover_volume_quote: float = 1_000_000.0  # 24h quote volume for a mover exchange to count
@@ -327,7 +328,7 @@ class Settings:
                 continue
             cur = getattr(self, k)
             if k == "exchanges":
-                new = [_exchange_from_dict(x) for x in v]
+                new = _merge_default_exchanges([_exchange_from_dict(x) for x in v])
             elif isinstance(cur, bool):
                 new = _to_bool(v)
             elif isinstance(cur, int) and not isinstance(cur, bool):
@@ -384,6 +385,13 @@ def _to_bool(v: Any) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _merge_default_exchanges(saved: list[ExchangeConfig]) -> list[ExchangeConfig]:
+    """Venues added to ``DEFAULT_EXCHANGES`` after the user's config.json was
+    written are appended (with their defaults); the saved entries are kept as is."""
+    have = {e.name for e in saved}
+    return saved + [ExchangeConfig(**asdict(e)) for e in DEFAULT_EXCHANGES if e.name not in have]
+
+
 def _exchange_from_dict(x: dict[str, Any]) -> ExchangeConfig:
     x = dict(x)
     if "role" in x and not isinstance(x["role"], ExchangeRole):
@@ -401,6 +409,7 @@ def load_settings(path: str | os.PathLike[str] = "config.json") -> Settings:
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
             s = Settings.from_dict(data)
+            s.exchanges = _merge_default_exchanges(s.exchanges)  # venues added after this config.json was written
             _apply_env_overrides(s)
             return s
         except Exception as exc:  # noqa: BLE001

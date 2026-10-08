@@ -244,7 +244,7 @@ class TickerPoller:
                 count += 1
                 is_streamed = asset in streamed
                 try:
-                    self._state.on_ticker(ticker, append_mid=not is_streamed)
+                    self._state.on_ticker(ticker, append_mid=not is_streamed, outlier_guard=False)
                 except Exception:  # noqa: BLE001
                     log.exception("state.on_ticker failed for %s %s", name, asset)
                     continue

@@ -116,7 +116,7 @@ def test_recent_quote_volume_window():
 
 
 def test_ticker_mid_volume_and_series():
-    st, _ = make_state(price_sample_min_interval_ms=0)
+    st, _ = make_state(price_sample_min_interval_ms=0, tick_outlier_pct=0)  # artificial 2x jumps
     st.on_ticker(ticker("kraken", 1000.0, bid=100.0, ask=100.2, quote_volume=5_000_000.0, symbol="BTC/EUR"))
     assert st.volume24h("kraken", "BTC") == 5_000_000.0
     assert st.mid_series("kraken", "BTC")[-1] == (1000.0, 100.1)
@@ -134,7 +134,7 @@ def test_ticker_mid_volume_and_series():
 def test_on_ticker_volume_only_does_not_touch_series():
     """Polled tickers for WebSocket-streamed assets update volume / ticker /
     liveness only: their (older) price never enters the live mid series."""
-    st, _ = make_state(price_sample_min_interval_ms=0)
+    st, _ = make_state(price_sample_min_interval_ms=0, tick_outlier_pct=0)
     st.on_book(book("binance", 102.0, 1000.0))
     st.on_ticker(ticker("binance", 1000.2, bid=99.99, ask=100.01, quote_volume=7_000_000.0), append_mid=False)
     assert list(st.mid_series("binance", "BTC")) == [(1000.0, 102.0)]
@@ -145,3 +145,32 @@ def test_on_ticker_volume_only_does_not_touch_series():
     # default keeps appending (poll-only assets, WS bbo tickers)
     st.on_ticker(ticker("binance", 1000.4, bid=99.99, ask=100.01))
     assert list(st.mid_series("binance", "BTC"))[-1] == (1000.4, 100.0)
+
+
+def test_ticker_outlier_tick_is_held_until_a_second_tick_confirms_it():
+    """A lone ticker tick 0.8 % away from the series is a data glitch until the
+    next tick agrees (HTX 'detail' flapping produced fake +-0.8 % moves)."""
+    st, _ = make_state(tick_outlier_pct=0.5)
+    st.on_ticker(ticker("htx", 1000.0, bid=100.0, ask=100.0))
+    st.on_ticker(ticker("htx", 1001.0, bid=100.0, ask=100.0))
+    st.on_ticker(ticker("htx", 1002.0, bid=100.8, ask=100.8))  # outlier: held
+    assert st.mid_at("htx", "BTC", 1002.0) == 100.0
+    st.on_ticker(ticker("htx", 1003.0, bid=100.0, ask=100.0))  # reverted: glitch dropped
+    assert st.mid_at("htx", "BTC", 1003.0) == 100.0
+    assert len(st._series[("htx", "BTC")]) == 3
+    st.on_ticker(ticker("htx", 1004.0, bid=100.8, ask=100.8))  # held again
+    st.on_ticker(ticker("htx", 1005.0, bid=100.85, ask=100.85))  # confirmed: both points land
+    series = st._series[("htx", "BTC")]
+    assert [m for _, m in series[-2:]] == [100.8, 100.85]
+    assert st.last_data_mono("htx", "BTC") == 1005.0  # liveness never suffers
+
+
+def test_ticker_outlier_guard_off_and_books_untouched():
+    st, _ = make_state(tick_outlier_pct=0.0)
+    st.on_ticker(ticker("htx", 1000.0, bid=100.0, ask=100.0))
+    st.on_ticker(ticker("htx", 1001.0, bid=102.0, ask=102.0))
+    assert st.mid_at("htx", "BTC", 1001.0) == 102.0
+    st2, _ = make_state(tick_outlier_pct=0.5)
+    st2.on_book(book("kraken", 100.0, 1000.0))
+    st2.on_book(book("kraken", 102.0, 1001.0))
+    assert abs(st2.mid_at("kraken", "BTC", 1001.0) - 102.0) < 0.01

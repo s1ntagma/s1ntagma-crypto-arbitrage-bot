@@ -30,6 +30,10 @@ echo [latbot] using: %PY%
 rem ---- 2. dependencies (first run or when requirements.txt changed) ----
 set NEED_PIP=0
 if not exist .deps_ok set NEED_PIP=1
+rem .deps_ok is a copy of the requirements.txt installed last time:
+rem a new bot version with new packages reinstalls by itself.
+fc /b requirements.txt .deps_ok >nul 2>&1
+if errorlevel 1 set NEED_PIP=1
 rem (to force a reinstall: delete the .deps_ok file)
 if "%NEED_PIP%"=="1" (
   echo [latbot] installing dependencies, this takes a minute...
@@ -40,7 +44,7 @@ if "%NEED_PIP%"=="1" (
     pause
     exit /b 1
   )
-  echo ok > .deps_ok
+  copy /y requirements.txt .deps_ok >nul
 )
 
 rem ---- 3. .env with the Telegram token --------------------------

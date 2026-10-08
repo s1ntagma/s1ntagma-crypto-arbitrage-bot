@@ -45,6 +45,7 @@ class MarketState:
         self._trades: dict[Key, Deque[Trade]] = {}
         self._series: dict[Key, list[tuple[float, float]]] = {}
         self._last_append_mono: dict[Key, float] = {}  # throttle anchor per stream
+        self._pending_tick: dict[Key, tuple[float, float]] = {}  # held outlier ticker tick per stream
         self._last_data_mono: dict[Key, float] = {}  # last book OR ticker recv_mono
         self._volume24h: dict[Key, float] = {}
         self._health: dict[str, ExchangeHealth] = {}
@@ -113,8 +114,12 @@ class MarketState:
         if mid:
             self._append_mid(key, mono, mid)
 
-    def on_ticker(self, ticker: Ticker, *, append_mid: bool = True) -> None:
+    def on_ticker(self, ticker: Ticker, *, append_mid: bool = True, outlier_guard: bool = True) -> None:
         """Store the ticker, its 24h volume and (``append_mid``) its mid.
+
+        ``outlier_guard=False`` is for REST-polled tickers: one sample per poll
+        round, so a real jump between two polls must land at once (streams get
+        the single-tick guard, see ``_ticker_outlier``).
 
         ``append_mid=False`` is for polled REST tickers of assets the same
         exchange already streams over WebSocket: a REST price is 1-2 s old and
@@ -143,8 +148,36 @@ class MarketState:
             vol = float(ticker.base_volume) * mid
         if vol is not None and vol >= 0:
             self._volume24h[key] = vol
-        if mid and append_mid:
+        if mid and append_mid and not (outlier_guard and self._ticker_outlier(key, mono, mid)):
             self._append_mid(key, mono, mid)
+
+    def _ticker_outlier(self, key: Key, mono: float, mid: float) -> bool:
+        """Single-tick outlier guard for ticker streams (no depth to validate).
+
+        A tick more than ``tick_outlier_pct`` away from the series is held back;
+        it lands (together with the next tick) only when that next tick agrees
+        with it, otherwise it is dropped as a glitch.  Order books skip this:
+        their mid is cross-checked by the economics on real depth.
+        """
+        pct = float(self._settings.tick_outlier_pct)
+        if pct <= 0:
+            return False
+        series = self._series.get(key)
+        if not series:
+            self._pending_tick.pop(key, None)
+            return False
+        last = series[-1][1]
+        if last <= 0 or abs(mid / last - 1.0) * 100.0 <= pct:
+            self._pending_tick.pop(key, None)
+            return False
+        pending = self._pending_tick.pop(key, None)
+        if pending is not None and abs(mid / pending[1] - 1.0) * 100.0 <= pct:
+            self._append_mid(key, pending[0], pending[1])  # confirmed: the move is real
+            return False
+        self._pending_tick[key] = (mono, mid)
+        log.debug("%s %s: ticker tick %.6g is %.2f%% off the series (%.6g); waiting for confirmation",
+                  key[0], key[1], mid, abs(mid / last - 1.0) * 100.0, last)
+        return True
 
     def on_trade(self, trade: Trade) -> None:
         asset = self.asset_of(trade)

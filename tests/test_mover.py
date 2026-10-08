@@ -93,7 +93,7 @@ class Harness:
 
     def push_ticker(self, ex: str, mid: float, volume: float | None = None, source: str = "poll"):
         t = self.ticker(ex, mid, volume)
-        self.state.on_ticker(t)
+        self.state.on_ticker(t, outlier_guard=source != "poll")
         return self.det.on_ticker(t, source=source)
 
     def warm_up(self) -> None:

@@ -849,3 +849,12 @@ async def test_exec_only_demo_adapter_asserts_the_demo_host_at_start():
         await h.adapter.start(["BTC"], ws_assets=0)
     assert h.adapter._tasks == [] and h.public.loaded == 0
     await h.adapter.stop()
+
+
+def test_htx_ticker_stream_uses_the_bbo_ticker_channel():
+    """HTX's default watchTicker channel ('detail') is 24h statistics without
+    bid/ask; the 'ticker' channel carries bid/ask/last."""
+    h = Harness(ExchangeConfig(name="htx", role=ExchangeRole.SIGNAL, stream="bbo"), None)
+    assert h.public.opts["options"]["watchTicker"] == {"name": "market.{marketId}.ticker"}
+    h2 = Harness(spot_cfg(), CREDS)
+    assert "watchTicker" not in h2.public.opts["options"]
