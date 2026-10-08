@@ -82,6 +82,9 @@ class Pipeline:
         self._state = state
         self._detector = detector
         self.diag: Diagnostics = diag or getattr(detector, "diag", None) or Diagnostics(settings, clock)
+        # Phase 3 narrow pool (universe.pool.AssetPool or anything with contains(asset)); None = scan everything.
+        self.pool: Any = None
+        self.pool_skipped: set[str] = set()  # assets seen but not scanned (outside the pool), for DIAG
         self._stats = stats
         self._opps = opps
         self._adapters = adapters
@@ -172,9 +175,25 @@ class Pipeline:
     def _on_health(self, h: ExchangeHealth) -> None:
         self._state.on_health(h)
 
+    def scanned(self, asset: str) -> bool:
+        """False for an asset outside the Phase 3 pool: its prices are kept, it is never detected."""
+        pool = self.pool
+        if pool is None or not asset:
+            return True
+        try:
+            ok = bool(pool.contains(asset))
+        except Exception:  # noqa: BLE001
+            log.exception("pool.contains failed for %s; scanning it", asset)
+            return True
+        if not ok and len(self.pool_skipped) < 5000:
+            self.pool_skipped.add(asset)
+        return ok
+
     async def _on_ticker(self, ticker: Ticker) -> None:
         self.diag.tick(ticker.exchange, "ticker")
         self._state.on_ticker(ticker)
+        if not self.scanned(MarketState.asset_of(ticker)):
+            return
         for sig in self._detector.on_ticker(ticker, source="ws"):
             await self.evaluate(sig)
 
@@ -187,7 +206,7 @@ class Pipeline:
         Never waits on REST: a stale target book is confirmed in the background."""
         self.diag.tick(book.exchange, "book")
         self._state.on_book(book)
-        signals = self._detector.on_book(book)
+        signals = self._detector.on_book(book) if self.scanned(MarketState.asset_of(book)) else []
         results: list[Opportunity] = []
         seen: set[str] = set()
         for sig in signals:

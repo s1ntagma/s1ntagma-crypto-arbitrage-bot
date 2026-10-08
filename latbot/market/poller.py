@@ -259,7 +259,10 @@ class TickerPoller:
                     await asyncio.sleep(0)
         # pass B: asset-wide detection, once per asset, on all freshly stored tickers
         detected = 0
+        scanned = getattr(self._pipeline, "scanned", None)
         for asset, ticker in pending.items():
+            if callable(scanned) and not scanned(asset):
+                continue  # Phase 3: outside the narrow pool - prices stored above, never detected
             try:
                 signals = self._detector.on_ticker(ticker, source="poll") or []
             except Exception:  # noqa: BLE001

@@ -220,18 +220,11 @@ async def resolve_watchlist(settings: Settings, market: dict[str, ExchangeAdapte
     return result
 
 
-async def resolve_universe(settings: Settings, adapters: dict[str, ExchangeAdapter]) -> tuple[list[str], list[str]]:
-    """Phase 2 coverage: ``(ws_assets, poll_assets)``.
-
-    ws   = resolved watchlist (first ``settings.ws_assets``);
-    poll = assets listed on >= 2 enabled exchanges with >= 1 EXECUTION venue,
-           sorted by total 24h quote volume, capped at ``poll_assets_max``
-           (watchlist assets excluded - they are streamed already).  Best effort:
-           an adapter whose tickers fail is skipped.
-    """
-    ws = (await resolve_watchlist(settings, adapters))[: max(1, int(settings.ws_assets))]
-    listed: dict[str, set[str]] = {}
-    volume: dict[str, float] = {}
+async def listing_map(settings: Settings, adapters: dict[str, ExchangeAdapter]) -> dict[str, dict[str, float | None]]:
+    """``asset -> {exchange: 24h quote volume}`` for every market on an ENABLED exchange
+    (REST tickers; young markets skipped).  An adapter whose tickers fail is left out
+    (best effort).  Used by the universe and by the Phase 3 asset pool."""
+    out: dict[str, dict[str, float | None]] = {}
     now = time.time()
     for name, adapter in adapters.items():
         cfg = settings.exchange(name)
@@ -243,8 +236,23 @@ async def resolve_universe(settings: Settings, adapters: dict[str, ExchangeAdapt
             log.info("universe: %s tickers unavailable (%s)", name, type(exc).__name__)
             continue
         for asset, vol in ranked:
-            listed.setdefault(asset, set()).add(name)
-            volume[asset] = volume.get(asset, 0.0) + (vol or 0.0)
+            out.setdefault(asset, {})[name] = vol
+    return out
+
+
+async def resolve_universe(settings: Settings, adapters: dict[str, ExchangeAdapter]) -> tuple[list[str], list[str]]:
+    """Phase 2 coverage: ``(ws_assets, poll_assets)``.
+
+    ws   = resolved watchlist (first ``settings.ws_assets``);
+    poll = assets listed on >= 2 enabled exchanges with >= 1 EXECUTION venue,
+           sorted by total 24h quote volume, capped at ``poll_assets_max``
+           (watchlist assets excluded - they are streamed already).  Best effort:
+           an adapter whose tickers fail is skipped.
+    """
+    ws = (await resolve_watchlist(settings, adapters))[: max(1, int(settings.ws_assets))]
+    listings = await listing_map(settings, adapters)
+    listed: dict[str, set[str]] = {a: set(v) for a, v in listings.items()}
+    volume: dict[str, float] = {a: sum((x or 0.0) for x in v.values()) for a, v in listings.items()}
     exec_names = {n for n in settings.execution_exchanges()}
     poll = [
         a for a, exs in listed.items()
@@ -258,6 +266,7 @@ __all__ = [
     "AdapterFactory",
     "build_market_adapters",
     "build_execution_adapters",
+    "listing_map",
     "resolve_watchlist",
     "resolve_universe",
 ]

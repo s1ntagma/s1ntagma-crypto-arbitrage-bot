@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from bisect import bisect_left, bisect_right
 from collections import deque
-from typing import Deque, Sequence
+from typing import Deque, Iterable, Sequence
 
 from ..clock import Clock
 from ..config import Settings
@@ -260,6 +260,24 @@ class MarketState:
         if idx == 0:
             return None
         return series[idx - 1][1]
+
+    def median_mid(self, asset: str, now_mono: float, max_age_ms: float, exchanges: Iterable[str] | None = None) -> float | None:
+        """Median of the latest mids of every FRESH stream of ``asset`` (optionally only
+        ``exchanges``).  None when no stream is fresh - nothing is carried forward."""
+        names = self._assets.get(asset, ()) if exchanges is None else exchanges
+        mids: list[float] = []
+        for ex in names:
+            series = self._series.get((ex, asset))
+            if not series or not self.is_fresh(ex, asset, now_mono, max_age_ms):
+                continue
+            mono, mid = series[-1]
+            if (now_mono - mono) * 1000.0 <= max_age_ms and mid > 0:
+                mids.append(mid)
+        if not mids:
+            return None
+        mids.sort()
+        n = len(mids)
+        return mids[n // 2] if n % 2 else (mids[n // 2 - 1] + mids[n // 2]) / 2.0
 
     def assets(self) -> set[str]:
         return set(self._assets)
