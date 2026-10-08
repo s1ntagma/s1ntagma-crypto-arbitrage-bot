@@ -20,7 +20,8 @@
   var SETTINGS_FIELDS = [
     'human_execution_time_s', 'telegram_profit_threshold_pct', 'capital_quote', 'max_trade_quote',
     'min_net_pct_show', 'min_movers', 'auto_confirm', 'alert_human_only', 'telegram_require_executable',
-    'min_quality_score', 'shadow_min_net_pct', 'max_leverage', 'pool_enabled', 'context_enabled', 'ws_assets'
+    'min_quality_score', 'shadow_min_net_pct', 'max_leverage', 'pool_enabled', 'context_enabled', 'ws_assets',
+    'simple_mode', 'simple_entry_deadline_s', 'simple_max_hold_s'
   ];
 
   var state = {
@@ -668,7 +669,7 @@
   // Phase 3: below the quality threshold (or vetoed) -> hidden by default; still traded virtually (training).
   function qualityPassed(o) {
     var q = o && o.quality;
-    return !q || q.score == null || q.passed !== false;
+    return !q || q.score == null || q.enforced === false || q.passed !== false;  // simple mode: info only
   }
 
   function passesFilters(o) {
@@ -1006,7 +1007,9 @@
       sub.textContent = 'History fills in as windows close; every expired card keeps its WHY and whether the target caught up.';
     } else if (active === 0) {
       title.textContent = 'Watching ' + (n ? n + ' exchanges' : 'exchanges') + ' · no executable lag right now';
-      sub.textContent = 'Signals need ≥2 venues to move while a target lags. Every card is a measured lag: no data, no signal — nothing is invented to fill the grid.';
+      sub.textContent = (state.settings && state.settings.simple_mode
+        ? 'Simple mode: the coin moves on its most liquid venue while your venue has not moved yet. '
+        : 'Signals need ≥2 venues to move while a target lags. ') + 'Every card is a measured lag: no data, no signal — nothing is invented to fill the grid.';
     } else if (!state.filters.lowq && lowQualityCount() > 0) {
       var lq = lowQualityCount();
       title.textContent = 'Nothing passed the quality check right now.';
@@ -1069,6 +1072,8 @@
       kv('CAPITAL', fmtMoney(econ.executable_quote, q) + (econ.liquidity_ok === false ? ' (thin book)' : '')),
       kv('EXPECTED PROFIT', fmtMoney(profit, q, { sign: true }), profit >= 0 ? 'pos' : 'neg')));
 
+    var math = mathLine(o);
+    if (math) card.appendChild(math);
     var levLine = leverageLine(o);
     if (levLine) card.appendChild(levLine);
 
@@ -1123,9 +1128,23 @@
   function qualityBadge(o) {
     var q = o.quality;
     if (!q || q.score == null) return null;
-    var cls = 'q-badge grade-' + String(q.grade || 'D').toLowerCase() + (q.passed === false ? ' failed' : '');
-    var title = (q.passed === false ? 'below the quality threshold' : 'passed the quality check') + (q.summary ? ': ' + q.summary : '');
-    return h('span', { class: cls, title: title, text: 'Quality ' + q.score + ' · ' + (q.grade || '?') });
+    var info = q.enforced === false;
+    var cls = 'q-badge grade-' + String(q.grade || 'D').toLowerCase() + (q.passed === false && !info ? ' failed' : '');
+    var title = (info ? 'simple mode: information only, does not block' : (q.passed === false ? 'below the quality threshold' : 'passed the quality check')) + (q.summary ? ': ' + q.summary : '');
+    return h('span', { class: cls, title: title, text: 'Quality ' + q.score + ' · ' + (q.grade || '?') + (info ? ' (info)' : '') });
+  }
+
+  // The whole trade in one line: how far the target lags, how much of it it usually catches up,
+  // what the venue takes (fees + execution) and what is left.
+  function mathLine(o) {
+    var sig = o.signal || {}, econ = o.econ || {};
+    var lag = num(sig.lag_pct), cu = num(sig.expected_catchup_pct), ratio = num(sig.catchup_ratio), cost = num(econ.total_cost_pct);
+    if (!Number.isFinite(lag) || !Number.isFinite(cost)) return null;
+    var parts = [exchangeLabel(o.first_mover) + ' moved, lag ' + fmtPct(lag)];
+    if (Number.isFinite(cu)) parts.push('expected catch-up ' + fmtPct(cu) + (Number.isFinite(ratio) ? ' (x' + ratio.toFixed(2) + ')' : ''));
+    parts.push('fees + execution ' + cost.toFixed(2) + '%');
+    parts.push('NET ' + fmtPct(num(econ.net_pct)));
+    return h('div', { class: 'math-line' }, parts.join(' · '));
   }
 
   function leverageLine(o) {

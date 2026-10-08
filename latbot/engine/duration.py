@@ -69,4 +69,6 @@ class DurationEstimator:
         result = max(s.min_opp_duration_s, min(s.max_opp_duration_s, result))
         if opp is not None:
             result = max(result, age + 0.1)
+        if getattr(s, "simple_mode", False):
+            result = min(result, float(s.simple_max_hold_s))  # simple mode: the window never exceeds the hold limit
         return result

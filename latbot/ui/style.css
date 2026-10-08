@@ -399,7 +399,7 @@ a:hover { color: #6db8ff; }
 .q-badge.grade-b { color: var(--accent-hover); border-color: var(--accent-line); background: var(--accent-dim); }
 .q-badge.grade-c { color: var(--warn-text); border-color: var(--warn); }
 .q-badge.grade-d, .q-badge.grade-x, .q-badge.failed { color: var(--down-text); border-color: var(--down); }
-.lev-line { font-size: var(--fs-sm); color: var(--muted); }
+.lev-line, .math-line { font-size: var(--fs-sm); color: var(--muted); }
 .q-details { margin-top: 10px; display: grid; gap: 6px; font-size: var(--fs-sm); }
 .q-summary { color: var(--text); font-weight: 600; }
 .q-veto { color: var(--down-text); }

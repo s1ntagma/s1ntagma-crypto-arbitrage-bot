@@ -151,6 +151,8 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
 
             # Phase 3: the card shows its quality and leverage; the Market tab explains the context (off in tests)
             assert await page.locator("#cards .card .q-badge").count() == 1
+            math = await page.locator("#cards .card .math-line").inner_text()  # lag - fees = NET, in one line
+            assert "lag" in math and "fees + execution" in math and "NET" in math
             assert "Leverage" in await page.locator("#cards .card .lev-line").inner_text()
             await page.click("button.tab[data-tab='market']")
             await page.wait_for_selector("#tab-market:not(.hidden) #market-status .why-line", timeout=5000)

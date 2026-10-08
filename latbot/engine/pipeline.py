@@ -482,6 +482,7 @@ class Pipeline:
             q = report.to_dict()
             q["btc_vol_pctile"] = btc_pctile
             q["event_window"] = event_window
+            q["enforced"] = not s.simple_mode  # simple mode: shown as information, never decides
             opp.quality = q
             funding = self._ctx("funding", opp.asset)
             rate = interval = next_ts = None
@@ -528,6 +529,12 @@ class Pipeline:
         be running in the background), when the NET is below the show
         threshold, or when the book does not support the minimum trade."""
         s = self._settings
+        if s.simple_mode and self._opps.find_active(signal.asset, signal.target, signal.direction) is None:
+            since = self._clock.mono() - float(signal.first_move_start_mono or 0.0)
+            if signal.first_move_start_mono and since > float(s.simple_entry_deadline_s):
+                # the leader moved too long ago: the target either followed already or is not going to
+                self.diag.reject("late_entry", signal.asset, signal.target, signal.direction, detail=f"{since:.1f} s")
+                return None
         book = await self._target_book(signal)
         if book is None:
             h = self._health(signal.target)
@@ -558,7 +565,7 @@ class Pipeline:
         if is_new:
             self.diag.opportunity()
             q = opp.quality or {}
-            if q:
+            if q and q.get("enforced", True):
                 self.diag.quality(bool(q.get("passed")), "" if q.get("passed") else _quality_reason_key(q))
             await self._opps.transition(opp.id, OppState.VALIDATING, "economics computed")
             await self._opps.transition(opp.id, OppState.VALID, f"net {econ.net_pct:+.2f}% on real book")

@@ -21,6 +21,9 @@ log = logging.getLogger(__name__)
 # drop reasons in funnel order (keys are stable: UI / Telegram / tests rely on them)
 REASONS: tuple[tuple[str, str], ...] = (
     ("min_movers", "двинулась только одна биржа (нужно >= min_movers)"),
+    ("leader_unknown", "простой режим: лидер монеты неизвестен - биржи-источники ещё не дали объём 24ч"),
+    ("leader_not_moved", "простой режим: двинулась не самая ликвидная биржа, лидер стоит"),
+    ("late_entry", "простой режим: лидер двинулся давнее simple_entry_deadline_s - вход уже поздний"),
     ("mover_volume", "у двинувшихся бирж объём 24ч ниже min_mover_volume_quote"),
     ("mover_volume_unknown", "объём 24ч двинувшейся биржи неизвестен (биржа не отдала объём в тикере)"),
     ("target_no_data", "по твоей бирже нет свежих данных по этой монете"),

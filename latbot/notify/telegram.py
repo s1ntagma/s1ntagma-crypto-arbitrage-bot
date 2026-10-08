@@ -397,8 +397,8 @@ class TelegramNotifier:
         if s.alert_human_only and opp.human.light is Light.RED:
             return False
         quality = getattr(opp, "quality", None)
-        if isinstance(quality, dict) and quality and not quality.get("passed", False):
-            return False  # Phase 3: only signals that passed the quality check (score + no veto)
+        if isinstance(quality, dict) and quality and quality.get("enforced", True) and not quality.get("passed", False):
+            return False  # Phase 3: only signals that passed the quality check (score + no veto); simple mode: info only
         if opp.id in self._messages or opp.telegram_message_id is not None:
             return False
         return True

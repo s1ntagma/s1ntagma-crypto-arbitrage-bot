@@ -302,7 +302,9 @@ class OpportunityManager:
             if opp.state not in ACTIVE_STATES:
                 continue
             reason = ""
-            if opp.remaining_s(now_mono) <= 0:
+            if getattr(s, "simple_mode", False) and opp.age_s(now_mono) >= float(s.simple_max_hold_s):
+                reason = f"hold limit {float(s.simple_max_hold_s):g} s"  # simple mode: not caught up in time -> out
+            elif opp.remaining_s(now_mono) <= 0:
                 reason = "window closed"
             elif now_mono - opp.last_update_mono > 2.0 * s.move_window_s:
                 reason = "no updates"

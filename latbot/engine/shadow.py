@@ -201,7 +201,8 @@ class ShadowTrader:
                 self._close(t, t.last_exit_price, f"opportunity {state.value.lower()} ({reason or 'no fresh price'}): "
                             "no fresh price, outcome unknown", "no_data")
             else:
-                self._close(t, t.last_exit_price, f"opportunity {state.value.lower()}: sold at last market price", "time")
+                why = f" ({reason})" if reason else ""
+                self._close(t, t.last_exit_price, f"opportunity {state.value.lower()}{why}: sold at last market price", "time")
 
     # ---- bookkeeping -------------------------------------------------------
     def _skip(self, reason: str) -> None:

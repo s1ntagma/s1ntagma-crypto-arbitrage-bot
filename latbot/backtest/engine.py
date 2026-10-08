@@ -501,7 +501,7 @@ class _Replay:
             await self._fail(opp, trade, f"partial fill {ratio * 100:.0f}% below minimum: exited at market", left)
             return
         await self._transition(opp, OppState.FILLED if ratio >= 1.0 - 1e-6 else OppState.PARTIALLY_FILLED, f"entry filled {ratio * 100:.0f}%")
-        hold = (now + float(s.max_hold_s)) if s.exit_on_timeout == "hold" else None
+        hold = (now + s.effective_max_hold_s()) if s.exit_on_timeout == "hold" else None
         st = _SimTrade(
             trade=trade,
             adapter=adapter,
@@ -509,7 +509,7 @@ class _Replay:
             base_open=filled,
             exit_target=float(econ.exit_target),
             entry_mono=now,
-            deadline_mono=now + float(s.sell_timeout_s),
+            deadline_mono=now + s.effective_sell_timeout_s(),
             hold_deadline_mono=hold,
         )
         exit_req = OrderRequest(
@@ -577,7 +577,7 @@ class _Replay:
         if st.hold_deadline_mono is not None and now < st.hold_deadline_mono:
             if not st.held:
                 st.held = True
-                st.trade.events.append((self.clock.wall(), f"exit not filled after {self.s.sell_timeout_s:.0f} s - holding"))
+                st.trade.events.append((self.clock.wall(), f"exit not filled after {self.s.effective_sell_timeout_s():.0f} s - holding"))
             return
         limit = st.exit_limit
         orders: list[Order] = []

@@ -1056,3 +1056,14 @@ margin venue); `recommended` includes the venue.  Funding (perp) = notional·rat
 * **Quality**: context aggregate uses `S_eff = S·C` (missing data can never raise a score); every
   unavailable factor is listed in WHY; the minimum score rises inside macro event windows
   (`quality_event_window_bonus=10`) and with leverage (tiers).
+
+## Simple mode (owner, 2026-10-08) — `simple_mode=True` for the owner's configs (config v5, fresh install)
+* Mover step 5: one mover decides — the coin's leader = enabled SIGNAL venue with the largest
+  `MarketState.volume24h` (None → `leader_unknown`, no signal); another venue alone → `leader_not_moved`.
+* Pipeline: no NEW opportunity later than `simple_entry_deadline_s` (3 s) after the leader crossed
+  (`late_entry`); `DurationEstimator` caps the window at `simple_max_hold_s` (15 s);
+  `OpportunityManager.sweep` expires at `hold limit 15 s`; execution/backtest use
+  `Settings.effective_max_hold_s()` / `effective_sell_timeout_s()`.
+* Quality is computed and shown with `quality["enforced"] = False`: Telegram, AUTO revalidation, the UI
+  filter and DIAG quality counters ignore it.  Hard rules 1, 2, 4, 5, 6 unchanged.
+* `simple_mode=False` (library default, tests) = the full mode described above.

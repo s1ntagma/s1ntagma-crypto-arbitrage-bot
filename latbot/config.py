@@ -183,7 +183,7 @@ DEFAULT_EXCHANGES: list[ExchangeConfig] = [
 # Runtime settings (public, user-tunable)
 # --------------------------------------------------------------------------- #
 # Bumped when a saved config.json needs a one-time upgrade (see Settings._migrate).
-CONFIG_VERSION = 4
+CONFIG_VERSION = 5
 
 
 @dataclass
@@ -221,6 +221,12 @@ class Settings:
     price_sample_min_interval_ms: float = 100.0  # throttle mid-price series appends per stream
     tick_outlier_pct: float = 0.5  # a lone ticker tick this far from the series waits for a confirming tick (0 = off)
     # ---- signal quality --------------------------------------------------
+    # ---- SIMPLE MODE (owner): the coin moved on its most liquid venue, the target has not moved yet ->
+    # buy there, sell when it catches up or after simple_max_hold_s.  Quality / context are info only.
+    # The library default is off (tests, 'full' mode); load_settings turns it on for the owner.
+    simple_mode: bool = False
+    simple_entry_deadline_s: float = 3.0  # no new entry later than this after the leader moved
+    simple_max_hold_s: float = 15.0  # window, shadow trade and AUTO exit cap
     min_movers: int = 2  # at least this many exchanges must have moved (single-venue spikes revert)
     min_mover_volume_quote: float = 1_000_000.0  # 24h quote volume for a mover exchange to count
     min_target_volume_quote: float = 500_000.0  # 24h quote volume on the target market (owner: >= ~500k)
@@ -348,6 +354,13 @@ class Settings:
     single_instance_port: int = 47614
 
     # ------------------------------------------------------------------ #
+    def effective_max_hold_s(self) -> float:
+        """Exit at market after this (simple mode caps it at simple_max_hold_s)."""
+        return min(float(self.max_hold_s), float(self.simple_max_hold_s)) if self.simple_mode else float(self.max_hold_s)
+
+    def effective_sell_timeout_s(self) -> float:
+        return min(float(self.sell_timeout_s), float(self.simple_max_hold_s)) if self.simple_mode else float(self.sell_timeout_s)
+
     def mode(self) -> Mode:
         return Mode.LIVE if (self.live_mode and not self.paper_mode) else Mode.PAPER
 
@@ -389,6 +402,9 @@ class Settings:
             if float(data.get("min_target_volume_quote", 100_000.0)) == 100_000.0:
                 data["min_target_volume_quote"] = 500_000.0
             data["min_net_pct_show"] = 0.1
+        if version < 5:
+            # owner: "логика должна быть максимально простая" - simple mode on once (a later choice stays)
+            data["simple_mode"] = True
         if version < 4:
             # owner: faster signals - every pool asset on WebSocket (only the old default 10 is raised)
             if int(data.get("ws_assets", 10) or 10) == 10:
@@ -454,6 +470,8 @@ class Settings:
             if e.role == ExchangeRole.EXECUTION and e.stream == "bbo":
                 e.stream = "book"  # targets always need depth
         self.min_movers = max(1, int(self.min_movers))
+        self.simple_entry_deadline_s = float(self.simple_entry_deadline_s) if self.simple_entry_deadline_s > 0 else 3.0
+        self.simple_max_hold_s = max(1.0, float(self.simple_max_hold_s))
         self.ws_assets = max(1, min(50, int(self.ws_assets)))
         if self.capital_quote <= 0 or self.max_trade_quote <= 0:
             raise ValueError("capital must be > 0")
@@ -514,7 +532,7 @@ def load_settings(path: str | os.PathLike[str] = "config.json") -> Settings:
             return s
         except Exception as exc:  # noqa: BLE001
             log.error("config.json invalid (%s); using defaults", exc)
-    s = Settings()
+    s = Settings(simple_mode=True)  # fresh install: the owner's simple mode
     _apply_env_overrides(s)
     return s
 

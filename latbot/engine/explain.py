@@ -290,7 +290,7 @@ def build_plan(
         reasons.append(f"догоняла редко ({opp.caught_up_ok} из {opp.caught_up_total})")
     if not e.liquidity_ok:
         reasons.append(f"стакан тонкий (держит {fmt_money(e.executable_quote, quote)})")
-    exit_rule = f"Не догнала за ~{fmt_duration(settings.max_hold_s)} — продай по рынку."
+    exit_rule = f"Не догнала за ~{fmt_duration(settings.effective_max_hold_s())} — продай по рынку."
     if reasons:
         caveat = f"! {target} может не догнать: {' / '.join(reasons)}. {exit_rule}"
     else:

@@ -1292,8 +1292,8 @@ class ExecutionEngine:
             why = "; ".join(fresh.bot.reasons) or fresh.bot.label
             return fail(f"Bot light is RED: {why}")
         quality = getattr(fresh, "quality", None)
-        if isinstance(quality, dict) and quality and not quality.get("passed", False):
-            # Phase 3: AUTO only on signals that pass the quality check on the LATEST book
+        if isinstance(quality, dict) and quality and quality.get("enforced", True) and not quality.get("passed", False):
+            # Phase 3: AUTO only on signals that pass the quality check on the LATEST book (simple mode: info only)
             vetoes = "; ".join(str(v) for v in (quality.get("vetoes") or []))
             detail = vetoes or str(quality.get("summary") or "")
             return fail(f"Signal quality {quality.get('score', '?')}/100 did not pass" + (f": {detail}" if detail else ""))
@@ -1593,12 +1593,12 @@ class ExecutionEngine:
         holder.pending, holder.pending_filled = exit_limit, float(exit_limit.filled)
         self._pending_exit[opp.id] = (adapter, exit_limit)
         await self._note(trade, f"exit {exit_req.side.value} {exit_req.amount:.8g} @ {exit_req.price:.8g} GTC sent ({exit_limit.status.value})")
-        exit_limit = await self._wait_fill(adapter, exit_limit, s.sell_timeout_s, opp.id)
+        exit_limit = await self._wait_fill(adapter, exit_limit, s.effective_sell_timeout_s(), opp.id)
         if not exit_limit.is_done and not self._risk.emergency and opp.id not in self._abort and s.exit_on_timeout == "hold":
             entry_mono = entry.sent_mono if entry.sent_mono is not None else self._clock.mono()
-            hold_left = float(s.max_hold_s) - (self._clock.mono() - entry_mono)
+            hold_left = s.effective_max_hold_s() - (self._clock.mono() - entry_mono)
             if hold_left > 0:
-                await self._note(trade, f"exit not filled after {s.sell_timeout_s:.0f} s - holding up to {hold_left:.0f} s more")
+                await self._note(trade, f"exit not filled after {s.effective_sell_timeout_s():.0f} s - holding up to {hold_left:.0f} s more")
                 exit_limit = await self._wait_fill(adapter, exit_limit, hold_left, opp.id)
         if not exit_limit.is_done:
             exit_limit = await self._cancel(adapter, exit_limit)

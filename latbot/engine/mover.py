@@ -37,7 +37,7 @@ from .diagnostics import Diagnostics
 from ..links import split_symbol
 from ..market.features import move_over_window, velocity_pct_s, volume_acceleration
 from ..market.state import MarketState
-from ..models import LagSignal, MoveEvent, OrderBook, Ticker
+from ..models import ExchangeRole, LagSignal, MoveEvent, OrderBook, Ticker
 from .stats import StatsStore
 
 log = logging.getLogger(__name__)
@@ -355,7 +355,17 @@ class MoveDetector:
             if min_vol > 0 and (vol is None or vol < min_vol):
                 continue
             counted.append(ex)
-        if len(counted) < max(1, int(s.min_movers)):
+        if s.simple_mode:
+            # SIMPLE MODE: one venue decides - the one where the coin trades most (24h volume)
+            leader = self._leader(asset)
+            if leader is None:
+                self.diag.reject("leader_unknown", asset, "", direction)
+                return []
+            if leader not in counted:
+                self.diag.reject("leader_not_moved", asset, "", direction, detail=f"лидер {leader}")
+                return []
+            counted = [leader]
+        elif len(counted) < max(1, int(s.min_movers)):
             dropped = [ex for ex in movers if ex not in counted]
             if not dropped:
                 self.diag.reject("min_movers", asset, "", direction)
@@ -430,6 +440,18 @@ class MoveDetector:
     # ------------------------------------------------------------------ #
     # helpers
     # ------------------------------------------------------------------ #
+    def _leader(self, asset: str) -> str | None:
+        """Simple mode: the signal venue with the largest 24h quote volume for ``asset`` (None while
+        no signal venue reported a volume - no guess)."""
+        best, best_vol = None, 0.0
+        for e in self._settings.exchanges:
+            if not e.enabled or e.role != ExchangeRole.SIGNAL:
+                continue
+            vol = self._state.volume24h(e.name, asset)
+            if vol is not None and vol > best_vol:
+                best, best_vol = e.name, vol
+        return best
+
     def _end_episode(self, ep: _Episode) -> None:
         self._episodes.pop(ep.asset, None)
         if ep.reverted:
