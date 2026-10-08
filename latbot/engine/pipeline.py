@@ -545,7 +545,7 @@ class Pipeline:
                 )
                 reason = "fees" if econ.gross_pct >= s.min_net_pct_show else "below_min_net"
                 self.diag.reject(reason, signal.asset, signal.target, signal.direction,
-                                 detail=f"gross {econ.gross_pct:+.2f}% net {econ.net_pct:+.2f}%")
+                                 detail=f"gross {econ.gross_pct:+.2f}% net {econ.net_pct:+.2f}% catch-up x{signal.catchup_ratio:.2f}")
                 return None
             if econ.executable_quote < s.min_trade_quote:
                 log.debug(

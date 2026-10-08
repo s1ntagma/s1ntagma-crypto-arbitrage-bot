@@ -671,3 +671,5 @@ body.in-session { overflow: hidden; }
   .chart-svg, .chart-empty { height: 130px; }
   .chart-toggle { margin-left: 0; }
 }
+
+.period-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; flex-wrap: wrap; }

@@ -119,3 +119,21 @@ def test_load_failure_is_tolerated():
     st.record_first_mover("BTC", "bybit")
     st.save()  # must not raise
     assert st.get("BTC", "bybit").first_mover_count == 1
+
+
+def test_biased_catchup_ratios_are_dropped_once():
+    from latbot.engine.stats import StatsStore
+    from latbot.models import ReactionStats
+    from latbot.config import Settings
+    from latbot.storage.db import Database
+
+    db = Database(":memory:")
+    rs = ReactionStats(asset="BTC", exchange="kraken")
+    rs.catchup_ratios = [1.0, 0.9, 1.2]  # collected from successes only (old builds)
+    rs.reaction_delays_s = [2.0, 3.0, 4.0]
+    db.save_stats(rs)
+    st = StatsStore(Settings(), db)
+    assert st.get("BTC", "kraken").catchup_ratios == [] and st.get("BTC", "kraken").reaction_delays_s == [2.0, 3.0, 4.0]
+    st.record_catchup("BTC", "kraken", 0.0)
+    st.save()
+    assert StatsStore(Settings(), db).get("BTC", "kraken").catchup_ratios == [0.0]  # once, not on every start

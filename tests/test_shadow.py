@@ -100,3 +100,22 @@ async def test_shadow_trades_thin_book_at_executable_size():
     row = sh.trades()[0]
     assert row["open"] is True and row["capital_quote"] == pytest.approx(opps[0].econ.executable_quote)
     assert sh.skipped == {}
+
+
+async def test_stats_period_hides_older_trades_but_keeps_history():
+    db = Database(":memory:")
+    env = Env(db=db)
+    db.save_shadow({"id": "old1", "asset": "OGN", "target": "gate", "opened_ts": env.clock.wall() - 86400,
+                    "closed_ts": env.clock.wall() - 86000, "actual_net_pct": -1.0, "expected_net_pct": 1.0, "pnl_quote": -1.0})
+    sh = ShadowTrader(env.settings, env.bus, env.clock, db=db)  # first start of this build: period begins now
+    s = sh.summary()
+    assert s["closed"] == 0 and s["all_time_closed"] == 1 and s["period_start_ts"] == env.clock.wall()
+    assert len(sh.trades()) == 1  # history stays visible in the trades table and in the DB
+    opp = await detect(env)
+    await env.opps.expire(opp.id, "window over")
+    assert sh.summary()["closed"] == 1
+    env.clock.advance(60.0)
+    start = sh.new_period()
+    assert start == env.clock.wall() and sh.summary()["closed"] == 0 and sh.summary()["all_time_closed"] == 2
+    # the period survives a restart
+    assert ShadowTrader(env.settings, env.bus, env.clock, db=db).summary()["period_start_ts"] == start

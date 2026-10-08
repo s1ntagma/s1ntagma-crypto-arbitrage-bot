@@ -29,6 +29,8 @@ from typing import Any
 from .. import events
 from ..models import TERMINAL_STATES, Opportunity, OppState
 
+PERIOD_KEY = "stats_period_start_ts"  # kv: Stats count virtual trades opened from here on (history stays)
+
 # expiry reasons that mean the last seen price is old (pipeline / OpportunityManager.sweep)
 _STALE_REASONS = frozenset({"target book stale", "no updates"})
 
@@ -101,6 +103,7 @@ class ShadowTrader:
         self.closed = 0
         self.no_data = 0  # closed without a fresh price (outcome unknown, not learned)
         self.skipped: dict[str, int] = {}
+        self._period_start: float | None = self._load_period()
         self._unsubs = [
             bus.subscribe(events.OPP_NEW, self._on_new),
             bus.subscribe(events.OPP_UPDATE, self._on_update),
@@ -261,9 +264,45 @@ class ShadowTrader:
         out = sorted(rows.values(), key=lambda d: float(d.get("opened_ts") or 0.0), reverse=True)
         return out[: max(0, int(limit))]
 
+    # ---- statistics period -------------------------------------------------
+    def _load_period(self) -> float | None:
+        """The current Stats period; the first start of a build with periods opens one (older
+        builds traded a different universe - their results would mislead)."""
+        kv_get, kv_set = getattr(self._db, "kv_get", None), getattr(self._db, "kv_set", None)
+        if kv_get is None or kv_set is None:
+            return None
+        try:
+            v = kv_get(PERIOD_KEY)
+            if v is None:
+                v = self._clock.wall()
+                kv_set(PERIOD_KEY, v)
+            return float(v)
+        except Exception:  # noqa: BLE001
+            log.exception("stats period not available; counting every trade")
+            return None
+
+    @property
+    def period_start_ts(self) -> float | None:
+        return self._period_start
+
+    def new_period(self) -> float:
+        """Owner: count from now on (the history stays in the DB and in the trades table)."""
+        now = self._clock.wall()
+        kv_set = getattr(self._db, "kv_set", None)
+        if kv_set is not None:
+            kv_set(PERIOD_KEY, now)
+        self._period_start = now
+        log.info("stats: new period from %.0f", now)
+        return now
+
     def summary(self, limit: int = 5000) -> dict[str, Any]:
-        out = summarize(self.trades(limit))
+        rows = self.trades(limit)
+        start = self._period_start
+        cur = rows if start is None else [r for r in rows if float(r.get("opened_ts") or 0.0) >= start]
+        out = summarize(cur)
         out["skipped"] = dict(self.skipped)
+        out["period_start_ts"] = start
+        out["all_time_closed"] = sum(1 for r in rows if r.get("closed_ts") is not None)
         return out
 
 

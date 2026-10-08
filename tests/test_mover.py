@@ -57,6 +57,10 @@ class SpyStats(StatsStore):
         self.calls.append(("false", asset, exchange))
         super().record_false_signal(asset, exchange)
 
+    def record_catchup(self, asset, exchange, catchup_ratio):
+        self.calls.append(("catchup", asset, exchange, round(catchup_ratio, 6)))
+        super().record_catchup(asset, exchange, catchup_ratio)
+
 
 class Harness:
     def __init__(self, settings: Settings | None = None, bus: EventBus | None = None) -> None:
@@ -468,3 +472,63 @@ def test_state_volume_coverage():
     h.state.on_ticker(h.ticker("a", 100.0, 5_000_000.0))
     h.state.on_ticker(h.ticker("b", 100.0, None))
     assert h.state.volume_coverage() == {"a": 1}
+
+
+# ---- learning without survivorship bias: a target that never follows is measured too ----------
+def _age_out(h: Harness, c_mid: float = 100.0) -> None:
+    for _ in range(7):
+        h.clock.advance(1.0)
+        h.push_all({"a": 101.0, "b": 101.0, "c": c_mid})
+    h.clock.advance(1.5)
+    h.push_all({"a": 101.0, "b": 101.0, "c": c_mid})
+
+
+def test_target_that_never_follows_records_zero_catchup():
+    h = Harness(make_settings(max_opp_duration_s=10.0))
+    run_lag_scenario(h)
+    _age_out(h)  # episode times out, C never moved
+    assert ("catchup", "BTC", "c", 0.0) in h.stats.calls
+    assert h.stats.get("BTC", "c").catchup_ratios == [0.0]
+
+
+def test_partial_follow_below_threshold_is_its_ratio():
+    h = Harness(make_settings(max_opp_duration_s=10.0))
+    run_lag_scenario(h)
+    _age_out(h, c_mid=100.2)  # C followed +0.2 % of +1 % (below the 0.35 % crossing threshold)
+    assert h.stats.get("BTC", "c").catchup_ratios == [pytest.approx(0.2, abs=1e-6)]
+
+
+def test_reverted_episode_records_zero_catchup_and_false_signal():
+    h = Harness()
+    run_lag_scenario(h)
+    h.clock.advance(1.0)
+    h.push("a", 100.0)
+    h.push("b", 100.0)  # movers back: the lag never paid
+    assert ("false", "BTC", "c") in h.stats.calls and ("catchup", "BTC", "c", 0.0) in h.stats.calls
+
+
+def test_reacted_target_is_not_recorded_twice():
+    h = Harness(make_settings(max_opp_duration_s=10.0))
+    run_lag_scenario(h)
+    h.clock.advance(1.0)
+    h.push("c", 101.0)  # reacted: record_reaction(ratio 1.0)
+    _age_out(h, c_mid=101.0)
+    assert h.stats.get("BTC", "c").catchup_ratios == [1.0]
+    assert not any(c[0] == "catchup" for c in h.stats.calls)
+
+
+def test_pair_that_never_follows_stops_promising_catch_up():
+    settings = make_settings(max_opp_duration_s=10.0)
+    shared = SpyStats(settings)  # the learned stats survive across episodes (and restarts, via the db)
+
+    def harness() -> Harness:
+        h = Harness(settings)
+        h.stats = h.det._stats = shared
+        return h
+
+    for _ in range(3):
+        h = harness()
+        assert run_lag_scenario(h)[0].catchup_ratio == 0.6  # default until 3 measurements exist
+        _age_out(h)
+    sg = run_lag_scenario(harness())[0]
+    assert sg.catchup_ratio == 0.0 and sg.expected_catchup_pct == 0.0  # learned: this target never follows

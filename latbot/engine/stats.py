@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 Key = tuple[str, str]  # (asset, exchange)
 
 
+_CATCHUP_FLAG = "catchup_unbiased_v2"
+
+
 class StatsStore:
     """In-memory store of ReactionStats with optional db persistence."""
 
@@ -34,8 +37,25 @@ class StatsStore:
                 for rs in loaded:
                     self._stats[(rs.asset, rs.exchange)] = rs
                 log.info("stats loaded: %d (asset, exchange) rows", len(loaded))
+                self._drop_biased_catchups()
             except Exception:  # noqa: BLE001
                 log.exception("stats load failed; starting empty")
+
+    def _drop_biased_catchups(self) -> None:
+        """Builds before the fix recorded catch-up ratios only for targets that DID follow (survivor
+        bias): those samples are dropped once; everything else stays."""
+        kv_get, kv_set = getattr(self._db, "kv_get", None), getattr(self._db, "kv_set", None)
+        if kv_get is None or kv_set is None or kv_get(_CATCHUP_FLAG):
+            return
+        n = 0
+        for rs in self._stats.values():
+            if rs.catchup_ratios:
+                n += len(rs.catchup_ratios)
+                rs.catchup_ratios = []
+                self._touch(rs)
+        self.save()
+        kv_set(_CATCHUP_FLAG, True)
+        log.info("stats: dropped %d biased catch-up samples (re-learned from every episode now)", n)
 
     # ------------------------------------------------------------------ #
     # access
@@ -78,6 +98,13 @@ class StatsStore:
         rs = self.get(asset, exchange)
         self._append(rs.reaction_delays_s, max(0.0, delay_s))
         self._append(rs.catchup_ratios, catchup_ratio)
+        self._touch(rs)
+
+    def record_catchup(self, asset: str, exchange: str, catchup_ratio: float) -> None:
+        """Catch-up of a lagging target that did not cross the move threshold before the episode
+        ended (no reaction delay to record) - usually ~0."""
+        rs = self.get(asset, exchange)
+        self._append(rs.catchup_ratios, max(0.0, catchup_ratio))
         self._touch(rs)
 
     def record_false_signal(self, asset: str, exchange: str) -> None:

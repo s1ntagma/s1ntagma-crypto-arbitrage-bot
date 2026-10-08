@@ -1649,6 +1649,10 @@
       if (!r.ok) { toast('Shadow: ' + r.error, 'err'); return; }
       var d = r.data || {};
       var s = d.summary || {};
+      var ps = num(s.period_start_ts);
+      $('shadow-period').textContent = ps > 0
+        ? 'Period: since ' + new Date(ps * 1000).toLocaleString([], { hour12: false }) + ' · ' + (s.all_time_closed || 0) + ' closed all time'
+        : 'Period: all time';
       kvRows($('shadow-sum-body'), [
         ['Status', d.enabled ? 'ON (no orders, virtual)' : 'OFF (shadow_trading=false)'],
         ['Open', String(s.open || 0)], ['Closed', String(s.closed || 0)], ['Win rate', rateOrDash(s.win_rate)],
@@ -2758,6 +2762,16 @@
     $('market-refresh').addEventListener('click', loadMarket);
     $('trades-refresh').addEventListener('click', loadTrades);
     $('stats-refresh').addEventListener('click', loadStats);
+    $('shadow-new-period').addEventListener('click', function () {
+      confirmDialog({ title: 'Start a new statistics period?', body: ['Shadow statistics will count virtual trades from now on.', 'Older trades stay in the history and the database.'], okLabel: 'New period', okClass: 'btn-primary' }).then(function (ok) {
+        if (!ok) return;
+        api('POST', '/api/stats/period').then(function (r) {
+          if (!r.ok) { toast('New period: ' + r.error, 'err'); return; }
+          toast('New statistics period started', 'ok');
+          loadStats();
+        });
+      });
+    });
     $('diag-refresh').addEventListener('click', loadDiag);
 
     $('emergency-btn').addEventListener('click', emergencyClick);

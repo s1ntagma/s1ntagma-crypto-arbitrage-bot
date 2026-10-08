@@ -1274,6 +1274,18 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
             log.exception("shadow listing failed")
             return _error(500, "shadow listing failed")
 
+    @app.post("/api/stats/period")
+    async def api_stats_new_period() -> JSONResponse:
+        """Stats count virtual trades from now on (history stays in the DB)."""
+        shadow = getattr(ctx, "shadow", None)
+        if shadow is None or not hasattr(shadow, "new_period"):
+            return _error(409, "shadow trading is not running")
+        try:
+            return _json({"ok": True, "period_start_ts": shadow.new_period()})
+        except Exception:  # noqa: BLE001
+            log.exception("new stats period failed")
+            return _error(500, "new stats period failed")
+
     # ---- Phase 3: market context + narrow pool --------------------------------
     @app.get("/api/context")
     async def api_context() -> JSONResponse:

@@ -29,3 +29,14 @@ def test_context_snapshot_through_the_api(tmp_path):
         d = c.get("/api/context").json()
     assert d["enabled"] is True and "macro" in d and "news" in d and "sources" in d and "weights" in d
     json.dumps(d)
+
+
+def test_new_stats_period_through_the_api(tmp_path):
+    b = build(tmp_path)
+    with TestClient(create_app(b.ctx)) as c:
+        before = c.get("/api/shadow").json()["summary"]
+        assert before["period_start_ts"] is not None and before["all_time_closed"] == 0
+        b.clock.advance(30.0)
+        r = c.post("/api/stats/period").json()
+        assert r["ok"] is True and r["period_start_ts"] == b.clock.wall()
+        assert c.get("/api/shadow").json()["summary"]["period_start_ts"] == b.clock.wall()

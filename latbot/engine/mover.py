@@ -74,6 +74,9 @@ class _Episode:
     reacted: set[str] = field(default_factory=set)  # execution exchanges that crossed later
     reverted: bool = False  # a mover reset because its price reverted (not because it went stale / aged out)
     anchors: dict[str, float] = field(default_factory=dict)  # pre-move price per not-yet-crossed exchange
+    # lagging target -> latest (first-mover move, target move) toward the direction: the catch-up it
+    # actually delivered is recorded when the episode ends, also when it never followed (no survivor bias)
+    last_moves: dict[str, tuple[float, float]] = field(default_factory=dict)
 
 
 def _fmt_vol(v: float | None) -> str:
@@ -385,6 +388,8 @@ class MoveDetector:
                 continue
             target_move = moves[target][0]
             lag = first_move * direction - target_move * direction
+            if target in ep.lagging:
+                ep.last_moves[target] = (first_move * direction, target_move * direction)
             if lag < s.min_lag_pct:
                 self.diag.reject("min_lag", asset, target, direction)
                 continue
@@ -392,7 +397,9 @@ class MoveDetector:
             if target not in ep.lagging:
                 ep.lagging.add(target)
                 self._stats.record_lagging(asset, target, lag)
-            ratio = self._stats.catchup_ratio(asset, target) or s.catchup_ratio_default
+            ep.last_moves[target] = (first_move * direction, target_move * direction)
+            learned = self._stats.catchup_ratio(asset, target)
+            ratio = s.catchup_ratio_default if learned is None else learned  # a learned 0.0 is a result, not "no data"
             symbol = self._state.symbol(target, asset) or ""
             signals.append(
                 LagSignal(
@@ -429,6 +436,13 @@ class MoveDetector:
             for target in sorted(ep.lagging - ep.reacted):
                 self._stats.record_false_signal(ep.asset, target)
                 log.info("false signal %s: %s reverted before %s reacted", ep.asset, ep.first_mover, target)
+        # a lagging target that never crossed is a measurement too (often ~0): learning only from the
+        # targets that did follow would keep the expected catch-up high on pairs that never pay
+        for target in sorted(ep.lagging - ep.reacted):
+            first, moved = ep.last_moves.get(target, (0.0, 0.0))
+            ratio = max(0.0, min(1.5, moved / first)) if first > 0 else 0.0
+            self._stats.record_catchup(ep.asset, target, ratio)
+            log.info("no reaction %s on %s: catch-up ratio %.2f", ep.asset, target, ratio)
         log.debug("episode end %s first_mover=%s reverted=%s", ep.asset, ep.first_mover, ep.reverted)
 
     def _publish_move(

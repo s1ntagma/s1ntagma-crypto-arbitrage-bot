@@ -237,6 +237,13 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             assert "Trades" in await page.locator("#tsum-body").inner_text()
             assert "$" not in await page.locator("#tsum-body").inner_text()  # money in the venue's EUR, not '$'
             assert "€" in await page.locator("#shadow-sum-body").inner_text()
+            # "New period": statistics count from now on, history stays
+            assert "since" in await page.locator("#shadow-period").inner_text()
+            before = b.ctx.shadow.period_start_ts
+            b.clock.advance(5.0)
+            await page.click("#shadow-new-period")
+            await page.click("#confirm-ok")
+            await wait_for(lambda: b.ctx.shadow.period_start_ts > before, timeout=5.0)
 
             # 8. the session comes back by itself after a reload, escorts to the target, saves the actual result
             await page.reload(wait_until="domcontentloaded")
