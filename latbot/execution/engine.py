@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 from .. import events
 from ..clock import Clock
 from ..config import Settings
+from ..engine.exit_policy import Decision, RideConfig, RidePosition, decide
 from ..engine.explain import cap_price
 from ..exchanges.base import ExchangeAdapter, ExchangeError, OrderRejected, RateLimited
 from ..links import split_symbol
@@ -82,6 +83,7 @@ _EPS = 1e-9
 _CANCEL_REFRESH_ATTEMPTS = 3  # fetch_order attempts after a failed cancel before the state counts as unknown
 _MAX_RETRY_SLEEP_S = 5.0
 _RL_MAX_CLOSE_WAIT_S = 300.0  # longest the AUTO flow's closing order / cancel waits for an exchange rate-limit window
+_RIDE_POLL_S = 0.25  # ride the leader: how often an AUTO position checks the exit policy
 _RL_MAX_EMERGENCY_WAIT_S = 5.0  # an emergency close is awaited by a person (API / Telegram): short wait, else refuse
 _GONE_GRACE_S = 10.0  # "order not found" resolves an order only this long after it was sent (propagation lag)
 _RESTORE_MAX_AGE_S = 3 * 86400.0  # older rows are not restored as positions (logged instead)
@@ -178,6 +180,7 @@ class ExecutionEngine:
         self._plan: dict[str, _Plan] = {}
         self._open_positions: dict[str, _OpenPosition] = {}
         self._manual: dict[str, TradeRecord] = {}
+        self._ride_manual: dict[str, RidePosition] = {}  # ride the leader: the owner's open MANUAL positions
         self._manual_entry_mono: dict[str, float] = {}
         self._manual_capital: dict[str, float] = {}  # amount the owner chose in the session ("сколько вложить")
         self._manual_selected_mono: dict[str, float] = {}  # "Я ЗАШЁЛ" pressed (session opened)
@@ -910,6 +913,17 @@ class ExecutionEngine:
             pnl_pct = pnl_quote / manual.capital_quote * 100.0 if manual.capital_quote else None
         reached = now_px > 0 and (now_px - target) * d >= 0
         side_word = "ПРОДАВАЙ" if d > 0 else "ОТКУПАЙ"
+        ride = self._ride_advice(opp, manual, entry, taker)
+        if ride is not None:
+            if ride.sell:
+                signal = "sell_now"
+                text = f"{side_word} СЕЙЧАС — {ride.text}. Стакан даёт {now_px:.8g} {q}"
+            else:
+                signal = "wait"
+                text = f"ДЕРЖИ — {ride.text}. Сейчас {now_px:.8g} {q}" + (
+                    f", NET {ride.net_pct:+.2f}%" if ride.net_pct is not None and ride.net_pct > float("-inf") else "")
+            return {"sell_amount": base, "sell_signal": signal, "sell_text": text, "pnl_now_pct": pnl_pct,
+                    "pnl_now_quote": pnl_quote, "exit_target_now": target, "exit_advice": ride.to_dict()}
         if reached:
             signal = "sell_now"
             text = f"{side_word} СЕЙЧАС: стакан даёт {now_px:.8g} {q} ≥ цели {target:.8g} {q}"
@@ -924,6 +938,80 @@ class ExecutionEngine:
             text = f"ЖДИ: продавать при цене ≥ {target:.8g} {q}, сейчас {now_px:.8g} {q} · осталось ~{remaining:.0f} с"
         return {"sell_amount": base, "sell_signal": signal, "sell_text": text, "pnl_now_pct": pnl_pct, "pnl_now_quote": pnl_quote,
                 "exit_target_now": target}
+
+    def _ride_on(self) -> bool:
+        active = getattr(self._settings, "ride_active", None)
+        return bool(callable(active) and active() and callable(getattr(self._pipeline, "market_view", None)))
+
+    async def _ride_exit(self, opp: Opportunity, adapter: ExchangeAdapter, trade: TradeRecord, entry_avg: float,
+                         amount: float) -> Order:
+        """AUTO in ride mode: watch the latest target book and the leader (the same exit policy as the
+        shadow trader and the MANUAL escort); the exit is ONE market order through place_order when the
+        policy says sell, on emergency / cancel, or when prices stay stale for ride_stale_s."""
+        s = self._settings
+        cfg = RideConfig.from_settings(s)
+        d = opp.direction
+        pos = RidePosition(direction=d, entry_price=entry_avg, cost_pct=2.0 * self._taker_fee(trade.exchange) * 100.0,
+                           entry_mono=self._clock.mono(), last_fresh_mono=self._clock.mono())
+        anchored = False
+        reason = ""
+        while True:
+            now = self._clock.mono()
+            if self._risk.emergency:
+                reason = "emergency stop"
+                break
+            abort = self._abort.get(opp.id)
+            if abort is not None:
+                reason = f"cancel requested ({abort})"
+                break
+            try:
+                view = self._pipeline.market_view(opp.asset, opp.target_exchange, opp.first_mover, amount, d)
+            except Exception:  # noqa: BLE001
+                log.exception("market view failed for AUTO %s", opp.id)
+                view = None
+            if view:
+                if not anchored:
+                    sig = opp.signal
+                    pos.leader_anchor = view["leader_mid"] / (1.0 + d * float(sig.first_move_pct) / 100.0)
+                    pos.target_anchor = view["target_mid"] / (1.0 + d * float(sig.target_move_pct) / 100.0)
+                    anchored = True
+                decision = decide(pos, now, view["target_exit"], view["leader_mid"], cfg, target_mid=view["target_mid"])
+                if decision.sell:
+                    reason = decision.text
+                    break
+            elif now - (pos.last_fresh_mono or pos.entry_mono) > float(s.ride_stale_s):
+                reason = f"no fresh price for {float(s.ride_stale_s):g} s"
+                break
+            await asyncio.sleep(_RIDE_POLL_S)
+        await self._note(trade, f"ride exit: {reason} - exiting at market")
+        trade.exit_order = await self._exit_market(adapter, trade, amount)
+        return trade.exit_order
+
+    def _ride_advice(self, opp: Opportunity, manual: TradeRecord, entry: float, taker: float) -> Decision | None:
+        """Ride the leader: hold / sell for the owner's MANUAL position from the latest target and
+        leader prices (None: ride off or no fresh prices - the classic escort applies)."""
+        s = self._settings
+        view_fn = getattr(self._pipeline, "market_view", None)
+        if not (callable(getattr(s, "ride_active", None)) and s.ride_active()) or not callable(view_fn) or entry <= 0:
+            return None
+        d = opp.direction
+        base = manual.capital_quote / entry
+        try:
+            view = view_fn(opp.asset, opp.target_exchange, opp.first_mover, base, d)
+        except Exception:  # noqa: BLE001
+            log.exception("market view failed for manual %s", opp.id)
+            return None
+        if not view:
+            return None
+        now = self._clock.mono()
+        pos = self._ride_manual.get(opp.id)
+        if pos is None:
+            sig = opp.signal
+            pos = RidePosition(direction=d, entry_price=entry, cost_pct=2.0 * taker * 100.0, entry_mono=now,
+                               leader_anchor=view["leader_mid"] / (1.0 + d * float(sig.first_move_pct) / 100.0),
+                               target_anchor=view["target_mid"] / (1.0 + d * float(sig.target_move_pct) / 100.0))
+            self._ride_manual[opp.id] = pos
+        return decide(pos, now, view["target_exit"], view["leader_mid"], RideConfig.from_settings(s), target_mid=view["target_mid"])
 
     async def manual_entered(self, opp_id: str, price: float, quote_amount: float) -> dict[str, Any]:
         """The user did the entry by hand: record a TradeRecord and return the exit target."""
@@ -1033,6 +1121,7 @@ class ExecutionEngine:
         trade = self._manual.get(opp_id)
         if trade is None:
             raise KeyError(f"no open manual trade for opportunity {opp_id}")
+        self._ride_manual.pop(opp_id, None)
         price = float(price)
         if price <= 0:
             raise ValueError("exit price must be positive")
@@ -1562,8 +1651,13 @@ class ExecutionEngine:
             exit_order = await self._exit_market(adapter, trade, position_open)
             return await self._close(opp, adapter, trade, [exit_order], registered, position_open)
 
-        # ---- exit revalidation (hard rule 4, second half) ---------------
         entry_avg = float(entry.avg_price or entry_price)
+        # ---- ride the leader: hold while the leader climbs, sell when its move is over ----
+        if self._ride_on():
+            exit_order = await self._ride_exit(opp, adapter, trade, entry_avg, position_open)
+            return await self._close(opp, adapter, trade, [exit_order], registered, position_open)
+
+        # ---- exit revalidation (hard rule 4, second half) ---------------
         exit_target, pos_net = await self._fresh_exit_target(opp, adapter, trade, econ, entry_avg)
         if pos_net is not None:
             await self._note(trade, f"exit revalidated: target {exit_target:.8g}, net on position {pos_net:+.2f}%")

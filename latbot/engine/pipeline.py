@@ -35,12 +35,13 @@ from ..models import (
     Opportunity,
     OppState,
     OrderBook,
+    Side,
     Ticker,
     Trade,
     median,
 )
 from .duration import DurationEstimator
-from .economics import compute_economics
+from .economics import compute_economics, walk_book
 from .executability import assess_bot, assess_human
 from .explain import build_plan, build_why
 from .leverage import plan_leverage
@@ -101,6 +102,8 @@ class Pipeline:
         self._sweep_task: asyncio.Task | None = None
         self._last_stats_save_mono = clock.mono()
         self._stale_flags: dict[str, bool] = {}
+        # called at the end of every sweep (ride the leader: shadow positions are checked here)
+        self.sweep_listeners: list[Callable[[float], Any]] = []
         self._warned_fees: set[str] = set()
         self._book_fetches: dict[BookKey, asyncio.Future] = {}  # in-flight REST book fetches (single-flight)
         self._last_fetch_mono: dict[BookKey, float] = {}
@@ -529,9 +532,21 @@ class Pipeline:
         be running in the background), when the NET is below the show
         threshold, or when the book does not support the minimum trade."""
         s = self._settings
-        if s.simple_mode and self._opps.find_active(signal.asset, signal.target, signal.direction) is None:
+        if s.simple_mode:
+            active = self._opps.find_active(signal.asset, signal.target, signal.direction)
             since = self._clock.mono() - float(signal.first_move_start_mono or 0.0)
-            if signal.first_move_start_mono and since > float(s.simple_entry_deadline_s):
+            if s.ride_active():
+                # ride the leader: enter while its move is intact; once it turned, the move is over
+                drop = float(signal.leader_peak_move_pct) - float(signal.first_move_pct) * signal.direction
+                if drop >= float(s.ride_reversal_pct):
+                    if active is not None:
+                        await self._opps.expire(active.id, f"leader reversed -{drop:.2f}% from its peak")
+                    self.diag.reject("leader_reversed", signal.asset, signal.target, signal.direction, detail=f"-{drop:.2f}%")
+                    return None
+                deadline = float(s.ride_entry_max_age_s)
+            else:
+                deadline = float(s.simple_entry_deadline_s)
+            if active is None and signal.first_move_start_mono and since > deadline:
                 # the leader moved too long ago: the target either followed already or is not going to
                 self.diag.reject("late_entry", signal.asset, signal.target, signal.direction, detail=f"{since:.1f} s")
                 return None
@@ -698,8 +713,42 @@ class Pipeline:
                 self._stats.save()
             except Exception:  # noqa: BLE001
                 log.exception("stats save failed")
+        for listener in list(self.sweep_listeners):
+            try:
+                r = listener(now)
+                if asyncio.iscoroutine(r):
+                    await r
+            except Exception:  # noqa: BLE001
+                log.exception("sweep listener failed")
         await self._bus.publish(events.DASHBOARD, self.dashboard())
         return expired
+
+    def market_view(self, asset: str, target: str, leader: str, base_amount: float, direction: int) -> dict[str, Any] | None:
+        """Latest prices for an open position (ride the leader): the exit VWAP on the target for
+        ``base_amount`` (book, or the ticker's bid/ask on a REST-only venue), the target mid and the
+        leader mid.  None when either side has no fresh data - no data, no decision."""
+        now = self._clock.mono()
+        bound = max(2.0 * self._freshness_bound("poll"), 5000.0)
+        if not (self._state.is_fresh(target, asset, now, bound) and self._state.is_fresh(leader, asset, now, bound)):
+            return None
+        d = 1 if direction >= 0 else -1
+        exit_px = mid = None
+        book = self._state.book(target, asset)
+        if book is not None and book.bids and book.asks and book.age_ms(now) <= bound:
+            levels = book.bids if d > 0 else book.asks
+            w = walk_book(levels, base_amount=max(0.0, float(base_amount)) or None, side=Side.SELL if d > 0 else Side.BUY)
+            exit_px = w.vwap or levels[0].price
+            mid = (book.bids[0].price + book.asks[0].price) / 2.0
+        else:
+            t = self._state.ticker(target, asset)
+            if t is not None and t.bid and t.ask:
+                exit_px = t.bid if d > 0 else t.ask
+                mid = (t.bid + t.ask) / 2.0
+        series = self._state.mid_series(leader, asset)
+        leader_mid = series[-1][1] if series else None
+        if not exit_px or not leader_mid:
+            return None
+        return {"target_exit": float(exit_px), "target_mid": float(mid or exit_px), "leader_mid": float(leader_mid)}
 
     def diagnostics(self) -> dict[str, Any]:
         """Funnel snapshot + "why no signals" (see engine.diagnostics)."""

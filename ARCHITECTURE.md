@@ -1067,3 +1067,12 @@ margin venue); `recommended` includes the venue.  Funding (perp) = notional·rat
 * Quality is computed and shown with `quality["enforced"] = False`: Telegram, AUTO revalidation, the UI
   filter and DIAG quality counters ignore it.  Hard rules 1, 2, 4, 5, 6 unchanged.
 * `simple_mode=False` (library default, tests) = the full mode described above.
+* **Ride the leader** (`ride_enabled`, on in simple mode): entry while the leader is within
+  `ride_reversal_pct` of its episode peak (`LagSignal.leader_peak_move_pct`, tracked by the mover) and at
+  most `ride_entry_max_age_s` after its move began; a reversal expires the open offer.  Exits by the pure
+  `engine/exit_policy.decide` (stop, leader reversed, caught up + leader stalled, trailing, max hold) —
+  shared by `ShadowTrader.tick` (positions outlive their opportunity; `Pipeline.market_view` prices;
+  ticked from `Pipeline.sweep_listeners`), the MANUAL escort (`_escort` → `exit_advice`) and AUTO
+  (`ExecutionEngine._ride_exit`: one MARKET exit through place_order; emergency / cancel / stale prices
+  also exit).  Learning barriers: stop → "stop", others → "time" (win iff NET > 0); `exit_kind` keeps the
+  reason.

@@ -70,5 +70,7 @@ class DurationEstimator:
         if opp is not None:
             result = max(result, age + 0.1)
         if getattr(s, "simple_mode", False):
-            result = min(result, float(s.simple_max_hold_s))  # simple mode: the window never exceeds the hold limit
+            # simple mode: the window never exceeds the hold limit (ride: the entry window)
+            cap = float(s.ride_entry_max_age_s) if getattr(s, "ride_enabled", False) else float(s.simple_max_hold_s)
+            result = min(result, cap)
         return result

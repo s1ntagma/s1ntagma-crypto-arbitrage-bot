@@ -27,6 +27,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .. import events
+from .exit_policy import RideConfig, RidePosition, decide
 from ..models import TERMINAL_STATES, Opportunity, OppState
 
 PERIOD_KEY = "stats_period_start_ts"  # kv: Stats count virtual trades opened from here on (history stays)
@@ -72,6 +73,7 @@ class ShadowTrade:
     stop_pct: float = 1.0
     stop_price: float = 0.0
     barrier: str = ""  # "target" | "stop" | "time" | "no_data" (closed without a fresh price: not learned)
+    exit_kind: str = ""  # ride the leader: stop / leader_reversed / caught_up / trailing / max_hold
     pnl_leveraged_quote: float | None = None
 
     def net_at(self, exit_price: float) -> float:
@@ -90,13 +92,15 @@ class ShadowTrader:
     """Subscribes to OPP_NEW / OPP_UPDATE / OPP_STATE; no network, no orders."""
 
     def __init__(self, settings: Any, bus: events.EventBus, clock: Any, db: Any | None = None, diag: Any | None = None,
-                 metalabel: Any | None = None) -> None:
+                 metalabel: Any | None = None, market: Any | None = None) -> None:
         self._settings = settings
         self._bus = bus
         self._clock = clock
         self._db = db
         self._diag = diag
         self._metalabel = metalabel
+        self._market = market  # Pipeline.market_view: prices for positions that outlive their opportunity
+        self._ride: dict[str, RidePosition] = {}
         self._open: dict[str, ShadowTrade] = {}
         self._closed: list[ShadowTrade] = []
         self.opened = 0
@@ -161,6 +165,8 @@ class ShadowTrader:
         )
         t.max_net_pct = t.net_at(t.last_exit_price)
         self._open[opp.id] = t
+        if self._ride_on():
+            self._ride[opp.id] = self._ride_position(t, opp)
         self.opened += 1
         self._save(t)
         log.info("shadow open %s %s@%s entry %.8g expected net %+.2f%%", t.id, t.asset, t.target, t.entry_price, t.expected_net_pct)
@@ -175,6 +181,8 @@ class ShadowTrader:
         t.last_exit_price = price
         t.last_update_ts = self._clock.wall()
         t.max_net_pct = max(t.max_net_pct, t.net_at(price))
+        if t.id in self._ride:
+            return  # ride the leader: tick() decides with the leader's price too
         reached = (price - t.exit_target) * t.direction >= 0
         if reached:
             self._close(t, price, "target reached", "target")
@@ -193,6 +201,8 @@ class ShadowTrader:
             state = OppState(to)
         except ValueError:
             return
+        if state in TERMINAL_STATES and t.id in self._ride:
+            return  # the entry offer ended; the position rides on until the exit policy sells it
         if state in TERMINAL_STATES:
             reason = str(payload.get("reason") or "")
             age_s = self._clock.wall() - t.last_update_ts
@@ -203,6 +213,59 @@ class ShadowTrader:
             else:
                 why = f" ({reason})" if reason else ""
                 self._close(t, t.last_exit_price, f"opportunity {state.value.lower()}{why}: sold at last market price", "time")
+
+    # ---- ride the leader -----------------------------------------------------
+    def _ride_on(self) -> bool:
+        active = getattr(self._settings, "ride_active", None)
+        return bool(self._market is not None and callable(active) and active())
+
+    def _view(self, t: ShadowTrade) -> dict[str, Any] | None:
+        try:
+            return self._market(t.asset, t.target, t.first_mover, t.base_amount, t.direction)
+        except Exception:  # noqa: BLE001
+            log.exception("market view failed for shadow %s", t.id)
+            return None
+
+    def _ride_position(self, t: ShadowTrade, opp: Opportunity) -> RidePosition:
+        d = t.direction
+        pos = RidePosition(direction=d, entry_price=t.entry_price,
+                           cost_pct=t.entry_fee_pct + t.exit_fee_pct + t.execution_loss_pct,
+                           entry_mono=self._clock.mono(), last_fresh_mono=self._clock.mono())
+        view = self._view(t)
+        if view:  # pre-move prices from the measured moves: lag = leader move - target move
+            sig = opp.signal
+            pos.leader_anchor = view["leader_mid"] / (1.0 + d * float(sig.first_move_pct) / 100.0)
+            pos.target_anchor = view["target_mid"] / (1.0 + d * float(sig.target_move_pct) / 100.0)
+            pos.update(self._clock.mono(), view["target_exit"], view["leader_mid"])
+        return pos
+
+    def tick(self, now_mono: float | None = None) -> None:
+        """Check every riding position on the latest prices (called by the pipeline sweep)."""
+        if not self._ride:
+            return
+        now = self._clock.mono() if now_mono is None else now_mono
+        cfg = RideConfig.from_settings(self._settings)
+        stale_s = float(getattr(self._settings, "ride_stale_s", 30.0))
+        for oid, pos in list(self._ride.items()):
+            t = self._open.get(oid)
+            if t is None:
+                self._ride.pop(oid, None)
+                continue
+            view = self._view(t)
+            if not view:
+                if now - (pos.last_fresh_mono or pos.entry_mono) > stale_s:
+                    self._ride.pop(oid, None)
+                    self._close(t, t.last_exit_price, f"no fresh price for {stale_s:g} s: outcome unknown", "no_data")
+                continue
+            price = view["target_exit"]
+            t.last_exit_price = price
+            t.last_update_ts = self._clock.wall()
+            t.max_net_pct = max(t.max_net_pct, t.net_at(price))
+            d = decide(pos, now, price, view["leader_mid"], cfg, target_mid=view["target_mid"])
+            if d.sell:
+                self._ride.pop(oid, None)
+                t.exit_kind = d.code
+                self._close(t, price, d.text, "stop" if d.code == "stop" else "time")
 
     # ---- bookkeeping -------------------------------------------------------
     def _skip(self, reason: str) -> None:
@@ -338,6 +401,11 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     out = _stats(closed)
     out["open"] = sum(1 for r in rows if r.get("closed_ts") is None)
     out["no_data"] = sum(1 for r in rows if r.get("barrier") == "no_data")
+    exits: dict[str, int] = {}
+    for r in closed:
+        k = str(r.get("exit_kind") or r.get("barrier") or "?")
+        exits[k] = exits.get(k, 0) + 1
+    out["by_exit"] = exits
     out["by_target"] = _group(closed, "target")
     out["by_asset"] = _group(closed, "asset")
     graded = [dict(r, grade=r.get("grade") or "unknown") for r in closed]

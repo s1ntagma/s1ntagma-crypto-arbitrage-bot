@@ -410,6 +410,7 @@ class LagSignal:
     source: str = "ws"  # "ws" (order book / bbo stream) | "poll" (REST tickers; needs book confirmation)
     target_quote: str = ""  # quote currency of the target market (EUR / USDC / USD / USDT)
     mover_volumes_quote: dict[str, float] = field(default_factory=dict)  # 24h quote volume per mover
+    leader_peak_move_pct: float = 0.0  # best move of the first mover in this episode (toward the direction)
 
 
 # --------------------------------------------------------------------------- #

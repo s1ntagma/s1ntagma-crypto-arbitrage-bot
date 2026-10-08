@@ -302,7 +302,10 @@ class OpportunityManager:
             if opp.state not in ACTIVE_STATES:
                 continue
             reason = ""
-            if getattr(s, "simple_mode", False) and opp.age_s(now_mono) >= float(s.simple_max_hold_s):
+            ride = bool(getattr(s, "simple_mode", False) and getattr(s, "ride_enabled", False))
+            if ride and opp.age_s(now_mono) >= float(s.ride_entry_max_age_s):
+                reason = f"entry window {float(s.ride_entry_max_age_s):g} s over"  # positions keep riding on their own
+            elif not ride and getattr(s, "simple_mode", False) and opp.age_s(now_mono) >= float(s.simple_max_hold_s):
                 reason = f"hold limit {float(s.simple_max_hold_s):g} s"  # simple mode: not caught up in time -> out
             elif opp.remaining_s(now_mono) <= 0:
                 reason = "window closed"

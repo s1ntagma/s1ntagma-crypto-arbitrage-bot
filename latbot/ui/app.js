@@ -21,7 +21,9 @@
     'human_execution_time_s', 'telegram_profit_threshold_pct', 'capital_quote', 'max_trade_quote',
     'min_net_pct_show', 'min_movers', 'auto_confirm', 'alert_human_only', 'telegram_require_executable',
     'min_quality_score', 'shadow_min_net_pct', 'max_leverage', 'pool_enabled', 'context_enabled', 'ws_assets',
-    'simple_mode', 'simple_entry_deadline_s', 'simple_max_hold_s'
+    'simple_mode', 'simple_entry_deadline_s', 'simple_max_hold_s',
+    'ride_enabled', 'ride_entry_max_age_s', 'ride_reversal_pct', 'ride_stall_s', 'ride_trail_arm_pct', 'ride_trail_pct',
+    'ride_stop_pct', 'ride_max_hold_s'
   ];
 
   var state = {
@@ -1652,6 +1654,8 @@
 
   // ------------------------------------------------------------------ trade + shadow statistics
   function pctOrDash(v) { return v == null ? '—' : fmtPct(v); }
+  var EXIT_LABELS = { leader_reversed: 'leader turned', caught_up: 'caught up', trailing: 'trailing', stop: 'stop',
+    max_hold: 'time limit', target: 'target', time: 'window over', no_data: 'no data' };
   function rateOrDash(v) { return v == null ? '—' : (v * 100).toFixed(0) + '%'; }
 
   function loadSummaries() {
@@ -1677,6 +1681,7 @@
         ['Open', String(s.open || 0)], ['Closed', String(s.closed || 0)], ['Win rate', rateOrDash(s.win_rate)],
         ['Avg expected NET', pctOrDash(s.avg_expected_net_pct)], ['Avg actual NET', pctOrDash(s.avg_actual_net_pct)],
         ['Target reached', String(s.target_reached || 0)], ['Stopped', String(s.stopped || 0)],
+        ['Exits', Object.keys(s.by_exit || {}).map(function (k) { return (EXIT_LABELS[k] || k) + ': ' + s.by_exit[k]; }).join(', ') || '–'],
         ['Closed without a fresh price (not learned)', String(s.no_data || 0)],
         ['Virtual P&L', fmtMoney(s.pnl_quote || 0, displayQuote(), { sign: true })],
         ['Skipped', Object.keys(s.skipped || {}).map(function (k) { return k + ': ' + s.skipped[k]; }).join(', ') || '0']

@@ -80,7 +80,7 @@ async def test_leader_move_opens_the_opportunity_with_a_15s_window():
 
 
 async def test_no_new_entry_after_the_entry_deadline():
-    env = simple_env(simple_entry_deadline_s=3.0)
+    env = simple_env(simple_entry_deadline_s=3.0, ride_enabled=False)
     await env.warm_up()
     env.adapters["kraken"].health.ws_connected = True
     await env.push("binance", 102.0)
@@ -94,7 +94,7 @@ async def test_no_new_entry_after_the_entry_deadline():
 
 
 async def test_hold_limit_closes_after_15s_and_shadow_sells_at_market():
-    env = simple_env()
+    env = simple_env(ride_enabled=False)
     sh = ShadowTrader(env.settings, env.bus, env.clock)
     await env.warm_up()
     opp = (await env.push("binance", 102.0))[0]
@@ -131,10 +131,12 @@ async def test_auto_revalidation_ignores_quality_when_not_enforced():
 
 
 def test_effective_hold_and_settings():
-    s = Settings(simple_mode=True, max_hold_s=60.0, sell_timeout_s=20.0)
+    s = Settings(simple_mode=True, ride_enabled=False, max_hold_s=60.0, sell_timeout_s=20.0)
     assert s.effective_max_hold_s() == 15.0 and s.effective_sell_timeout_s() == 15.0
     full = Settings(simple_mode=False, max_hold_s=60.0, sell_timeout_s=20.0)
     assert full.effective_max_hold_s() == 60.0 and full.effective_sell_timeout_s() == 20.0
+    ride = Settings(simple_mode=True, ride_max_hold_s=300.0)
+    assert ride.ride_active() and ride.effective_max_hold_s() == 300.0
 
 
 def test_owner_configs_switch_to_simple_mode_once(tmp_path):

@@ -226,7 +226,19 @@ class Settings:
     # The library default is off (tests, 'full' mode); load_settings turns it on for the owner.
     simple_mode: bool = False
     simple_entry_deadline_s: float = 3.0  # no new entry later than this after the leader moved
-    simple_max_hold_s: float = 15.0  # window, shadow trade and AUTO exit cap
+    simple_max_hold_s: float = 15.0  # window, shadow trade and AUTO exit cap (without ride)
+    # RIDE THE LEADER (simple mode): enter while the leader's move is intact, hold while it keeps going,
+    # sell when the move is over (engine/exit_policy.py).  Replaces the 3 s / 15 s limits above.
+    ride_enabled: bool = True
+    ride_entry_max_age_s: float = 60.0  # no new entry later than this after the leader's move began
+    ride_reversal_pct: float = 0.3  # the leader fell this far from its peak -> the move is over
+    ride_stop_pct: float = 1.0  # NET on the position <= -this -> sell
+    ride_lag_closed_pct: float = 0.1  # the target caught up to within this ...
+    ride_stall_s: float = 5.0  # ... and the leader made no new high for this long -> take the profit
+    ride_trail_arm_pct: float = 0.3  # once NET >= this ...
+    ride_trail_pct: float = 0.3  # ... a pull-back of the target by this from its peak -> sell
+    ride_max_hold_s: float = 300.0  # safety: sell at market after this
+    ride_stale_s: float = 30.0  # no fresh price for the position this long -> close as "no data"
     min_movers: int = 2  # at least this many exchanges must have moved (single-venue spikes revert)
     min_mover_volume_quote: float = 1_000_000.0  # 24h quote volume for a mover exchange to count
     min_target_volume_quote: float = 500_000.0  # 24h quote volume on the target market (owner: >= ~500k)
@@ -354,11 +366,19 @@ class Settings:
     single_instance_port: int = 47614
 
     # ------------------------------------------------------------------ #
+    def ride_active(self) -> bool:
+        """Simple mode with "ride the leader" exits."""
+        return bool(self.simple_mode and self.ride_enabled)
+
     def effective_max_hold_s(self) -> float:
-        """Exit at market after this (simple mode caps it at simple_max_hold_s)."""
+        """Exit at market after this (ride: ride_max_hold_s; simple mode: simple_max_hold_s)."""
+        if self.ride_active():
+            return float(self.ride_max_hold_s)
         return min(float(self.max_hold_s), float(self.simple_max_hold_s)) if self.simple_mode else float(self.max_hold_s)
 
     def effective_sell_timeout_s(self) -> float:
+        if self.ride_active():
+            return float(self.ride_max_hold_s)
         return min(float(self.sell_timeout_s), float(self.simple_max_hold_s)) if self.simple_mode else float(self.sell_timeout_s)
 
     def mode(self) -> Mode:
@@ -472,6 +492,10 @@ class Settings:
         self.min_movers = max(1, int(self.min_movers))
         self.simple_entry_deadline_s = float(self.simple_entry_deadline_s) if self.simple_entry_deadline_s > 0 else 3.0
         self.simple_max_hold_s = max(1.0, float(self.simple_max_hold_s))
+        for name, lo in (("ride_entry_max_age_s", 1.0), ("ride_reversal_pct", 0.01), ("ride_stop_pct", 0.05),
+                         ("ride_lag_closed_pct", 0.0), ("ride_stall_s", 0.5), ("ride_trail_arm_pct", 0.0),
+                         ("ride_trail_pct", 0.01), ("ride_max_hold_s", 5.0), ("ride_stale_s", 2.0)):
+            setattr(self, name, max(lo, float(getattr(self, name))))
         self.ws_assets = max(1, min(50, int(self.ws_assets)))
         if self.capital_quote <= 0 or self.max_trade_quote <= 0:
             raise ValueError("capital must be > 0")

@@ -77,6 +77,7 @@ class _Episode:
     # lagging target -> latest (first-mover move, target move) toward the direction: the catch-up it
     # actually delivered is recorded when the episode ends, also when it never followed (no survivor bias)
     last_moves: dict[str, tuple[float, float]] = field(default_factory=dict)
+    peak_move: dict[str, float] = field(default_factory=dict)  # mover -> best move toward the direction
 
 
 def _fmt_vol(v: float | None) -> str:
@@ -378,6 +379,8 @@ class MoveDetector:
         first = min(counted, key=lambda e: (cross[e].cross_mono, e))
         first_move = moves[first][0]
         first_cross_mono = cross[first].cross_mono
+        peak = max(ep.peak_move.get(first, 0.0), first_move * direction)
+        ep.peak_move[first] = peak  # ride the leader: has its move already turned?
 
         # ---- step 6: lagging execution exchanges ---------------------------
         signals: list[LagSignal] = []
@@ -432,6 +435,7 @@ class MoveDetector:
                     source=source,
                     target_quote=split_symbol(symbol)[1] if symbol else "",
                     mover_volumes_quote={ex: volumes[ex] for ex in counted if ex in volumes},
+                    leader_peak_move_pct=peak,
                 )
             )
         signals.sort(key=lambda sg: sg.lag_pct, reverse=True)
