@@ -515,3 +515,15 @@ a:hover { color: #67e8f9; }
   .field { min-width: 100px; }
   .toasts { right: var(--s-2); left: var(--s-2); max-width: none; }
 }
+
+/* ---- trading PLAN block (Russian, from engine.explain.build_plan) ---- */
+.plan { border-top: 1px dashed var(--border); padding-top: 6px; display: grid; gap: 3px; font-size: 0.86rem; color: var(--muted); }
+.plan-line { white-space: normal; line-height: 1.35; overflow-wrap: anywhere; }
+.plan-header { color: var(--text); font-weight: 600; }
+.plan-buy, .plan-sell { color: var(--text); font-size: 0.95rem; font-variant-numeric: tabular-nums; padding: 4px 8px; border-radius: 6px; background: rgba(255,255,255,0.03); border-left: 3px solid var(--green, #22c55e); }
+.plan-sell { border-left-color: var(--red, #ef4444); }
+.plan-caveat { color: var(--yellow-text, #fbbf24); }
+.plan-updated { font-size: 0.78rem; opacity: 0.8; }
+.plan-modal { margin-top: 8px; border-top: none; }
+.v.strong { font-weight: 700; }
+@media (max-width: 480px) { .plan { font-size: 0.82rem; } }

@@ -864,9 +864,26 @@
     }
     card.appendChild(botLine);
 
+    var planEl = renderPlan(o);
+    if (planEl) card.appendChild(planEl);
     card.appendChild(renderWhy(o));
     card.appendChild(renderFoot(o, term, exec));
     return card;
+  }
+
+  var PLAN_ORDER = ['header', 'movers', 'buy', 'sell', 'timing', 'caveat', 'updated'];
+  function renderPlan(o) {
+    var plan = o && o.plan;
+    if (!plan || typeof plan !== 'object') return null;
+    var box = h('div', { class: 'plan' });
+    var n = 0;
+    PLAN_ORDER.forEach(function (k) {
+      var t = plan[k];
+      if (!t) return;
+      n++;
+      box.appendChild(h('div', { class: 'plan-line plan-' + k, text: String(t), title: String(t) }));
+    });
+    return n ? box : null;
   }
 
   function renderWhy(o) {
@@ -1212,6 +1229,7 @@
         h('div', { class: 'rows' },
           h('span', { class: 'k', text: 'Pair' }), h('span', { class: 'v', text: s.symbol || pairName(o) }),
           h('span', { class: 'k', text: 'Price now' }), (m.refs.priceNow = h('span', { class: 'v' })),
+          h('span', { class: 'k', text: 'Buy ≤ (max)' }), (m.refs.capPrice = h('span', { class: 'v strong' })),
           h('span', { class: 'k', text: 'Amount' }), (m.refs.amount = h('span', { class: 'v' })),
           h('span', { class: 'k', text: 'Capital' }), (m.refs.capital = h('span', { class: 'v' })),
           h('span', { class: 'k', text: 'Exit target' }), (m.refs.exitTarget = h('span', { class: 'v' })),
@@ -1219,6 +1237,14 @@
           h('span', { class: 'k', text: 'Slippage est.' }), (m.refs.slip = h('span', { class: 'v' }))));
       var url = safeUrl(s.pair_url || o.pair_url);
       if (url) buy.appendChild(h('a', { class: 'link', href: url, target: '_blank', rel: 'noopener noreferrer', text: 'Open on ' + exch + ' ↗' }));
+      var mplan = (s.plan && typeof s.plan === 'object' && (s.plan.buy || s.plan.sell)) ? s.plan : (o.plan || null);
+      if (mplan && (mplan.buy || mplan.sell)) {
+        var pb = h('div', { class: 'plan plan-modal' });
+        if (mplan.buy) pb.appendChild(h('div', { class: 'plan-line plan-buy', text: String(mplan.buy) }));
+        if (mplan.sell) pb.appendChild(h('div', { class: 'plan-line plan-sell', text: String(mplan.sell) }));
+        if (mplan.caveat) pb.appendChild(h('div', { class: 'plan-line plan-caveat', text: String(mplan.caveat) }));
+        buy.appendChild(pb);
+      }
       body.appendChild(buy);
 
       body.appendChild(h('div', { class: 'countdown' },
@@ -1315,6 +1341,7 @@
     if (r.humanEst) r.humanEst.textContent = fmtSecs((s.human && s.human.est_execution_s) || state.settings.human_execution_time_s, 0);
     if (r.status) { r.status.textContent = st.text; r.status.className = 'status-flag ' + st.cls; }
     if (r.priceNow) r.priceNow.textContent = fmtMoney(s.entry_price_now, q);
+    if (r.capPrice) r.capPrice.textContent = Number.isFinite(num(s.entry_cap_price)) ? fmtMoney(s.entry_cap_price, q) : '–';
     if (r.amount) r.amount.textContent = fmtAmount(s.base_amount);
     if (r.capital) r.capital.textContent = fmtMoney(s.capital, q);
     if (r.exitTarget) r.exitTarget.textContent = fmtMoney(s.exit_target_now, q);
