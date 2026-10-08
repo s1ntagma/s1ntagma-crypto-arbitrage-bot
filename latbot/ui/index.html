@@ -10,46 +10,62 @@
 <body>
   <a class="skip-link" href="#tab-opps">Skip to opportunities</a>
 
-  <div class="app-shell">
-    <aside class="sidebar" aria-label="Navigation">
-      <div class="brand">
-        <span class="brand-logo" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="15 7 21 7 21 13"/></svg></span>
-        <span class="brand-text"><span class="brand-title">latbot</span><span class="brand-sub">latency terminal</span></span>
-      </div>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#" aria-label="latbot">
+        <span class="brand-logo" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="15 7 21 7 21 13"/></svg></span>
+        <span class="brand-title">latbot</span>
+      </a>
       <nav class="tabs" role="tablist" aria-label="Sections">
         <button class="tab" role="tab" type="button" data-tab="opps" aria-selected="true" aria-controls="tab-opps"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg><span class="tab-label">opportunities</span> <span class="tab-count" id="opps-count">0</span></button>
         <button class="tab" role="tab" type="button" data-tab="trades" aria-selected="false" aria-controls="tab-trades"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg><span class="tab-label">trades</span> <span class="tab-count" id="trades-count">0</span></button>
         <button class="tab" role="tab" type="button" data-tab="stats" aria-selected="false" aria-controls="tab-stats"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="tab-label">stats</span></button>
         <button class="tab" role="tab" type="button" data-tab="diag" aria-selected="false" aria-controls="tab-diag"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span class="tab-label">diagnostics</span></button>
       </nav>
-    </aside>
-
-    <div class="app-main">
-  <header class="topbar">
-    <span class="topbar-title">latbot</span>
-    <div id="mode-badge" class="mode-badge paper" title="Execution mode">PAPER</div>
-    <span id="build-stamp" class="build-stamp mono" title="build: hash of the running code"></span>
-    <div class="topbar-spacer"></div>
-    <div id="ws-status" class="ws-status" title="WebSocket connection">
-      <span id="ws-dot" class="dot red" aria-hidden="true"></span>
-      <span id="ws-label">connecting…</span>
+      <div class="topbar-actions">
+        <span id="build-stamp" class="build-stamp mono" title="build: hash of the running code"></span>
+        <div id="mode-badge" class="mode-badge paper" title="Execution mode">PAPER</div>
+        <div id="ws-status" class="ws-status" title="WebSocket connection">
+          <span id="ws-dot" class="dot red" aria-hidden="true"></span>
+          <span id="ws-label">connecting…</span>
+        </div>
+        <button id="close-positions-btn" class="btn btn-warn hidden" type="button">CLOSE POSITIONS</button>
+  <button id="emergency-btn" class="btn btn-danger" type="button"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>EMERGENCY STOP</span></button>
+  <button id="settings-btn" class="btn btn-ghost" type="button" aria-label="Settings" aria-controls="settings-drawer" aria-expanded="false"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>Settings</span></button>
+      </div>
     </div>
-    <button id="close-positions-btn" class="btn btn-warn hidden" type="button">CLOSE POSITIONS</button>
-    <button id="emergency-btn" class="btn btn-danger" type="button"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>EMERGENCY STOP</span></button>
-    <button id="settings-btn" class="btn btn-ghost" type="button" aria-controls="settings-drawer" aria-expanded="false"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>Settings</span></button>
   </header>
 
   <div id="emergency-banner" class="banner banner-danger hidden" role="status" aria-live="assertive"></div>
 
-  <section id="dashboard" class="dashboard" aria-label="Dashboard counters"></section>
-  <section id="health-strip" class="health-strip" aria-label="Exchange health"></section>
+  <div id="strips" class="strips">
+    <section id="dashboard" class="dashboard" aria-label="Dashboard counters"></section>
+    <section id="health-strip" class="health-strip" aria-label="Exchange health"></section>
+  </div>
 
   <main class="main">
     <section id="tab-opps" class="tab-panel" role="tabpanel" aria-label="Opportunities">
+      <div class="hero grid-bg">
+        <div class="hero-copy">
+          <span class="badge-live"><span class="dot green" aria-hidden="true"></span><span id="hero-badge">Live monitoring</span></span>
+          <h1 class="hero-title">Catch the <span class="gradient-text">lag</span>, not the noise</h1>
+          <p class="hero-sub">A signal appears only when at least two venues moved and your exchange has not. Every figure is net of fees, spread and slippage, on the size the order book can fill.</p>
+          <div class="hero-cta">
+            <button id="hero-scroll" class="btn btn-primary btn-cta" type="button">All opportunities</button>
+            <button id="hero-diag" class="btn btn-cta" type="button">Why no signals? Open diagnostics</button>
+          </div>
+          <div class="hero-points">
+            <span><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Net of costs</span>
+            <span><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Real order-book depth</span>
+            <span><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Human and bot timing</span>
+          </div>
+        </div>
       <section id="best-panel" class="best-panel" aria-live="polite">
         <h2 class="panel-title"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg> BEST CURRENT OPPORTUNITY</h2>
         <div id="best-body" class="best-body"></div>
       </section>
+      </div>
+      <div id="strip-slot"></div>
 
       <div id="filters" class="filters" aria-label="Filters">
         <div id="filter-quick" class="filter-quick" role="group" aria-label="Quick filters">
@@ -222,8 +238,6 @@
       <p id="diag-empty" class="muted hidden">Diagnostics not loaded yet.</p>
     </section>
   </main>
-    </div>
-  </div>
 
   <div id="drawer-backdrop" class="backdrop hidden"></div>
   <aside id="settings-drawer" class="drawer" aria-hidden="true" aria-labelledby="settings-title">

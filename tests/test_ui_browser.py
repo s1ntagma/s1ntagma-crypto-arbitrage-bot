@@ -112,8 +112,27 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             card = page.locator(".card").first
             await assert_no_emoji(page, "board with an opportunity (card, best panel, lights)")
             assert "BTC" in await card.inner_text()
-            assert await card.locator(".plan").count() == 1
+            assert await page.locator("#cards .card .plan").count() == 1  # the full plan lives on the list card
             assert (await page.locator("#opps-count").inner_text()).strip() == "1"
+            # hero: live badge with real counters, best card with a lag chart built from real prices
+            badge = await page.locator("#hero-badge").inner_text()
+            assert badge.startswith("Live monitoring") and "exchanges" in badge and "1 opportunity" in badge, badge
+            await page.wait_for_selector("#best-body .lag-chart .chart-svg", timeout=5000)
+            assert await page.locator("#best-body .chart-chip").count() >= 2  # mover + target, each with its own number
+            assert await page.locator("#best-body .tf[aria-pressed='true']").inner_text() == "30s"
+            await page.click("#best-body .tf:has-text('15s')")
+            await page.wait_for_selector("#best-body .tf[aria-pressed='true']:has-text('15s')", timeout=3000)
+            await page.wait_for_selector("#best-body .lag-chart .chart-svg, #best-body .lag-chart .chart-empty", timeout=5000)
+            await assert_no_emoji(page, "best panel with lag chart")
+            # counters strip sits under the hero on this tab, at the top on the others; hero buttons do real work
+            assert await page.evaluate("document.getElementById('strips').parentNode.id") == "strip-slot"
+            await page.click("#hero-diag")
+            await page.wait_for_selector("#tab-diag:not(.hidden)", timeout=3000)
+            assert await page.evaluate("document.getElementById('strips').nextElementSibling.tagName") == "MAIN"
+            await page.click("button.tab[data-tab='opps']")
+            await page.wait_for_selector("#tab-opps:not(.hidden) #strip-slot #strips", timeout=3000)
+            await page.click("#hero-scroll")
+            await page.wait_for_function("document.getElementById('filters').getBoundingClientRect().top < 300", timeout=3000)
 
             # 3. filters really filter
             await page.fill("#f-minnet", "50")  # nothing has NET >= 50 %

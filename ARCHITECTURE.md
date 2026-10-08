@@ -521,6 +521,9 @@ Routes (JSON):
 * `GET /api/state` → `{mode, emergency, settings: settings.public(), health: [ExchangeHealth…], dashboard, best: opp|null, version}`
 * `GET /api/opportunities?state=active|history|all&asset=&exchange=&min_net=&human=&bot=` → list of `opp.to_dict()`
 * `GET /api/opportunities/{id}`
+* `GET /api/opportunities/{id}/chart?seconds=15..60` → real mid-price history (`MarketState.mid_series`) of the movers and
+  the target, each line in % from its first point inside the window, x = seconds before now (or before expiry for a
+  finished opportunity); a stream with < 2 real points is not drawn (`has_data=false` when nothing is left)
 * `POST /api/opportunities/{id}/manual` → `execution.select_manual`
 * `GET  /api/opportunities/{id}/manual/support` → `execution.manual_support`
 * `POST /api/opportunities/{id}/manual/entered {price, quote_amount}`; `POST …/manual/exited {price}`

@@ -26,6 +26,7 @@ import inspect
 import json
 import logging
 import math
+import mimetypes
 import os
 import re
 import time
@@ -51,6 +52,7 @@ from ..models import ExchangeHealth, Light
 
 log = logging.getLogger(__name__)
 
+mimetypes.add_type("font/woff2", ".woff2")  # not known to every Windows registry
 UI_DIR: Path = Path(__file__).resolve().parent.parent / "ui"
 WS_TOPICS: tuple[str, ...] = (
     OPP_NEW,
@@ -128,6 +130,55 @@ def _wall(ctx: Any) -> float:
         except Exception:  # noqa: BLE001
             log.exception("clock.wall failed; falling back to time.time")
     return time.time()
+
+
+_CHART_MAX_POINTS = 120
+_CHART_MAX_MOVERS = 2
+
+
+def _decimate(points: list[tuple[float, float]], limit: int) -> list[tuple[float, float]]:
+    if len(points) <= limit:
+        return points
+    stride = -(-len(points) // limit)  # ceil
+    out = points[::stride]
+    if out[-1] is not points[-1]:
+        out.append(points[-1])
+    return out
+
+
+def build_chart(ctx: Any, opp: Any, seconds: int) -> dict[str, Any]:
+    """Real mid-price history of the movers and the target around an opportunity.
+
+    Each line is the % change from its first point INSIDE the window, x = seconds
+    relative to the anchor (now, or the expiry of a finished opportunity).  A
+    stream with fewer than two real points is not a line; nothing is interpolated.
+    """
+    state = getattr(ctx, "state", None)
+    settings = getattr(ctx, "settings", None)
+    history_s = int(getattr(settings, "price_history_s", 60) or 60)
+    seconds = max(5, min(int(seconds), history_s))
+    expired = getattr(opp, "expired_mono", None)
+    anchor = float(expired) if getattr(opp, "is_terminal", False) and expired else _now(ctx)
+    out: dict[str, Any] = {
+        "opp_id": opp.id, "asset": opp.asset, "seconds": seconds, "unit": "pct_from_window_start",
+        "detected_at_s": round(float(opp.first_seen_mono) - anchor, 3), "series": [], "has_data": False,
+    }
+    if state is None or not hasattr(state, "mid_series"):
+        return out
+    reacted = [x for x in (getattr(opp.signal, "reacted", None) or {}) if x != opp.target_exchange]
+    movers = [opp.first_mover] + [x for x in reacted if x != opp.first_mover]
+    lines = [(x, "signal") for x in movers[: 1 + _CHART_MAX_MOVERS] if x != opp.target_exchange]
+    lines.append((opp.target_exchange, "target"))
+    lo = anchor - seconds
+    for exchange, role in lines:
+        window = [(m, p) for m, p in state.mid_series(exchange, opp.asset) if lo <= m <= anchor and p > 0]
+        if len(window) < 2:
+            continue
+        base = window[0][1]
+        pts = _decimate([(round(m - anchor, 3), round((p / base - 1.0) * 100.0, 4)) for m, p in window], _CHART_MAX_POINTS)
+        out["series"].append({"exchange": exchange, "role": role, "points": [list(p) for p in pts]})
+    out["has_data"] = bool(out["series"])
+    return out
 
 
 def _opp_dict(opp: Any, now_mono: float) -> dict[str, Any]:
@@ -854,6 +905,14 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
         if opp is None:
             raise HTTPException(status_code=404, detail="opportunity not found")
         return _json(_opp_dict(opp, _now(ctx)))
+
+    @app.get("/api/opportunities/{opp_id}/chart")
+    async def api_opportunity_chart(opp_id: str, seconds: int = Query(30)) -> JSONResponse:
+        opps = getattr(ctx, "opps", None)
+        opp = opps.get(opp_id) if opps is not None and hasattr(opps, "get") else None
+        if opp is None:
+            raise HTTPException(status_code=404, detail="opportunity not found")
+        return _json(build_chart(ctx, opp, seconds))
 
     # ---- manual flow -----------------------------------------------------
     @app.post("/api/opportunities/{opp_id}/manual")

@@ -45,8 +45,13 @@
     manual: null,
     auto: null,
     tradesLoaded: false,
-    statsLoaded: false
+    statsLoaded: false,
+    chartSeconds: 30
   };
+  try {
+    var savedTf = parseInt(window.localStorage.getItem('latbot.chartSeconds'), 10);
+    if (savedTf === 15 || savedTf === 30 || savedTf === 60) state.chartSeconds = savedTf;
+  } catch (e) { /* storage blocked: default window */ }
 
   // ------------------------------------------------------------------ dom utils
   function $(id) { return document.getElementById(id); }
@@ -540,6 +545,7 @@
     uiMemo.connected = state.connected;
     var topbar = document.querySelector('.topbar');
     if (topbar) topbar.classList.toggle('emergency', !!state.emergency);
+    renderHeroBadge();
 
     var btn = $('emergency-btn');
     var closeBtn = $('close-positions-btn');
@@ -628,6 +634,7 @@
       if (hh.rate_limited_until_mono) chip.appendChild(h('span', { class: 'tag yellow', text: 'rate-limited' }));
       box.appendChild(chip);
     });
+    renderHeroBadge();
   }
 
   function renderFilters() {
@@ -715,6 +722,156 @@
     box.appendChild(fresh);
     if (id !== uiMemo.bestId && (old || best)) pulseOnce(box, 'swap', 400);
     uiMemo.bestId = id;
+    if (best) refreshChart(false);
+  }
+
+  // ------------------------------------------------------------------ lag chart (best opportunity)
+  // Real mid prices of the movers and the target (GET /api/opportunities/{id}/chart), % from the window start.
+  // No history -> an honest empty state; nothing is interpolated or invented.
+  var chartCache = { id: null, seconds: 0, data: null, at: 0, busy: false };
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+
+  function svgNode(tag, attrs) {
+    var el = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs || {}).forEach(function (k) { el.setAttribute(k, String(attrs[k])); });
+    for (var i = 2; i < arguments.length; i++) if (arguments[i]) el.appendChild(arguments[i]);
+    return el;
+  }
+
+  function initials(name) {
+    var t = String(exchangeLabel(name) || '?').replace(/[^A-Za-z0-9]/g, '');
+    return (t.slice(0, 2) || '?').toUpperCase();
+  }
+
+  function refreshChart(force) {
+    var best = computeBest();
+    if (!best || chartCache.busy) return;
+    var now = Date.now();
+    var same = chartCache.id === best.id && chartCache.seconds === state.chartSeconds;
+    if (!force && same && now - chartCache.at < 1800) return;
+    chartCache.busy = true;
+    var id = best.id;
+    var secs = state.chartSeconds;
+    api('GET', oppPath(id, '/chart?seconds=' + secs)).then(function (r) {
+      chartCache.busy = false;
+      if (!r.ok) return;
+      chartCache = { id: id, seconds: secs, data: r.data, at: Date.now(), busy: false };
+      var cur = computeBest();
+      if (cur && cur.id === id && secs === state.chartSeconds) replaceChart(cur);
+    });
+  }
+
+  function replaceChart(o) {
+    var old = document.querySelector('#best-body .lag-chart');
+    if (!old || old.dataset.id !== o.id) return;
+    old.parentNode.replaceChild(renderLagChart(o), old);
+  }
+
+  function setChartSeconds(sec) {
+    if (state.chartSeconds === sec) return;
+    state.chartSeconds = sec;
+    try { window.localStorage.setItem('latbot.chartSeconds', String(sec)); } catch (e) { /* storage blocked */ }
+    var best = computeBest();
+    if (best) replaceChart(best);
+    refreshChart(true);
+  }
+
+  function chartPlot(data) {
+    var W = 600, H = 170, padL = 6, padR = 6, padT = 12, padB = 20;
+    var secs = num(data.seconds) || state.chartSeconds;
+    var lo = 0, hi = 0;
+    data.series.forEach(function (s) { s.points.forEach(function (p) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); }); });
+    var span = hi - lo;
+    if (span < 0.02) { lo -= 0.01; hi += 0.01; span = hi - lo; }
+    lo -= span * 0.08; hi += span * 0.08;
+    var X = function (t) { return padL + ((t + secs) / secs) * (W - padL - padR); };
+    var Y = function (v) { return padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB); };
+    var svg = svgNode('svg', { 'class': 'chart-svg', viewBox: '0 0 ' + W + ' ' + H, preserveAspectRatio: 'none', role: 'img' });
+    var grad = svgNode('linearGradient', { id: 'chart-fill-target', x1: '0', y1: '0', x2: '0', y2: '1' },
+      svgNode('stop', { offset: '0%', style: 'stop-color:var(--neon);stop-opacity:0.32' }),
+      svgNode('stop', { offset: '100%', style: 'stop-color:var(--neon);stop-opacity:0' }));
+    svg.appendChild(svgNode('defs', {}, grad));
+    for (var g = 1; g <= 3; g++) {
+      var gy = padT + (g / 4) * (H - padT - padB);
+      svg.appendChild(svgNode('line', { 'class': 'chart-grid', x1: padL, x2: W - padR, y1: gy, y2: gy, 'vector-effect': 'non-scaling-stroke' }));
+    }
+    svg.appendChild(svgNode('line', { 'class': 'chart-zero', x1: padL, x2: W - padR, y1: Y(0), y2: Y(0), 'vector-effect': 'non-scaling-stroke' }));
+    var det = num(data.detected_at_s);
+    if (Number.isFinite(det) && det >= -secs && det <= 0) {
+      svg.appendChild(svgNode('line', { 'class': 'chart-detect', x1: X(det), x2: X(det), y1: padT, y2: H - padB, 'vector-effect': 'non-scaling-stroke' }));
+    }
+    var signalIdx = 0;
+    var ordered = data.series.slice().sort(function (a, b) { return (a.role === 'target' ? 1 : 0) - (b.role === 'target' ? 1 : 0); });
+    ordered.forEach(function (s) {
+      var d = s.points.map(function (p, i) { return (i ? 'L' : 'M') + X(p[0]).toFixed(1) + ' ' + Y(p[1]).toFixed(1); }).join(' ');
+      var cls = 'chart-line ' + s.role;
+      if (s.role === 'signal') { signalIdx++; if (signalIdx > 1) cls += ' s' + Math.min(signalIdx, 3); }
+      if (s.role === 'target') {
+        var first = s.points[0], last = s.points[s.points.length - 1];
+        svg.appendChild(svgNode('path', { 'class': 'chart-area', fill: 'url(#chart-fill-target)',
+          d: d + ' L' + X(last[0]).toFixed(1) + ' ' + (H - padB) + ' L' + X(first[0]).toFixed(1) + ' ' + (H - padB) + ' Z' }));
+      }
+      svg.appendChild(svgNode('path', { 'class': cls, d: d }));
+      var end = s.points[s.points.length - 1];
+      svg.appendChild(svgNode('circle', { 'class': 'chart-end ' + s.role, cx: X(end[0]).toFixed(1), cy: Y(end[1]).toFixed(1), r: 4 }));
+    });
+    var t1 = svgNode('text', { 'class': 'chart-axis', x: padL, y: H - 4 }); t1.textContent = '-' + secs + 's';
+    var t2 = svgNode('text', { 'class': 'chart-axis', x: W - padR, y: H - 4, 'text-anchor': 'end' }); t2.textContent = 'now';
+    svg.appendChild(t1); svg.appendChild(t2);
+    svg.setAttribute('aria-label', 'Price change over the last ' + secs + ' seconds: ' + data.series.map(function (s) {
+      var e = s.points[s.points.length - 1];
+      return exchangeLabel(s.exchange) + ' ' + fmtPct(e[1]);
+    }).join(', '));
+    return svg;
+  }
+
+  function renderLagChart(o) {
+    var wrap = h('div', { class: 'lag-chart', 'data-id': o.id });
+    var toggle = h('div', { class: 'chart-toggle', role: 'group', 'aria-label': 'Chart window' });
+    [15, 30, 60].forEach(function (sec) {
+      toggle.appendChild(h('button', {
+        class: 'tf', type: 'button', text: sec + 's', 'aria-pressed': state.chartSeconds === sec ? 'true' : 'false',
+        onclick: function () { setChartSeconds(sec); }
+      }));
+    });
+    var ready = chartCache.id === o.id && chartCache.seconds === state.chartSeconds && chartCache.data;
+    var frame = h('div', { class: 'chart-frame' });
+    var legend = h('div', { class: 'chart-legend' });
+    if (!ready) {
+      frame.appendChild(h('div', { class: 'chart-empty', text: 'Loading real price history…' }));
+    } else if (!chartCache.data.has_data) {
+      frame.appendChild(h('div', { class: 'chart-empty', text: 'Not enough real price points in this window yet. The chart shows only measured prices; nothing is drawn without data.' }));
+    } else {
+      frame.appendChild(chartPlot(chartCache.data));
+      chartCache.data.series.slice().sort(function (a, b) { return (a.role === 'target' ? 1 : 0) - (b.role === 'target' ? 1 : 0); }).forEach(function (s) {
+        var last = s.points[s.points.length - 1][1];
+        legend.appendChild(h('span', { class: 'chart-chip ' + s.role },
+          h('span', { class: 'badge', 'aria-hidden': 'true', text: initials(s.exchange) }),
+          h('span', { class: 'cn', text: exchangeLabel(s.exchange) + (s.role === 'target' ? ' (target)' : '') }),
+          h('span', { class: 'cv ' + (last >= 0 ? 'pos' : 'neg'), text: fmtPct(last) })));
+      });
+    }
+    wrap.appendChild(h('div', { class: 'chart-head' }, legend, toggle));
+    wrap.appendChild(frame);
+    return wrap;
+  }
+
+  // ------------------------------------------------------------------ hero badge (live status, real numbers)
+  function renderHeroBadge() {
+    var el = $('hero-badge');
+    if (!el) return;
+    var names = Object.keys(state.health);
+    var up = names.filter(function (n) { var x = state.health[n]; return x.ws_connected || x.polling; }).length;
+    var active = state.opps.size;
+    var ok = state.connected && up > 0;
+    var text = !state.connected ? 'Reconnecting to the terminal…'
+      : !names.length ? 'Starting: waiting for exchanges'
+      : 'Live monitoring · ' + up + '/' + names.length + ' exchanges · ' + active + (active === 1 ? ' opportunity' : ' opportunities');
+    if (el.textContent !== text) el.textContent = text;
+    var badge = el.parentNode;
+    if (badge && badge.classList) badge.classList.toggle('off', !ok);
+    var dot = badge && badge.querySelector('.dot');
+    if (dot) dot.className = 'dot ' + (ok ? 'green' : 'red');
   }
 
   function renderCards() {
@@ -729,6 +886,7 @@
     reconcileCards(box, list);
     renderEmpty(list.length);
     $('opps-count').textContent = String(state.opps.size);
+    renderHeroBadge();
   }
 
   function liveAfter(node) {
@@ -837,7 +995,7 @@
       h('span', { class: 'card-pair', text: pairName(o), title: pairName(o) }),
       h('span', { class: 'card-side ' + (side === 'LONG' ? 'long' : 'short'), text: side }),
       h('span', { class: 'tag ' + (o.mode === 'live' ? 'live' : 'paper'), text: String(o.mode || '').toUpperCase() }),
-      h('span', { class: 'state-badge', text: o.state }),
+      h('span', { class: 'state-badge', text: String(o.state || '').replace(/_/g, ' ') }),
       h('span', { class: 'card-target', title: 'target exchange: ' + exchangeLabel(o.target_exchange) }, 'TARGET: ', h('b', { text: exchangeLabel(o.target_exchange) }))));
 
     card.appendChild(h('div', { class: 'card-net' },
@@ -845,6 +1003,8 @@
       h('span', { class: 'card-net-value ' + (net >= 0 ? 'pos' : 'neg'), text: fmtPct(net) }),
       Number.isFinite(num(o.max_net_pct)) && num(o.max_net_pct) > net + 0.005
         ? h('span', { class: 'muted', text: 'peak ' + fmtPct(o.max_net_pct) }) : null));
+
+    if (opts.best) card.appendChild(renderLagChart(o));
 
     card.appendChild(h('div', { class: 'card-grid' },
       kv('BUY', fmtMoney(o.buy_price, q)),
@@ -892,9 +1052,10 @@
     }
     card.appendChild(botLine);
 
-    var planEl = renderPlan(o);
+    // The best-opportunity panel stays compact; the full PLAN and WHY live on the card in the list below.
+    var planEl = opts.best ? null : renderPlan(o);
     if (planEl) card.appendChild(planEl);
-    card.appendChild(renderWhy(o));
+    if (!opts.best) card.appendChild(renderWhy(o));
     card.appendChild(renderFoot(o, term, exec));
     return card;
   }
@@ -1142,8 +1303,20 @@
   }
 
   // ------------------------------------------------------------------ tabs / loading
+  // Counters + exchange health sit under the hero on the opportunities tab (like the reference's ticker strip)
+  // and at the top of every other tab.
+  function placeStrips(name) {
+    var strips = $('strips');
+    if (!strips) return;
+    var inHero = name === 'opps';
+    var slot = $('strip-slot');
+    if (inHero && strips.parentNode !== slot) slot.appendChild(strips);
+    else if (!inHero && strips.parentNode === slot) document.body.insertBefore(strips, document.querySelector('main.main'));
+  }
+
   function setTab(name) {
     state.tab = name;
+    placeStrips(name);
     document.querySelectorAll('.tab').forEach(function (b) { b.setAttribute('aria-selected', b.dataset.tab === name ? 'true' : 'false'); });
     ['opps', 'trades', 'stats', 'diag'].forEach(function (n) { $('tab-' + n).classList.toggle('hidden', n !== name); });
     if (name === 'trades' && !state.tradesLoaded) loadTrades();
@@ -2298,7 +2471,10 @@
     });
     if (zeroed) scheduleRender('cards');
     if (state.manual && !modalHidden('manual')) updateManualLive();
+    chartTicks = (chartTicks + 1) % 8;  // every 2 s while the best opportunity is on screen
+    if (chartTicks === 0 && state.tab === 'opps' && !document.hidden) refreshChart(false);
   }
+  var chartTicks = 0;
 
   // ------------------------------------------------------------------ wiring
   function bindUi() {
@@ -2326,6 +2502,11 @@
       state.focusId = null;
       scheduleRender('cards');
     });
+    $('hero-scroll').addEventListener('click', function () {
+      var target = $('filters');
+      if (target && target.scrollIntoView) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    $('hero-diag').addEventListener('click', function () { setTab('diag'); window.scrollTo(0, 0); });
     $('trades-refresh').addEventListener('click', loadTrades);
     $('stats-refresh').addEventListener('click', loadStats);
     $('diag-refresh').addEventListener('click', loadDiag);
@@ -2396,6 +2577,7 @@
 
   function init() {
     startEmojiScrub();
+    placeStrips('opps');
     bindUi();
     renderAll();
     api('GET', '/api/state').then(function (r) {
