@@ -736,3 +736,251 @@ probability blends the margin-based estimate with `stats_rate` when
   capital formatted with the market quote (€ for EUR, $ otherwise).
 * UI card and MANUAL modal: "Open on Kraken ↗" link, quote-aware formatting,
   "HUMAN 🟢 7 s needed / ~12 s window · by stats 7/10" line.
+
+---
+
+# Phase 3 — selective, context-aware signals (narrow pool · quality score · context · reactions · leverage)
+
+Owner's principle: **fewer trades, better analysis**.  The latency engine (Phases 1–2) still finds
+the lag; Phase 3 decides *which assets are worth scanning* and *how good a found signal is*, using
+as many objective factors as are available.  Rules that do not change: no fake data (a factor
+without data is `available=False`, never support), NET only, strategy weights are fixed and
+documented (measurements are learned, parameters are never auto-fitted).
+
+```
+universe/pool.py        AssetPool       which assets are scanned at all (objective, external data + measured jumpiness)
+context/base.py         contracts       HttpGetter, PollingCollector, SourceStatus, Factor, MacroEvent, NewsItem
+context/calendar.py     MacroCalendar   US macro calendar (CPI, PPI, NFP, FOMC, Fed speakers...) + BlsActuals
+context/markets.py      TradFiMarkets   DXY, US yields, S&P/Nasdaq futures, VIX, gold (Yahoo chart API)
+context/derivs.py       Derivatives     funding, open interest, liquidations, long/short (OKX public; Binance optional) + FearGreed
+context/news.py         NewsFeed        RSS + public Telegram channels (t.me/s/<channel>) + Whale Alert parsing
+context/classify.py     classifiers     RuleClassifier (always) + ClaudeClassifier (ANTHROPIC_API_KEY, budgeted)
+context/bars.py         MinuteBars      per-asset minute closes from our own data (+OKX 1m bootstrap); regime, vol, corr
+context/reactions.py    EventReactionStore  how BTC/ETH/asset moved +10 s / +60 s / +5 min / +30 min after each event type
+context/hub.py          ContextHub      runs collectors, housekeeping, factors(asset, direction) -> list[Factor], snapshot()
+engine/quality.py       assess_quality  transparent 0..100 score + grade + vetoes from components and context factors
+engine/leverage.py      plan_leverage   position size / margin / fees / funding / liquidation / R:R; quality-gated leverage cap
+```
+
+Every new module reads settings with `getattr(settings, name, default)` using the defaults listed
+here (the integration adds the same fields to `Settings`), takes `clock` (Clock/SimClock) and an
+`HttpGetter` (tests inject a fake; production `AiohttpGetter`), never raises out of `PollingCollector.step()`,
+and is fully testable offline with recorded fixtures.
+
+## P3.1 `universe/pool.py` — `AssetPool(PollingCollector)` (name `"asset_pool"`)
+
+```python
+@dataclass(slots=True)
+class PoolAsset:
+    asset: str; rank: int | None; market_cap_usd: float | None; volume_24h_usd: float | None
+    change_24h_pct: float | None; change_7d_pct: float | None; categories: list[str]
+    venues_signal: list[str]; venues_target: list[str]
+    jump: dict            # jumpiness() result (minutes, spikes, max_1m_pct, tail_ratio) or {}
+    included: bool; reasons: list[str]   # Russian: why excluded / "в пуле: ..."
+    source: str           # "coingecko" | "cache" | "fallback"
+
+class AssetPool(PollingCollector):
+    def __init__(self, settings, clock, http, *, cache_path: Path | None = None, api_key: str = "",
+                 listings_fn: Callable[[], dict[str, dict[str, float | None]]] | None = None,
+                 bars_fn: Callable[[str], list[float]] | None = None) -> None
+    async def poll_once(self) -> int        # CoinGecko markets (top 250 by cap, 7d change) + category lists -> cache -> reevaluate()
+    def reevaluate(self) -> None            # re-apply criteria with the latest listings_fn()/bars_fn() (no network)
+    def contains(self, asset: str) -> bool  # O(1); True for every asset when pool_enabled is False
+    def assets(self) -> list[str]           # included, by market-cap rank (pool_include first)
+    def get(self, asset: str) -> PoolAsset | None
+    def snapshot(self) -> dict              # enabled, updated_ts, source, criteria, included[], excluded[] (asset+reasons), status
+def jumpiness(closes: list[float], spike_pct: float) -> dict  # {"minutes", "spikes", "max_1m_pct", "tail_ratio"}
+```
+`listings_fn()` → `asset -> {exchange: 24h quote volume | None}` for markets that exist on ENABLED
+exchanges (built by the integration from adapters / MarketState).  Criteria (settings, defaults):
+`pool_enabled=True`, `pool_max_assets=25`, `pool_min_market_cap_usd=1e9`, `pool_min_volume_24h_usd=2e7`
+(global, CoinGecko), `pool_max_abs_change_24h_pct=15.0`, `pool_max_abs_change_7d_pct=40.0` (hype
+pumps/dumps), `pool_exclude_categories=[meme / stablecoin / wrapped / liquid-staking / bridged /
+tokenized-gold / fan-token category ids]`, `pool_include=["BTC","ETH"]`, `pool_exclude=[]`,
+`pool_min_signal_venues=2`, `pool_min_target_venues=1`, `pool_spike_pct=2.0`, `pool_max_spikes=3`,
+`pool_jump_min_minutes=120` (too few minutes → not judged, noted), `pool_refresh_h=12`.
+Offline / 429: last cache file, else bundled `universe/data/fallback_pool.json`
+(`{"pool": [...], "meme_blocklist": [...], "stable_blocklist": [...]}`).  Target-venue turnover is
+still enforced per signal by `min_target_volume_quote` (default raised to **500 000**).
+
+## P3.2 `context/calendar.py`
+
+```python
+class MacroCalendar(PollingCollector):     # name "macro_calendar", interval macro_refresh_s=3600
+    def __init__(self, settings, clock, http, *, cache_path: Path | None = None) -> None
+    async def poll_once(self) -> int        # Forex Factory weekly JSON (this week + next week when present); cache file survives 429 / restarts
+    def events(self) -> list[MacroEvent]    # filtered: macro_countries=["USD"], macro_impacts=["high","medium"]; sorted by ts
+    def upcoming(self, now_wall: float, within_s: float, min_impact: str = "high") -> list[MacroEvent]
+    def recent(self, now_wall: float, within_s: float, min_impact: str = "high") -> list[MacroEvent]
+    def next_event(self, now_wall: float, min_impact: str = "high") -> MacroEvent | None
+    def set_actual(self, event_id: str, actual: str) -> None   # computes surprise vs forecast
+def classify_title(title: str) -> str      # -> MACRO_EVENT_TYPES
+def parse_number(text: str) -> float | None   # "0.3%" -> 0.3, "175K" -> 175000.0, "-1.2B" -> -1.2e9
+def surprise_of(actual: str, forecast: str, tolerance: float = 0.0) -> int | None
+class BlsActuals(PollingCollector):         # name "bls_actuals": fills actual values of released NFP/CPI/CORE_CPI/UNEMPLOYMENT/PPI/EARNINGS
+    def __init__(self, settings, clock, http, calendar: MacroCalendar, *, api_key: str = "") -> None
+```
+
+## P3.3 `context/markets.py` — `TradFiMarkets(PollingCollector)` (name `"tradfi"`, `markets_poll_s=60`)
+`markets_symbols={"DXY":"DX-Y.NYB","US10Y":"^TNX","US5Y":"^FVX","US3M":"^IRX","SPX_FUT":"ES=F","NDX_FUT":"NQ=F","VIX":"^VIX","GOLD":"GC=F"}`.
+`quote(key) -> {"key","symbol","last","prev_close","chg_15m_pct","chg_1h_pct","chg_1d_pct","ts","market_open"} | None`;
+`returns_1m(key, minutes) -> list[(minute_epoch, pct)]`; `snapshot()`.  Yields are in percent; their
+change is reported in basis points (`chg_15m_bp` …) as well.
+
+## P3.4 `context/derivs.py`
+```python
+class Derivatives(PollingCollector):       # name "derivatives", derivs_poll_s=60, OKX public v5 (Binance optional fallback)
+    def __init__(self, settings, clock, http, *, assets_fn: Callable[[], list[str]]) -> None
+    def get(self, asset: str) -> dict | None   # funding_rate_8h (fraction), next_funding_ts, oi_usd, oi_chg_15m_pct, oi_chg_1h_pct,
+                                               # liq_long_usd_5m, liq_short_usd_5m, liq_long_usd_15m, liq_short_usd_15m, ls_ratio, source, ts
+    def snapshot(self) -> dict
+class FearGreed(PollingCollector):         # name "fear_greed", hourly: value 0..100, classification, ts
+```
+
+## P3.5 `context/news.py` + `context/classify.py`
+```python
+class NewsFeed(PollingCollector):          # name "news", news_poll_s=60
+    def __init__(self, settings, clock, http, *, classifier: "HeadlineClassifier", db=None,
+                 assets_fn: Callable[[], list[str]] = lambda: []) -> None
+    sources: dict[str, SourceStatus]        # one per RSS feed / Telegram channel
+    def items(self, since_wall: float | None = None, limit: int = 100) -> list[NewsItem]   # newest first
+    def relevant(self, asset: str, now_wall: float, within_s: float, min_importance: float = 0.5) -> list[NewsItem]
+    def snapshot(self) -> dict
+def parse_telegram_page(html: str, channel: str) -> list[dict]   # id, ts, text, url
+def parse_rss(xml: str, feed: str) -> list[dict]                 # id, ts, title, text, url
+def parse_whale_alert(text: str) -> dict | None   # amount, asset, usd, from, to, flow: to_exchange|from_exchange|exchange_to_exchange|other
+# classify.py
+class RuleClassifier:   def classify(self, title: str, text: str, assets: list[str]) -> dict
+class ClaudeClassifier: async def classify(self, title: str, text: str, assets: list[str]) -> dict | None  # JSON-only, budgeted, None on any failure
+class HeadlineClassifier: async def classify(self, item: NewsItem, assets: list[str]) -> NewsItem   # rules always; Claude refines when enabled + key
+```
+Settings: `news_enabled=True`, `news_rss` (verified feeds), `news_telegram_channels` (verified public
+channels), `news_keep=500`, `news_dedup_window_s=21600`, `news_claude_enabled=True` (only with
+`ANTHROPIC_API_KEY`), `news_claude_max_per_hour=30`.  A classified item is a *factor input*, never a
+BUY/SELL by itself.  Persistence: duck-typed `db.save_news(dict)` / `db.list_news(since_ts, limit)`.
+
+## P3.6 `context/bars.py`
+```python
+class MinuteBars:
+    def __init__(self, settings, clock, price_fn: Callable[[str], float | None], http=None, *, keep_minutes: int = 1440) -> None
+    def track(self, assets: Iterable[str]) -> None
+    def sample(self, now_wall: float | None = None) -> None      # every ~5 s: price_fn(asset) -> current minute close
+    async def bootstrap(self, assets: Iterable[str], *, limit: int = 300) -> int   # OKX spot 1m candles {A}-USDT, paced
+    def closes(self, asset: str, minutes: int | None = None) -> list[float]       # completed minutes, oldest -> newest
+    def returns(self, asset: str, minutes: int) -> list[tuple[int, float]]        # (minute_epoch, pct)
+    def stats(self, asset: str) -> dict   # minutes, ret_5m_pct, ret_15m_pct, ret_1h_pct, vol_1m_pct, vol_pctile, tail_1m_pct, shock
+def correlation(a: list[tuple[int, float]], b: list[tuple[int, float]], min_n: int = 30) -> float | None
+def beta(asset_r: list[tuple[int, float]], btc_r: list[tuple[int, float]], min_n: int = 30) -> float | None
+```
+`price_fn(asset)` = median of FRESH mids across signal venues (integration; MarketState); no fresh
+price → the minute is not written (no gap filling).
+
+## P3.7 `context/reactions.py` — `EventReactionStore`
+```python
+class EventReactionStore:
+    def __init__(self, settings, clock, price_fn: Callable[[str], float | None], db=None) -> None
+    def watch(self, event_key: str, event_type: str, event_ts: float, assets: list[str], surprise: int | None = None) -> bool
+    def set_surprise(self, event_key: str, surprise: int | None) -> None
+    def tick(self, now_wall: float | None = None) -> int          # capture due horizons (reaction_horizons_s=[10, 60, 300, 1800])
+    def profile(self, event_type: str, asset: str, surprise: int | None = None) -> dict[int, dict]
+        # horizon -> {"n", "mean_pct", "median_pct", "up_share", "mean_abs_pct"}
+    def snapshot(self) -> dict
+```
+Base price = price at `event_ts` (captured by `tick` within `reaction_base_tolerance_s=5`; a missed
+base or horizon is skipped, never interpolated).  Event types: macro `MACRO_EVENT_TYPES`; news
+`"news:<category>"`.  Persistence: duck-typed `db.save_event_reaction(dict)` / `db.load_event_reactions(limit)`.
+
+## P3.8 `context/hub.py` — `ContextHub`
+```python
+class ContextHub:
+    def __init__(self, settings, clock, *, pool, calendar, news, markets, derivs, fear_greed, bars, reactions,
+                 actuals=None, stats=None) -> None
+    async def run(self, stop: asyncio.Event) -> None   # every collector's loop + housekeeping (5 s): bars.sample(),
+        # reactions.tick(), watch() macro releases (BTC, ETH + top pool assets) and important news (importance >= 0.7),
+        # pool.reevaluate() every 5 min, bars.bootstrap() for new pool assets
+    def factors(self, asset: str, direction: int, now_wall: float | None = None) -> list[Factor]   # NO I/O, fast
+    def asset_stats(self, asset: str) -> dict          # bars.stats(asset)
+    def funding(self, asset: str) -> float | None
+    def status(self) -> list[SourceStatus]
+    def snapshot(self) -> dict                         # /api/context payload
+```
+Factors (key, default weight `context_weights[key]`, semantics; score is relative to direction):
+
+| key | w | rule (all numbers in `detail`) |
+|---|---|---|
+| `macro_event` | 1.0 | high-impact release ahead within `macro_block_before_s=300` → **veto**; after release within `macro_block_after_s=120`: reaction profile (h=60 s, same surprise) with n ≥ `reaction_min_n=5` and up_share ≥ 0.65 / ≤ 0.35 → ±2·|up_share−0.5| toward/against direction, otherwise **veto** ("реакция непредсказуема"); medium impact in window → −0.3; calendar down → unavailable |
+| `news` | 1.0 | Σ importance·confidence·direction·dir over relevant items in `news_window_s=1800`, age half-life 15 min, clipped; source down → unavailable; no relevant items → available, 0 |
+| `whale` | 0.4 | Whale Alert net flow (to exchanges − from exchanges, USD) for the asset/BTC in 60 min: tanh(net/5e7) against longs |
+| `funding` | 0.6 | f·dir > 0.0005 (crowded) → −min(1, f·dir/0.001); f·dir < −0.0005 → +0.5 (squeeze); else 0 |
+| `open_interest` | 0.5 | OI 15 m change with price direction: in-direction & OI ↑ → +0.5; in-direction & OI ↓ → +0.2; against & OI ↑ → −0.5 |
+| `liquidations` | 0.5 | 5 m liquidations of the opposite side vs same side: tanh(diff/scale), scale 1e6 BTC/ETH else 2e5 |
+| `btc_regime` | 0.8 | alts: BTC 15 m return in direction → +min(1,|r|/0.5); against → −; BTC shock against → −1; vol percentile > 0.9 → −0.3. BTC itself: ETH as confirmation |
+| `tradfi` | 0.5 | S&P futures 15 m move × corr(BTC, ES) and DXY move × −corr(BTC, DXY), only when the market is open and |corr| ≥ 0.2 |
+| `sentiment` | 0.2 | Fear & Greed ≥ 80 → −0.3 for longs (+0.2 shorts); ≤ 20 mirrored |
+| `event_reaction` | 0.8 | recent important news with a recorded reaction profile for `news:<category>` and this asset (n ≥ reaction_min_n) |
+
+## P3.9 `engine/quality.py`
+```python
+@dataclass(slots=True)
+class QualityComponent: key: str; label: str; value: float; weight: float; detail: str; available: bool
+@dataclass(slots=True)
+class QualityReport:
+    score: int; grade: str; passed: bool; vetoes: list[str]; components: list[QualityComponent]
+    factors: list[dict]; coverage: float; summary: str
+    def to_dict(self) -> dict
+def assess_quality(signal, econ, human, bot, stats, factors: list[Factor], settings, *, remaining_s: float) -> QualityReport
+```
+Components (values 0..1, weights `quality_weights` = edge 0.20, breadth 0.10, depth 0.10,
+history 0.20, timing 0.10, context 0.30): **edge** NET vs total cost; **breadth** movers count and
+their volume; **depth** executable vs capital and book depth; **history** catch-up rate of (asset,
+target) shrunk to 0.5 with a Beta prior of strength `quality_history_k=10`; **timing** stability of
+reaction delays and window vs human time; **context** `0.5 + 0.5·agg·coverage` where agg = Σw·s/Σw over
+available factors and coverage = Σw(available)/Σw(all).  Score = 100·Σw·v/Σw.  Any veto → `passed=False`
+and score capped below `min_quality_score`.  Grades A ≥ 80, B ≥ 65, C ≥ 50, D < 50.
+`min_quality_score=60`: below it an opportunity is still created and shadow-traded, but hidden by
+default in the UI, not sent to Telegram and not executable in AUTO.
+
+## P3.10 `engine/leverage.py`
+```python
+@dataclass(slots=True)
+class LeveragePlan:
+    venue_kind: str; venue_max: float; quality_cap: float; max_by_signal: float; recommended: float
+    binding: str; reasons: list[str]; margin_quote: float; notional_quote: float; fees_quote: float
+    slippage_quote: float; funding_quote: float; borrow_quote: float; expected_profit_quote: float
+    expected_roi_pct: float; stop_pct: float; stop_price: float; loss_at_stop_quote: float
+    risk_pct_of_capital: float; liq_price: float | None; liq_distance_pct: float | None
+    liq_buffer: float | None; rr: float | None; sigma_hold_pct: float | None; note: str
+    def to_dict(self) -> dict
+def quality_cap(score: float, settings) -> float
+def plan_leverage(econ, quality_score: float, settings, venue, *, sigma_1m_pct: float | None, tail_1m_pct: float | None,
+                  hold_s: float, funding_rate_8h: float | None, margin_quote: float | None = None) -> LeveragePlan
+```
+Caps (the smallest wins, `binding` names it): quality tiers `leverage_tiers=[[70,2],[80,3],[90,5]]`
+(below 70 → 1×), global `max_leverage=5`; venue `ExchangeConfig.max_leverage` (1 = spot only,
+`margin_kind` spot|margin|perp); liquidation buffer: isolated liquidation distance `1/L − mmr` ≥
+`leverage_liq_buffer=3.0` × stop distance; risk: loss at stop ≤ `max_risk_per_trade_pct` of
+`total_capital_quote`; depth: notional ≤ book depth within `max_slippage_pct`; move: L > 1 only when
+NET ≥ `leverage_min_net_pct=0.4` and R:R ≥ `leverage_min_rr=1.5`.  Stop = max(`leverage_min_stop_pct=0.3`,
+`leverage_stop_sigma=2.5`·σ_1m·√(hold/60), tail_1m).  Unknown volatility → 1× ("нет данных о
+волатильности").  `max_by_signal` = all caps except the venue (what the signal would justify on a
+margin venue); `recommended` includes the venue.  Funding (perp) = notional·rate·hold/8h; borrow
+(margin) = borrowed·`borrow_rate_daily_pct`·hold/1d + `margin_open_fee_pct`.  Execution stays spot
+(no leveraged orders are sent); the plan is shown to the manual trader and used for virtual P&L.
+
+## P3.11 Integration (config, db, pipeline, app, api, ui, telegram)
+* `Settings`: every field above; `ExchangeConfig`: `max_leverage=1.0`, `margin_kind="spot"`,
+  `maintenance_margin_rate=0.005`, `borrow_rate_daily_pct=0.0`, `margin_open_fee_pct=0.0`;
+  `Secrets`: optional `BLS_API_KEY`.  `min_target_volume_quote` default 500 000; `min_net_pct_show` stays 0.1.
+* Universe: when `pool_enabled`, the WS watchlist and the REST poll universe are the pool (∩ markets);
+  the mover ignores non-pool assets.
+* `Opportunity` gets `quality: dict` (QualityReport.to_dict) and `leverage: dict` (LeveragePlan.to_dict),
+  computed in the pipeline enricher on every upsert/refresh (no I/O: hub.factors is in-memory).
+* Shadow trading = training: every opportunity with NET ≥ `shadow_min_net_pct=0.1` is traded virtually
+  **regardless of quality**; the shadow row stores `quality_score`, `grade` and the leveraged virtual
+  P&L at `max_by_signal`.  STATS shows win rate / avg NET by grade (does the score predict outcomes?).
+* Telegram alerts and AUTO require `quality.passed`; the alert card shows "Качество 78/100 (B) · плечо до 3×".
+* API: `GET /api/context`, `GET /api/pool`; UI: new **Market** tab (macro calendar with countdowns and
+  BTC reaction profiles, news feed with impact, TradFi, BTC/ETH regime, derivatives, sources status,
+  pool with exclusion reasons); cards show the quality badge + factor list (WHY) + leverage plan;
+  filter "show low quality"; settings for pool / quality / leverage / per-exchange leverage caps;
+  DIAG counts `quality` rejections and pool size.
