@@ -234,6 +234,8 @@ class TickerPoller:
         # from an exchange that does not stream it (detection runs once per asset)
         pending: dict[str, Ticker] = {}
         processed = 0
+        diag = getattr(self._pipeline, "diag", None)
+        tick = getattr(diag, "tick", None)
         for (name, adapter), tickers in zip(targets, results):
             if not tickers:
                 continue
@@ -248,6 +250,8 @@ class TickerPoller:
                 except Exception:  # noqa: BLE001
                     log.exception("state.on_ticker failed for %s %s", name, asset)
                     continue
+                if callable(tick):
+                    tick(name, "poll")
                 if not is_streamed and asset not in pending:
                     pending[asset] = ticker
                 processed += 1

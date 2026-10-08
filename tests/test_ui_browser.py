@@ -71,6 +71,9 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             await page.goto(base, wait_until="networkidle")
             await page.wait_for_selector("#ws-label:has-text('LIVE'), #ws-label:has-text('ONLINE'), #ws-dot", timeout=10000)
 
+            from latbot.buildinfo import build_stamp
+            await page.wait_for_selector(f"#build-stamp:has-text('{build_stamp()}')", timeout=5000)
+
             # 1. empty board is honest, DIAG explains why
             assert await page.locator("#cards-empty").is_visible()
             await page.click("button.tab[data-tab='diag']")
@@ -78,6 +81,7 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             why = await page.locator("#diag-why").inner_text()
             assert any(k in why for k in ("Рынок спокоен", "тика", "не подключена")), why  # fakes: no data yet
             assert "Exchanges connected" in await page.locator("#diag-funnel").inner_text()
+            assert await page.locator("#diag-exchanges tr").count() == 3  # binance, kucoin, kraken rows with status
             await page.click("#diag-refresh")
 
             # 2. a real lag -> a card with MANUAL / AUTO and a plan

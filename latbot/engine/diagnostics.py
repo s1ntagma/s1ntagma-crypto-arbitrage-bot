@@ -63,7 +63,7 @@ class Diagnostics:
     def tick(self, exchange: str, kind: str) -> None:
         d = self.ticks.get(exchange)
         if d is None:
-            d = self.ticks[exchange] = {"book": 0, "ticker": 0, "trade": 0}
+            d = self.ticks[exchange] = {"book": 0, "ticker": 0, "trade": 0, "poll": 0}
         d[kind] = d.get(kind, 0) + 1
 
     def episode(self, asset: str, first_mover: str) -> None:
@@ -130,7 +130,17 @@ class Diagnostics:
                 health = state.health(e.name)
             connected = False
             last_age = None
+            status = ""
+            rl_left = None
             if health is not None:
+                until = getattr(health, "rate_limited_until_mono", None)
+                if until is not None and float(until) > now:
+                    rl_left = round(float(until) - now, 1)
+                    status = str(getattr(health, "reason", "") or "rate limited")
+                elif getattr(health, "maintenance", False):
+                    status = "maintenance"
+                elif getattr(health, "stale", False):
+                    status = str(getattr(health, "reason", "") or "stale")
                 last_poll = getattr(health, "last_poll_mono", None)
                 polling = last_poll is not None and now - float(last_poll) < 60.0
                 connected = bool(getattr(health, "ws_connected", False)) or polling
@@ -143,7 +153,10 @@ class Diagnostics:
                 "books": int(t.get("book", 0)),
                 "tickers": int(t.get("ticker", 0)),
                 "trades": int(t.get("trade", 0)),
+                "polled": int(t.get("poll", 0)),
                 "volumes": int(coverage.get(e.name, 0)),
+                "status": status,
+                "rate_limited_s": rl_left,
                 "last_data_s": round(last_age, 1) if last_age is not None else None,
                 "stale": bool(getattr(health, "stale", False)) if health is not None else None,
             }
@@ -203,7 +216,7 @@ class Diagnostics:
         exec_names = {n for n, x in ex.items() if x["role"] == ExchangeRole.EXECUTION.value}
         sig_names = {n for n, x in ex.items() if x["role"] == ExchangeRole.SIGNAL.value}
         connected = {n for n, x in ex.items() if x["connected"]}
-        with_data = {n for n, x in ex.items() if x["books"] + x["tickers"] > 0}
+        with_data = {n for n, x in ex.items() if x["books"] + x["tickers"] + x.get("polled", 0) > 0}
         uptime = float(snap.get("uptime_s", 0.0))
 
         if f["opportunities"] > 0:
@@ -223,6 +236,10 @@ class Diagnostics:
             out.append("Данные идут только с бирж-источников; ни одна из ТВОИХ бирж "
                        f"({', '.join(sorted(exec_names))}) не отдаёт цены - без них сигнал невозможен.")
             return out
+        for n, x in ex.items():
+            if x.get("rate_limited_s"):
+                out.append(f"{n}: биржа включила лимит запросов, бот ждёт {x['rate_limited_s']:.0f} с и не шлёт запросы "
+                           "(данные по ней в это время не обновляются).")
         if dead_exec:
             out.append(f"Без данных твои биржи: {', '.join(dead_exec)}.")
         if dead_sig:

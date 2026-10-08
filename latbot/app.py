@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import VERSION, events
+from .buildinfo import build_stamp
 from .api.server import create_app
 from .backtest.recorder import MarketRecorder
 from .clock import Clock
@@ -517,7 +518,7 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
     server: Any = None
     server_task: asyncio.Task[None] | None = None
     restore_signals = _install_signal_handlers(loop, request_stop)
-    log.info("latbot %s starting in %s mode", VERSION, settings.mode().value.upper())
+    log.info("latbot %s (build %s) starting in %s mode", VERSION, build_stamp(), settings.mode().value.upper())
     try:
         # ---- universe --------------------------------------------------
         ctx.watchlist = await _resolve_watchlist(ctx)

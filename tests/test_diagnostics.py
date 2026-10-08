@@ -128,3 +128,32 @@ async def test_alert_counts_in_the_funnel():
     opp = make_opp(tg.clock)
     await tg.notifier._handle_opp(opp)
     assert pipe.pipeline.diagnostics()["funnel"]["alerts"] == 1
+
+
+async def test_polled_venue_counts_as_data_and_a_ban_is_named():
+    """MEXC-like: WebSocket dead but REST polling delivers -> not 'без данных'.
+    Revolut X-like: rate-limited -> the WHY says so, with the seconds left."""
+    env = Env()
+    await env.warm_up()
+    d = env.pipeline.diag
+    for _ in range(5):
+        d.tick("binance", "poll")
+    snap = env.pipeline.diagnostics()
+    assert snap["exchanges"]["binance"]["polled"] == 5
+    assert snap["funnel"]["ticks_received"] == 11  # 6 books + 5 polled tickers
+    kr = env.adapters["kraken"].health
+    kr.rate_limited_until_mono = env.clock.mono() + 42.0
+    kr.reason = "rate limited (HTTP 429, hit 1): backing off 42 s"
+    snap = env.pipeline.diagnostics()
+    assert snap["exchanges"]["kraken"]["status"].startswith("rate limited") and snap["exchanges"]["kraken"]["rate_limited_s"] == 42.0
+    assert any("kraken" in line and "лимит запросов" in line and "42" in line for line in snap["why"])
+    assert snap["exchanges"]["binance"]["status"] == ""
+
+
+async def test_poller_ticks_reach_the_diagnostics(tmp_path):
+    from test_poller import Env as PollEnv
+    env = PollEnv(tmp_path)
+    env.books({"binance": 100.0, "kucoin": 100.0, "kraken": 100.0})
+    await env.poller.poll_once()
+    ex = env.ctx.pipeline.diagnostics()["exchanges"]
+    assert ex["binance"]["polled"] >= 1 and ex["kraken"]["polled"] >= 1

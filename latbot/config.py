@@ -125,6 +125,7 @@ class ExchangeConfig:
     max_ws_subscriptions: int = 0  # 0 = no limit; Coinbase breaks above ~4 book streams
     poll_tickers: bool = True  # broad coverage via REST fetch_tickers (all common assets)
     pair_url: str = ""  # override template for the "open pair" button (see market/links.py)
+    retry_after_ms: bool = False  # the venue's Retry-After header is in milliseconds (Revolut X), not HTTP seconds
     label: str = ""  # display name ("OKX EEA", "Bybit EU")
 
     @property
@@ -158,7 +159,8 @@ DEFAULT_EXCHANGES: list[ExchangeConfig] = [
     ),
     ExchangeConfig(name="gate", role=ExchangeRole.EXECUTION, taker_fee=0.002, maker_fee=0.002, label="Gate EU"),
     # Revolut X: REST API only (no WebSocket) -> prices by ticker polling, book by REST before a signal.
-    ExchangeConfig(name="revolutx", role=ExchangeRole.EXECUTION, stream="rest", taker_fee=0.0009, maker_fee=0.0, label="Revolut X"),
+    ExchangeConfig(name="revolutx", role=ExchangeRole.EXECUTION, stream="rest", taker_fee=0.0009, maker_fee=0.0, label="Revolut X",
+                   retry_after_ms=True),
     # ---- signal sources only (not MiCA venues; never targets) ----------------
     ExchangeConfig(name="binance", role=ExchangeRole.SIGNAL, stream="bbo", taker_fee=0.001, maker_fee=0.001, label="Binance"),
     ExchangeConfig(name="kucoin", role=ExchangeRole.SIGNAL, stream="bbo", taker_fee=0.001, maker_fee=0.001, label="KuCoin"),
@@ -402,6 +404,13 @@ def _exchange_from_dict(x: dict[str, Any]) -> ExchangeConfig:
     if "role" in x and not isinstance(x["role"], ExchangeRole):
         x["role"] = ExchangeRole(str(x["role"]).lower())
     known = {f.name for f in fields(ExchangeConfig)}
+    # A field the saved config.json does not have yet (added in a newer version)
+    # takes the built-in default of that venue, not the generic dataclass default.
+    base = next((e for e in DEFAULT_EXCHANGES if e.name == x.get("name")), None)
+    if base is not None:
+        for f in known:
+            if f not in x:
+                x[f] = getattr(base, f)
     return ExchangeConfig(**{k: v for k, v in x.items() if k in known})
 
 

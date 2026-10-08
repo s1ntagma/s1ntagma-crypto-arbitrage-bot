@@ -43,6 +43,7 @@ from .duration import DurationEstimator
 from .economics import compute_economics
 from .executability import assess_bot, assess_human
 from .explain import build_plan, build_why
+from ..exchanges.base import RateLimited
 from .diagnostics import Diagnostics
 from .mover import MoveDetector
 from .opportunity import OpportunityManager
@@ -260,6 +261,8 @@ class Pipeline:
                 log.warning("REST book fetch %s %s timed out after %.1fs", target, symbol, s.rest_book_timeout_s)
             except asyncio.CancelledError:
                 raise
+            except RateLimited as exc:
+                log.debug("REST book %s %s skipped: rate limited (%.0f s left)", target, symbol, exc.retry_after_s)
             except Exception as exc:  # noqa: BLE001
                 log.warning("REST book fetch failed %s %s: %s", target, symbol, exc)
             if fresh is not None:
@@ -445,7 +448,10 @@ class Pipeline:
         s = self._settings
         book = await self._target_book(signal)
         if book is None:
-            self.diag.reject("no_fresh_book", signal.asset, signal.target, signal.direction)
+            h = self._health(signal.target)
+            limited = h is not None and h.rate_limited_until_mono is not None and h.rate_limited_until_mono > self._clock.mono()
+            self.diag.reject("no_fresh_book", signal.asset, signal.target, signal.direction,
+                             detail="rate limited" if limited else "")
             return None
         capital = float(capital_quote) if capital_quote is not None else float(s.capital_quote)
         existing = self._opps.find_active(signal.asset, signal.target, signal.direction)

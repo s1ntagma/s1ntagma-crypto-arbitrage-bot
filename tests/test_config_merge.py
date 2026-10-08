@@ -25,3 +25,16 @@ def test_update_from_ui_also_keeps_new_venues() -> None:
     partial = [json.loads(json.dumps({"name": "kraken", "role": "execution"}))]
     s.update({"exchanges": partial})
     assert {e.name for e in s.exchanges} == {e.name for e in DEFAULT_EXCHANGES}
+
+
+def test_saved_venue_gets_new_fields_with_its_own_default(tmp_path: Path) -> None:
+    """config.json written before retry_after_ms existed: Revolut X must still get
+    True (its built-in default), other venues the generic False."""
+    data = json.loads(Settings().to_json())
+    for e in data["exchanges"]:
+        e.pop("retry_after_ms", None)
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps(data), encoding="utf-8")
+    s = load_settings(p)
+    assert s.exchange("revolutx").retry_after_ms is True
+    assert s.exchange("kraken").retry_after_ms is False

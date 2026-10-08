@@ -31,6 +31,7 @@ import re
 from typing import Any
 
 from .. import events
+from ..buildinfo import build_stamp
 from ..clock import Clock
 from ..config import Secrets, Settings, save_settings
 from ..engine.explain import build_plan, fmt_money
@@ -42,6 +43,7 @@ try:  # aiohttp is a hard dependency of the app, but the notifier must import wi
     import aiohttp
 except ImportError:  # pragma: no cover
     aiohttp = None  # type: ignore[assignment]
+
 
 log = logging.getLogger(__name__)
 
@@ -884,7 +886,7 @@ class TelegramNotifier:
             links = "нет данных"
         em = "🛑 включён" if self._emergency_active() else "выключен"
         return (
-            f"📊 latbot: {self._mode_name()}\n"
+            f"📊 latbot: {self._mode_name()} · build {build_stamp()}\n"
             f"EMERGENCY STOP: {em}\n"
             f"Активных возможностей: {len(active)}\n"
             f"Лучшая: {best_line}\n"

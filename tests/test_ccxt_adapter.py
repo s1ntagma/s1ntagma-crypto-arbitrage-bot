@@ -665,11 +665,12 @@ async def test_rate_limit_escalates_on_repeated_hits_and_resets_after_a_quiet_pe
     assert retries[0] >= 1.0 and retries[1] > retries[0] and retries[2] > retries[1] and retries[3] > retries[2]
     assert h.adapter.health.rate_limited_until_mono == pytest.approx(3.0 + retries[3])
     # the public instance shares the penalty (same IP budget)
-    h.public.fetch_order_book = _raise(ccxt.RateLimitExceeded("slow"))  # type: ignore[assignment]
+    # (market data is not even requested during the ban: the shared deadline is returned)
+    h.public.fetch_order_book = _raise(AssertionError("must not be called during a ban"))  # type: ignore[assignment]
     h.clock.set(mono=4.0)
     with pytest.raises(RateLimited) as pub:
         await h.adapter.fetch_order_book("BTC/EUR")
-    assert pub.value.retry_after_s > retries[3]
+    assert pub.value.retry_after_s == pytest.approx(h.adapter.health.rate_limited_until_mono - 4.0)
     # a quiet period resets the escalation
     h.clock.set(mono=4.0 + 600.0)
     with pytest.raises(RateLimited) as fresh:
@@ -858,3 +859,55 @@ def test_htx_ticker_stream_uses_the_bbo_ticker_channel():
     assert h.public.opts["options"]["watchTicker"] == {"name": "market.{marketId}.ticker"}
     h2 = Harness(spot_cfg(), CREDS)
     assert "watchTicker" not in h2.public.opts["options"]
+
+
+# --------------------------------------------------------------------------- #
+# Revolut X: Retry-After in milliseconds, no market-data requests during a ban
+# --------------------------------------------------------------------------- #
+def revolutx_cfg(**kw: Any) -> ExchangeConfig:
+    from latbot.config import DEFAULT_EXCHANGES
+    base = next(e for e in DEFAULT_EXCHANGES if e.name == "revolutx")
+    return ExchangeConfig(**{**{f: getattr(base, f) for f in base.__dataclass_fields__}, **kw})
+
+
+async def test_revolutx_retry_after_is_milliseconds():
+    """developer.revolut.com: 'The Retry-After header specifies the delay in
+    milliseconds' - 850 means 0.85 s, never a 14-minute ban."""
+    cfg = revolutx_cfg()
+    assert cfg.retry_after_ms is True
+    h = Harness(cfg, None)
+    h.clock.set(mono=100.0)
+    h.public.fetch_tickers = _raise(ccxt.RateLimitExceeded("revolutx 429"))  # type: ignore[assignment]
+    h.public.last_response_headers = {"Retry-After": "850"}
+    with pytest.raises(RateLimited) as info:
+        await h.adapter.fetch_tickers(["BTC"])
+    assert 0.8 <= info.value.retry_after_s <= 1.5  # the 1 s floor of a plain 429, not 850 s
+    assert h.adapter.health.rate_limited_until_mono <= 101.5
+    # other venues keep the HTTP standard (seconds)
+    assert spot_cfg().retry_after_ms is False
+
+
+async def test_no_market_data_requests_while_banned():
+    h = Harness(spot_cfg(), CREDS)
+    h.clock.set(mono=10.0)
+    h.public.fetch_order_book = _raise(ccxt.RateLimitExceeded("slow"))  # type: ignore[assignment]
+    h.public.last_response_headers = {"Retry-After": "30"}
+    with pytest.raises(RateLimited):
+        await h.adapter.fetch_order_book("BTC/EUR")
+    until = h.adapter.health.rate_limited_until_mono
+    assert until == pytest.approx(40.0)
+    calls: list[str] = []
+
+    async def counting(*a, **k):
+        calls.append("x")
+        return h.public.rest_book
+
+    h.public.fetch_order_book = counting  # type: ignore[assignment]
+    h.clock.set(mono=20.0)
+    with pytest.raises(RateLimited) as info:
+        await h.adapter.fetch_order_book("BTC/EUR")
+    assert calls == [] and info.value.retry_after_s == pytest.approx(20.0)
+    assert h.adapter.health.rate_limited_until_mono == pytest.approx(until)  # refusing does not escalate
+    h.clock.set(mono=41.0)  # ban over -> requests flow again
+    await h.adapter.fetch_order_book("BTC/EUR")
+    assert calls == ["x"]

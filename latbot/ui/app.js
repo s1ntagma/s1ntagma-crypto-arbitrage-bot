@@ -356,6 +356,7 @@
   function applyState(s) {
     if (!s) return;
     state.mode = s.mode || state.mode;
+    if (s.build && $('build-stamp')) $('build-stamp').textContent = 'build ' + s.build;
     state.emergency = !!s.emergency;
     state.emergencyReason = s.emergency_reason || '';
     if (s.settings) state.settings = s.settings;
@@ -1197,8 +1198,10 @@
       tr.appendChild(h('td', { class: 'num', text: String(x.books) }));
       tr.appendChild(h('td', { class: 'num', text: String(x.tickers) }));
       tr.appendChild(h('td', { class: 'num', text: String(x.trades) }));
+      tr.appendChild(h('td', { class: 'num', text: String(x.polled == null ? 0 : x.polled) }));
       tr.appendChild(h('td', { class: 'num', text: String(x.volumes == null ? '—' : x.volumes) }));
       tr.appendChild(h('td', { class: 'num', text: x.last_data_s == null ? '—' : x.last_data_s + ' s ago' }));
+      tr.appendChild(h('td', { class: 'wrap ' + (x.status ? 'diag-bad' : ''), text: x.status || 'ok' }));
       ex.appendChild(tr);
     });
     var th = d.thresholds || {};

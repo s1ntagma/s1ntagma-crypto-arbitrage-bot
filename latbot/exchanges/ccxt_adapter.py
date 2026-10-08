@@ -175,9 +175,10 @@ def _http_status(inst: Any) -> int | None:
         return None
 
 
-def _retry_after_s(inst: Any, now_wall: float) -> float | None:
+def _retry_after_s(inst: Any, now_wall: float, ms: bool = False) -> float | None:
     """Seconds from the ``Retry-After`` header of the latest response on
-    ``inst`` (delta-seconds or an HTTP date), capped; None when absent."""
+    ``inst`` (delta-seconds or an HTTP date), capped; None when absent.
+    ``ms``: the venue sends milliseconds instead of HTTP seconds (Revolut X)."""
     headers = getattr(inst, "last_response_headers", None) if inst is not None else None
     if not isinstance(headers, dict):
         return None
@@ -186,6 +187,8 @@ def _retry_after_s(inst: Any, now_wall: float) -> float | None:
         return None
     text = str(raw).strip().split(",", 1)[0].strip()
     value = _num(text)
+    if value is not None and ms:
+        value = value / 1000.0
     if value is None:
         try:
             value = parsedate_to_datetime(text).timestamp() - now_wall
@@ -686,6 +689,11 @@ class CcxtAdapter(ExchangeAdapter):
 
     async def _public_call(self, fn: Callable[..., Any], *args: Any) -> Any:
         t0 = self.clock.mono()
+        until = self.health.rate_limited_until_mono
+        if until is not None and t0 < until:
+            # Banned: do not knock (every request during the ban escalates it).
+            # Orders are NOT gated here - an exit must always be attempted.
+            raise RateLimited(retry_after_s=until - t0, msg=f"{self.name}: rate limited, {until - t0:.0f} s left")
         try:
             res = await fn(*args)
         except asyncio.CancelledError:
@@ -802,7 +810,7 @@ class CcxtAdapter(ExchangeAdapter):
         """
         now = self.clock.mono()
         status = _http_status(inst)
-        header = _retry_after_s(inst, self.clock.wall())
+        header = _retry_after_s(inst, self.clock.wall(), ms=bool(getattr(self.cfg, "retry_after_ms", False)))
         floor = _RL_FLOOR_429_S if isinstance(exc, ccxt.RateLimitExceeded) else _RL_FLOOR_DDOS_S
         if status == 418:
             floor = max(floor, _RL_FLOOR_418_S)

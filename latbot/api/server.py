@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .. import VERSION, analysis
+from ..buildinfo import build_stamp
 from ..config import ExchangeCredentials, Secrets, Settings, save_settings
 from ..events import BALANCE, DASHBOARD, EMERGENCY, HEALTH, OPP_NEW, OPP_STATE, OPP_UPDATE, SETTINGS, TRADE_UPDATE
 from ..logging_setup import redact
@@ -271,6 +272,7 @@ def build_state(ctx: Any) -> dict[str, Any]:
         "dashboard": _dashboard(ctx),
         "best": _best(ctx),
         "version": VERSION,
+        "build": build_stamp(),
         "server_ts": _wall(ctx),
     }
 
@@ -772,6 +774,7 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
                 "ws_clients": len(hub.clients),
                 "exchanges": _health_list(ctx),
                 "version": VERSION,
+                "build": build_stamp(),
                 "server_ts": _wall(ctx),
             }
         )
