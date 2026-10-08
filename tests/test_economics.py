@@ -171,3 +171,44 @@ def test_exit_side_thinner_than_position():
     # SHORT: entry sells into bids (49.5 -> 0.5 base), exit buys back on asks: fine
     e2 = compute_economics(book, -1, FEES, 100.0, 1.0, s, 1000.0)
     assert e2.base_amount == pytest.approx(0.5) and e2.exit_vwap_now == 100.0
+
+
+# ---------------------------------------------------------- entry_cap_price
+def test_entry_cap_price_is_the_worst_entry_that_still_nets_min_show():
+    from latbot.engine.economics import entry_cap_price
+
+    s = Settings(min_net_pct_show=0.1)
+    book = mk_book(bids=[(99.99, 5.0), (99.98, 5.0)], asks=[(100.01, 5.0), (100.02, 5.0)])
+    e = compute_economics(book, 1, FEES, 100.0, 1.2, s, 1000.0)
+    x = (e.total_cost_pct + s.min_net_pct_show) / 100.0
+    assert e.entry_cap_price == pytest.approx(e.exit_target / (1 + x))
+    assert 0 < e.entry_cap_price < e.exit_target
+    # buying exactly at the cap nets exactly min_net_pct_show against the same exit target
+    net_at_cap = (e.exit_target / e.entry_cap_price - 1) * 100 - e.total_cost_pct
+    assert net_at_cap == pytest.approx(s.min_net_pct_show)
+    # a higher show threshold lowers the cap (the limit gets stricter)
+    strict = compute_economics(book, 1, FEES, 100.0, 1.2, Settings(min_net_pct_show=0.5), 1000.0)
+    assert strict.entry_cap_price < e.entry_cap_price
+    assert strict.exit_target == pytest.approx(e.exit_target)
+
+    # SHORT: the lowest sell price; selling at the cap nets min_net_pct_show when bought back at the target
+    sh = compute_economics(book, -1, FEES, 100.0, 1.2, s, 1000.0)
+    assert sh.entry_cap_price == pytest.approx(sh.exit_target / (1 - x))
+    assert sh.entry_cap_price > sh.exit_target
+    net_short = (1 - sh.exit_target / sh.entry_cap_price) * 100 - sh.total_cost_pct
+    assert net_short == pytest.approx(s.min_net_pct_show)
+
+    # pure helper: direction, guards
+    assert entry_cap_price(100.0, 1, 0.25, 0.1) == pytest.approx(100.0 / 1.0035)
+    assert entry_cap_price(100.0, -1, 0.25, 0.1) == pytest.approx(100.0 / 0.9965)
+    assert entry_cap_price(0.0, 1, 0.25, 0.1) == 0.0
+    assert entry_cap_price(100.0, -1, 60.0, 45.0) == 0.0  # costs >= 100 %: no sell price works
+    assert entry_cap_price(100.0, 1, -5.0, -5.0) == pytest.approx(100.0)  # negative inputs never raise the cap
+
+
+def test_entry_cap_price_zero_on_empty_book_side():
+    s = Settings()
+    empty = compute_economics(mk_book(bids=[], asks=[(100.0, 1.0)]), 1, FEES, 100.0, 1.0, s, 1000.0)
+    assert empty.liquidity_ok is False and empty.entry_cap_price == 0.0
+    empty2 = compute_economics(mk_book(bids=[(100.0, 1.0)], asks=[]), -1, FEES, 100.0, 1.0, s, 1000.0)
+    assert empty2.entry_cap_price == 0.0

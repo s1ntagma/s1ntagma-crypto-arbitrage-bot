@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,17 +31,19 @@ from latbot.notify.telegram import EDIT_THROTTLE_S, LINK_GRACE_S, TelegramNotifi
 TOKEN = "123456789:AAFakeTokenForTestsOnly_abcdefghijklmnop"
 OWNER = "42"
 
-SPEC_CARD = (
-    "🔥 REAL OPPORTUNITY\n"
-    "BTC/USDT  LONG\n"
-    "TARGET: Bybit\n"
-    "NET: +4.82%\n"
-    "BUY: $102,140\n"
-    "SELL: $107,065\n"
-    "CAPITAL: $100\n"
-    "EXPECTED PROFIT: +$4.82\n"
-    "WINDOW: ~11 sec\n"
-    "HUMAN: 🟡 MEDIUM   BOT: 🟢 HIGH"
+WALL0 = 1_700_000_000.0
+# Every alert carries the plan header; the tests filter alerts by this marker.
+ALERT_MARK = "догоняющая без перевода"
+# The Russian plan card for ``make_opp`` (entry cap = 107065 / (1 + (0.25 + 0.1) / 100)).
+PLAN_CARD = (
+    "🏃 BTC · догоняющая без перевода · NET +4.82% (+$4.82 на $100) · держится 0 с\n"
+    "Binance двинулась первой: +6.0% (ещё 1 биржа следом); Bybit пока +0.5% · разрыв 5.5%\n"
+    "1. Купить на Bybit BTC/USDT ≤ 106691.58 USDT (сейчас 102100.00 USDT) · сумма до $100\n"
+    "2. Не переводить. Продать там же на Bybit, когда догонит: ≥ 107065.00 USDT (цель с учётом издержек)\n"
+    "Окно по этой монете: ~11 с (оценка) · догоняла: нет истории\n"
+    "! Bybit может не догнать: объём на Binance неизвестен. Не догнала за ~1 мин — продай по рынку.\n"
+    "HUMAN 🟡 ~7 с · BOT 🟢 0.4 с\n"
+    f"обновлено {time.strftime('%H:%M:%S', time.localtime(WALL0))}"
 )
 
 
@@ -294,7 +297,7 @@ class Env:
         self.settings = make_settings(**settings_over)
         self.secrets = Secrets(telegram_bot_token=token, telegram_chat_id=chat_id)
         self.bus = EventBus()
-        self.clock = SimClock(wall=1_700_000_000.0, mono=1000.0)
+        self.clock = SimClock(wall=WALL0, mono=1000.0)
         # ``real_opps``: the production OpportunityManager (state machine enforced) instead of StubOpps
         self.opps: Any = OpportunityManager(self.settings, self.bus, self.clock) if real_opps else StubOpps(self.clock)
         self.risk = StubRisk(self.bus)
@@ -330,27 +333,39 @@ class Env:
 # --------------------------------------------------------------------------- #
 # formatting
 # --------------------------------------------------------------------------- #
-def test_format_alert_matches_spec_card():
+def test_format_alert_matches_plan_card():
     env = Env()
     opp = make_opp(env.clock)
     html = env.notifier.format_alert(opp, env.clock.mono())
-    assert _strip_tags(html) == SPEC_CARD
-    assert html.startswith("🔥 <b>REAL OPPORTUNITY</b>\n<b>BTC/USDT  LONG</b>")
-    assert "NET: <b>+4.82%</b>" in html
-    assert html.count("<b>") == 3
+    assert _strip_tags(html) == PLAN_CARD
+    # bold: the header and the BUY line (what the owner acts on), nothing else
+    assert html.startswith("<b>🏃 BTC · догоняющая без перевода · NET +4.82% (+$4.82 на $100) · держится 0 с</b>\n")
+    assert "\n<b>1. Купить на Bybit BTC/USDT ≤ 106691.58 USDT" in html
+    assert html.count("<b>") == 2
+    # the plan on the opportunity (built by the pipeline) and the alert agree line by line
+    assert all(opp.plan.get(k) is None for k in ("header", "buy"))  # make_opp carries no plan: the card builds its own
+    # the "держится" clock keeps running on later edits
+    env.clock.advance(73.0)
+    assert "держится 1 мин 13 с" in _strip_tags(env.notifier.format_alert(opp, env.clock.mono()))
 
 
-def test_format_alert_eur_quote_short_and_window_rounding():
+def test_format_alert_eur_quote_short_plan():
     env = Env()
-    econ = make_econ(direction=-1, entry_vwap=2.5, exit_target=2.4, executable_quote=99.5, net_quote=-1.234, net_pct=-1.24)
+    econ = make_econ(direction=-1, entry_best=2.52, entry_vwap=2.5, exit_target=2.4, executable_quote=99.5,
+                     net_quote=-1.234, net_pct=-1.24, bid_depth_quote=99.5, ask_depth_quote=840.0)
     opp = make_opp(env.clock, direction=-1, econ=econ, target_exchange="kraken", target_symbol="BTC/EUR", pair_url="")
     env.clock.advance(1.6)
     text = _strip_tags(env.notifier.format_alert(opp, env.clock.mono()))
-    assert "BTC/EUR  SHORT" in text and "TARGET: Kraken" in text
-    # SHORT: BUY = exit_target, SELL = entry_vwap
-    assert "BUY: €2.40" in text and "SELL: €2.50" in text
-    assert "CAPITAL: €99.50" in text and "EXPECTED PROFIT: -€1.23" in text
-    assert "WINDOW: ~9 sec" in text
+    lines = text.splitlines()
+    assert lines[0] == "🏃 BTC · шорт · догоняющая без перевода · NET -1.24% (-€1.23 на €99.50) · держится 2 с"
+    assert lines[1] == "Binance двинулась первой: +6.0% (ещё 1 биржа следом); Kraken пока +0.5% · разрыв 5.5%"
+    # SHORT: sell first at >= the cap (2.4 / (1 - 0.0035)), buy back at <= the target; book held = min(bid, ask) depth
+    assert lines[2] == "1. Продать (шорт) на Kraken BTC/EUR ≥ 2.4084 EUR (сейчас 2.52 EUR) · сумма до €99.50 (стакан держит €99.50)"
+    assert lines[3] == "2. Не переводить. Откупить там же на Kraken, когда догонит: ≤ 2.40 EUR (цель с учётом издержек)"
+    assert lines[4] == "Окно по этой монете: ~11 с (оценка) · догоняла: нет истории"
+    assert lines[5].startswith("! Kraken может не догнать: объём на Binance неизвестен.")
+    assert lines[6] == "HUMAN 🟡 ~7 с · BOT 🟢 0.4 с"
+    assert lines[7].startswith("обновлено ")
 
 
 def test_money_formatting():
@@ -401,7 +416,7 @@ async def test_alert_once_per_id_with_buttons_and_message_id():
     await env.bus.publish(events.OPP_NEW, opp)
     await env.bus.publish(events.OPP_NEW, opp)
     await env.bus.publish(events.OPP_UPDATE, opp)
-    alerts = [p for p in env.session.of("sendMessage") if "REAL OPPORTUNITY" in p["text"]]
+    alerts = [p for p in env.session.of("sendMessage") if ALERT_MARK in p["text"]]
     assert len(alerts) == 1
     p = alerts[0]
     assert p["chat_id"] == OWNER and p["parse_mode"] == "HTML"
@@ -422,7 +437,7 @@ async def test_alert_through_real_state_machine_reaches_notified():
     proto = make_opp(env.clock)
 
     def alerts() -> list[dict[str, Any]]:
-        return [p for p in env.session.of("sendMessage") if "REAL OPPORTUNITY" in p["text"]]
+        return [p for p in env.session.of("sendMessage") if ALERT_MARK in p["text"]]
 
     opp, is_new = await opps.upsert(proto.signal, proto.econ, proto.human, proto.bot, proto.why, proto.estimated_duration_s, Mode.PAPER)
     assert is_new and opp.state is OppState.DETECTED
@@ -453,12 +468,12 @@ async def test_below_threshold_at_valid_then_rises_alerts_once_and_notifies():
     opp, _ = await opps.upsert(proto.signal, make_econ(net_pct=2.0, net_quote=2.0), proto.human, proto.bot, proto.why, 11.0, Mode.PAPER)
     await opps.transition(opp.id, OppState.VALIDATING, "economics computed")
     await opps.transition(opp.id, OppState.VALID, "net +2.00% on real book")
-    assert [p for p in env.session.of("sendMessage") if "REAL OPPORTUNITY" in p["text"]] == []
+    assert [p for p in env.session.of("sendMessage") if ALERT_MARK in p["text"]] == []
     assert opp.state is OppState.VALID
     env.clock.advance(0.5)
     await opps.upsert(proto.signal, make_econ(net_pct=3.4, net_quote=3.4), proto.human, proto.bot, proto.why, 11.0, Mode.PAPER)
-    sent = [p for p in env.session.of("sendMessage") if "REAL OPPORTUNITY" in p["text"]]
-    assert len(sent) == 1 and "NET: <b>+3.40%</b>" in sent[0]["text"]
+    sent = [p for p in env.session.of("sendMessage") if ALERT_MARK in p["text"]]
+    assert len(sent) == 1 and "NET +3.40%" in sent[0]["text"]
     assert opp.state is OppState.NOTIFIED
     assert [s for _, s, _ in opp.state_history] == ["DETECTED", "VALIDATING", "VALID", "NOTIFIED"]
 
@@ -468,7 +483,7 @@ async def test_public_url_used_for_deep_link_and_managed_object_updated():
     managed = env.opps.add(make_opp(env.clock))
     payload = Opportunity(**{**managed.__dict__})  # a different object with the same id (bus copy)
     await env.bus.publish(events.OPP_NEW, payload)
-    p = [p for p in env.session.of("sendMessage") if "REAL OPPORTUNITY" in p["text"]][0]
+    p = [p for p in env.session.of("sendMessage") if ALERT_MARK in p["text"]][0]
     assert p["reply_markup"]["inline_keyboard"][-1][0]["url"] == f"https://bot.example.org/#opp/{managed.id}"
     assert managed.telegram_message_id == 101 and payload.telegram_message_id == 101
 
@@ -499,8 +514,8 @@ async def test_expired_final_edit_once_and_no_more_edits():
     await env.bus.publish(events.OPP_STATE, {"opportunity": opp, "from": "NOTIFIED", "to": "EXPIRED", "reason": "window closed"})
     edits = env.session.of("editMessageText")
     assert len(edits) == 1
-    assert edits[0]["text"].endswith("\n… EXPIRED after 9.4 s")
-    assert _strip_tags(edits[0]["text"]).startswith(SPEC_CARD)
+    assert edits[0]["text"].endswith("\n… истекла через 9.4 с")
+    assert _strip_tags(edits[0]["text"]).startswith(PLAN_CARD)
     assert edits[0]["reply_markup"]["inline_keyboard"] == [[{"text": "OPEN OPPORTUNITY", "url": f"http://127.0.0.1:8787/#opp/{opp.id}"}]]
     await env.bus.publish(events.OPP_STATE, {"opportunity": opp, "from": "NOTIFIED", "to": "EXPIRED", "reason": "again"})
     env.clock.advance(10)
@@ -514,7 +529,7 @@ async def test_cancelled_state_final_edit_with_reason():
     await env.bus.publish(events.OPP_NEW, opp)
     opp.state = OppState.CANCELLED
     await env.bus.publish(events.OPP_STATE, {"opportunity": opp, "from": "VALID", "to": OppState.CANCELLED, "reason": "user"})
-    assert env.session.of("editMessageText")[0]["text"].endswith("… CANCELLED: user")
+    assert env.session.of("editMessageText")[0]["text"].endswith("… отменена: user")
 
 
 async def test_trade_notices_and_closed_final_edit():
@@ -539,7 +554,7 @@ async def test_trade_notices_and_closed_final_edit():
     assert env.session.sent()[-1] == "🟢 Сделка закрыта: BTC LONG на Bybit, NET +3.90% (+$3.90) (PAPER)"
     assert len([t for t in env.session.sent() if "закрыта" in t]) == 1
     edits = env.session.of("editMessageText")
-    assert len(edits) == 1 and edits[0]["text"].endswith("\n… CLOSED: realized +3.9%")
+    assert len(edits) == 1 and edits[0]["text"].endswith("\n… закрыта: факт +3.9%")
 
 
 async def test_failed_and_cancelled_trade_notices():
@@ -550,7 +565,7 @@ async def test_failed_and_cancelled_trade_notices():
     failed = make_trade(opp, OppState.FAILED, id="tr_2", error="entry order failed: rejected", realized_pnl_quote=-0.1)
     await env.bus.publish(events.TRADE_UPDATE, failed)
     assert env.session.sent()[-1].startswith("❌ Сделка не удалась: BTC LONG на Bybit: entry order failed: rejected")
-    assert env.session.of("editMessageText")[-1]["text"].endswith("… FAILED: entry order failed: rejected")
+    assert env.session.of("editMessageText")[-1]["text"].endswith("… не удалась: entry order failed: rejected")
     cancelled = make_trade(opp, OppState.CANCELLED, id="tr_3", error="entry not filled")
     await env.bus.publish(events.TRADE_UPDATE, cancelled)
     await env.bus.publish(events.TRADE_UPDATE, cancelled)
@@ -562,10 +577,10 @@ async def test_html_rejected_falls_back_to_plain_text():
     env.session.responses["sendMessage"] = [{"ok": False, "description": "Bad Request: can't parse entities: unsupported start tag"}]
     opp = env.opps.add(make_opp(env.clock))
     await env.bus.publish(events.OPP_NEW, opp)
-    calls = [p for p in env.session.of("sendMessage") if "REAL OPPORTUNITY" in p["text"]]
+    calls = [p for p in env.session.of("sendMessage") if ALERT_MARK in p["text"]]
     assert len(calls) == 2
     assert calls[0]["parse_mode"] == "HTML" and "<b>" in calls[0]["text"]
-    assert "parse_mode" not in calls[1] and "<" not in calls[1]["text"] and calls[1]["text"] == SPEC_CARD
+    assert "parse_mode" not in calls[1] and "<" not in calls[1]["text"] and calls[1]["text"] == PLAN_CARD
     assert opp.telegram_message_id == 101
 
 
@@ -574,7 +589,7 @@ async def test_button_rejected_resends_without_markup():
     env.session.responses["sendMessage"] = [{"ok": False, "description": "Bad Request: BUTTON_URL_INVALID"}]
     opp = env.opps.add(make_opp(env.clock))
     await env.bus.publish(events.OPP_NEW, opp)
-    calls = [p for p in env.session.of("sendMessage") if "REAL OPPORTUNITY" in p["text"]]
+    calls = [p for p in env.session.of("sendMessage") if ALERT_MARK in p["text"]]
     assert len(calls) == 2 and "reply_markup" in calls[0] and "reply_markup" not in calls[1]
 
 

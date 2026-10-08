@@ -661,3 +661,67 @@ async def test_refresh_relabels_mode_after_settings_switch():
     env.topics.clear()
     await env.pipeline.sweep_once()
     assert opp.mode is Mode.PAPER and events.OPP_UPDATE in env.topic_names()
+
+
+# --------------------------------------------------------------------------- #
+# the Russian trading plan + learned history travel with the opportunity
+# --------------------------------------------------------------------------- #
+async def test_opportunity_carries_plan_and_learned_history():
+    from latbot.engine.explain import PLAN_KEYS
+
+    env = Env()
+    published: list[tuple[str, dict]] = []  # what the UI / Telegram saw AT publish time
+    env.bus.subscribe(events.OPP_NEW, lambda o: published.append(("new", dict(o.plan))))
+    env.bus.subscribe(events.OPP_UPDATE, lambda o: published.append(("update", dict(o.plan))))
+    opp = await detect(env)
+    # the plan was on the object when OPP_NEW went out (not attached afterwards)
+    assert published and published[0][0] == "new" and tuple(published[0][1]) == PLAN_KEYS
+    assert published[0][1] == opp.plan
+    assert opp.last_update_ts == env.clock.wall()
+    assert opp.typical_window_s is None and opp.caught_up_total == 0 and opp.human_total == 0  # no history yet
+    plan = opp.plan
+    assert plan["header"].startswith("🏃 BTC · догоняющая без перевода · NET +") and "держится 0 с" in plan["header"]
+    assert plan["movers"].startswith("Binance двинулась первой: +2.0% (ещё 1 биржа следом); Kraken пока +0.0%")
+    assert plan["buy"].startswith("1. Купить на Kraken BTC/EUR ≤ ") and "(сейчас 100.01 EUR) · сумма до €100" in plan["buy"]
+    assert f"≤ {opp.econ.entry_cap_price:.2f} EUR" in plan["buy"] and 0 < opp.econ.entry_cap_price < opp.econ.exit_target
+    assert plan["sell"] == (f"2. Не переводить. Продать там же на Kraken, когда догонит: ≥ {opp.econ.exit_target:.2f} EUR "
+                            "(цель с учётом издержек)")
+    assert plan["timing"] == "Окно по этой монете: ~8 с (оценка) · догоняла: нет истории"
+    assert plan["caveat"].startswith("! Kraken может не догнать: объём на Binance неизвестен.")  # no tickers -> no volume
+    assert plan["updated"].startswith("обновлено ")
+    d = opp.to_dict(env.clock.mono())
+    assert d["plan"] == plan and d["typical_window_s"] is None and d["last_update_ts"] == opp.last_update_ts
+    assert d["econ"]["entry_cap_price"] == opp.econ.entry_cap_price
+
+    # learning arrives for (BTC, kraken): the next update quotes it
+    for dur in (20.0, 30.0, 40.0):
+        env.stats.record_opportunity_duration("BTC", "kraken", dur)
+    env.stats.record_human_outcome("BTC", "kraken", window_ok=True, caught_up=True)
+    env.stats.record_human_outcome("BTC", "kraken", window_ok=False, caught_up=False)
+    env.clock.advance(1.5)
+    await env.push("kraken", 100.0)
+    assert published[-1][0] == "update"
+    assert opp.typical_window_s == 30.0 and (opp.caught_up_ok, opp.caught_up_total) == (1, 2)
+    assert (opp.human_ok, opp.human_total) == (1, 2)
+    assert opp.plan["timing"] == "Окно по этой монете: ~30 с · догнала 1 из 2 · человек успевал 1 из 2"
+    assert "держится 2 с" in opp.plan["header"]
+    assert published[-1][1] == opp.plan and opp.last_update_ts == env.clock.wall()
+
+
+async def test_refresh_copy_of_executing_opportunity_has_a_plan():
+    env = Env()
+    opp = await detect(env)
+    await env.opps.transition(opp.id, OppState.MANUAL_SELECTED, "user")
+    await env.opps.transition(opp.id, OppState.EXECUTING, "entered")
+    env.clock.advance(0.5)
+    copy = await env.pipeline.refresh(env.opps.get(opp.id))
+    assert copy is not None and copy is not opp
+    assert copy.plan and copy.plan["header"].startswith("🏃 BTC") and copy.last_update_ts == env.clock.wall()
+    assert copy.econ.entry_cap_price > 0
+
+
+async def test_plan_without_stats_store():
+    env = Env(with_stats=False)
+    opp = await detect(env)
+    assert opp.plan["timing"] == "Окно по этой монете: ~8 с (оценка) · догоняла: нет истории"
+    assert opp.typical_window_s is None and opp.caught_up_total == 0

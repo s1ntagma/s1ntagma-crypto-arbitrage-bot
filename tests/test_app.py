@@ -273,9 +273,13 @@ def test_api_state_and_opportunities_with_testclient(tmp_path: Path) -> None:
             payload = r.json()
             for key in ("opp_id", "valid", "status", "side", "exchange", "symbol", "entry_price_now", "exit_target_now",
                         "net_now_pct", "expected_slippage_pct", "remaining_s", "human", "capital", "base_amount",
-                        "expired", "message"):
+                        "expired", "message", "entry_cap_price", "plan"):
                 assert key in payload, key
             assert payload["exchange"] == "kraken" and payload["symbol"] == "BTC/EUR"
+            # the Russian plan and the buy limit reach the MANUAL modal over the real wiring
+            assert payload["plan"]["buy"].startswith("1. Купить на Kraken BTC/EUR ≤ ")
+            assert 0 < payload["entry_cap_price"] < payload["exit_target_now"]
+            assert items[0]["plan"]["header"].startswith("🏃 BTC") and items[0]["econ"]["entry_cap_price"] == pytest.approx(payload["entry_cap_price"], rel=1e-3)
 
             assert c.get("/api/trades").json() == []
             assert isinstance(c.get("/api/stats").json(), list)

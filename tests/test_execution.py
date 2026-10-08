@@ -1018,11 +1018,15 @@ async def test_manual_flow_to_closed() -> None:
     support = await env.engine.select_manual(opp.id)
     assert opp.state == OppState.MANUAL_SELECTED
     for key in ("opp_id", "valid", "status", "side", "exchange", "symbol", "entry_price_now", "exit_target_now",
-                "net_now_pct", "expected_slippage_pct", "remaining_s", "human", "capital", "base_amount", "expired", "message"):
+                "net_now_pct", "expected_slippage_pct", "remaining_s", "human", "capital", "base_amount", "expired", "message",
+                "entry_cap_price", "plan"):
         assert key in support, key
     assert support["valid"] is True and support["expired"] is False and support["status"] == "ok"
     assert support["human"] == {"light": "green", "label": "HIGH", "est_execution_s": 7.0}
     assert support["entry_price_now"] == 100.0 and support["exit_target_now"] == pytest.approx(105.05)
+    # the MANUAL modal's "купить <=": the worst entry that still nets min_net_pct_show against the exit target
+    assert support["entry_cap_price"] == pytest.approx(105.05 / (1 + (0.25 + env.settings.min_net_pct_show) / 100))
+    assert support["plan"] == dict(opp.plan)  # the stub pipeline carries no plan; the real one fills it (test_pipeline)
     assert support["net_now_pct"] == 4.8 and support["capital"] == 100.0 and support["base_amount"] == 1.0
     assert support["remaining_s"] == 30.0 and support["side"] == "LONG" and support["symbol"] == "BTC/USDT"
     assert env.pipeline.calls[-1] == (opp.id, 100.0)
@@ -1568,6 +1572,7 @@ async def test_manual_support_reports_no_fresh_data_on_stale_book() -> None:
     p = await env.engine.manual_support(opp.id)
     assert p["valid"] is False and p["fresh"] is False and p["status"] == "no_data"
     assert p["message"] == "⚠️ NO FRESH DATA" and p["expired"] is False and p["entry_price_now"] is None
+    assert p["entry_cap_price"] is None and p["plan"] == {}  # no buy limit from a dead book
     assert len(env.pipeline.calls) == calls and a.rest_calls == 1
     # the modal polls every 300 ms: REST is not hammered inside max_data_age_ms
     p = await env.engine.manual_support(opp.id)
