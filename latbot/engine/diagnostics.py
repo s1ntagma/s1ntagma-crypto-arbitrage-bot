@@ -142,7 +142,9 @@ class Diagnostics:
                 elif getattr(health, "stale", False):
                     status = str(getattr(health, "reason", "") or "stale")
                 last_poll = getattr(health, "last_poll_mono", None)
-                polling = last_poll is not None and now - float(last_poll) < 60.0
+                interval = float(getattr(s, "ticker_poll_interval_s", 2.0) or 2.0)
+                polling = health.is_polling(now, interval) if hasattr(health, "is_polling") else (
+                    last_poll is not None and now - float(last_poll) <= max(30.0, 10.0 * interval))
                 connected = bool(getattr(health, "ws_connected", False)) or polling
                 last = max((float(x) for x in (getattr(health, "last_msg_mono", None), last_poll) if x), default=None)
                 if last is not None:

@@ -174,3 +174,11 @@ def test_ticker_outlier_guard_off_and_books_untouched():
     st2.on_book(book("kraken", 100.0, 1000.0))
     st2.on_book(book("kraken", 102.0, 1001.0))
     assert abs(st2.mid_at("kraken", "BTC", 1001.0) - 102.0) < 0.01
+
+
+def test_health_is_polling_window():
+    h = ExchangeHealth(exchange="mexc")
+    assert h.is_polling(100.0) is False
+    h.last_poll_mono = 80.0  # 20 s ago, one failed round in between: still covered
+    assert h.is_polling(100.0, 2.0) is True
+    assert h.is_polling(111.0, 2.0) is False  # 31 s: no longer

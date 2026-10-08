@@ -213,9 +213,12 @@ def _health_list(ctx: Any) -> list[dict[str, Any]]:
             d["usable"] = False
         cfg = settings.exchange(name) if hasattr(settings, "exchange") else None
         d["label"] = cfg.display if cfg is not None else name.capitalize()
-        lp = getattr(health, "last_poll_mono", None)
         interval = float(getattr(settings, "ticker_poll_interval_s", 2.0) or 2.0)
-        d["polling"] = bool(lp is not None and (now - float(lp)) <= max(10.0, 3.0 * interval))
+        if hasattr(health, "is_polling"):
+            d["polling"] = bool(health.is_polling(now, interval))
+        else:
+            lp = getattr(health, "last_poll_mono", None)
+            d["polling"] = bool(lp is not None and (now - float(lp)) <= max(30.0, 10.0 * interval))
         role = getattr(cfg, "role", None)
         d["role"] = role.value if isinstance(role, Enum) else (str(role) if role else "")
         out.append(d)

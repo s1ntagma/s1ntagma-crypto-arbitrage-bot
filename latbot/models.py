@@ -274,6 +274,13 @@ class ExchangeHealth:
     reason: str = ""
     last_poll_mono: float | None = None  # last successful REST ticker poll (breadth coverage)
 
+    def is_polling(self, now_mono: float, poll_interval_s: float = 2.0) -> bool:
+        """REST ticker polling delivered recently.  Tolerant window (>= 30 s): a
+        venue polled every few seconds with an occasional failed round is
+        covered, not offline."""
+        lp = self.last_poll_mono
+        return lp is not None and now_mono - float(lp) <= max(30.0, 10.0 * float(poll_interval_s or 2.0))
+
     def is_usable(self, now_mono: float) -> bool:
         if self.maintenance or self.stale or not self.ws_connected:
             return False
