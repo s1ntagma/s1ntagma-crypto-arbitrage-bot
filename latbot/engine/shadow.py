@@ -77,6 +77,7 @@ class ShadowTrader:
         self._closed: list[ShadowTrade] = []
         self.opened = 0
         self.closed = 0
+        self.skipped: dict[str, int] = {}
         self._unsubs = [
             bus.subscribe(events.OPP_NEW, self._on_new),
             bus.subscribe(events.OPP_UPDATE, self._on_update),
@@ -100,8 +101,15 @@ class ShadowTrader:
         if not self.enabled or opp.id in self._open:
             return
         e = opp.econ
-        if not (e.entry_vwap > 0 and e.exit_vwap_now > 0 and e.base_amount > 0 and e.liquidity_ok):
-            return  # no real executable book -> no shadow trade
+        # A thin book (liquidity flag: less than the requested capital) is still a real
+        # trade at the size the book supports; only "no executable book" is skipped.
+        min_trade = float(getattr(self._settings, "min_trade_quote", 0.0) or 0.0)
+        if not (e.entry_vwap > 0 and e.exit_vwap_now > 0 and e.base_amount > 0):
+            self._skip("no executable book")
+            return
+        if e.executable_quote < min_trade:
+            self._skip("book below min trade size")
+            return
         now = self._clock.wall()
         t = ShadowTrade(
             id=opp.id, asset=opp.asset, target=opp.target_exchange, symbol=opp.target_symbol,
@@ -148,6 +156,10 @@ class ShadowTrader:
             self._close(t, t.last_exit_price, f"opportunity {state.value.lower()}: sold at last market price")
 
     # ---- bookkeeping -------------------------------------------------------
+    def _skip(self, reason: str) -> None:
+        self.skipped[reason] = self.skipped.get(reason, 0) + 1
+        log.debug("shadow skipped: %s", reason)
+
     def _close(self, t: ShadowTrade, price: float, reason: str) -> None:
         self._open.pop(t.id, None)
         t.closed_ts = self._clock.wall()
@@ -185,7 +197,9 @@ class ShadowTrader:
         return out[: max(0, int(limit))]
 
     def summary(self, limit: int = 5000) -> dict[str, Any]:
-        return summarize(self.trades(limit))
+        out = summarize(self.trades(limit))
+        out["skipped"] = dict(self.skipped)
+        return out
 
 
 def _group(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, Any]]:

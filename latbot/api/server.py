@@ -1171,7 +1171,13 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
         if pipeline is None or not hasattr(pipeline, "diagnostics"):
             return _json({"error": "diagnostics unavailable", "funnel": {}, "exchanges": {}, "why": ["Конвейер не запущен."]})
         try:
-            return _json(pipeline.diagnostics())
+            d = pipeline.diagnostics()
+            shadow = getattr(ctx, "shadow", None)
+            if shadow is not None and isinstance(d.get("funnel"), dict):
+                d["funnel"]["shadow_opened"] = int(getattr(shadow, "opened", 0))
+                d["funnel"]["shadow_closed"] = int(getattr(shadow, "closed", 0))
+                d["funnel"]["shadow_skipped"] = int(sum((getattr(shadow, "skipped", {}) or {}).values()))
+            return _json(d)
         except Exception:  # noqa: BLE001
             log.exception("diagnostics failed")
             return _json({"error": "diagnostics failed", "funnel": {}, "exchanges": {}, "why": ["Ошибка диагностики, смотри лог."]})

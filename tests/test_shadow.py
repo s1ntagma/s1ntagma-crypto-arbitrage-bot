@@ -79,6 +79,24 @@ async def test_shadow_and_trade_summary_api_through_real_app(tmp_path):
     with TestClient(create_app(b.ctx)) as c:
         d = c.get("/api/shadow").json()
         assert d["enabled"] is True and d["trades"][0]["id"] == opp.id and d["summary"]["open"] == 1
+        f = c.get("/api/diagnostics").json()["funnel"]
+        assert f["shadow_opened"] == 1 and f["shadow_closed"] == 0 and f["shadow_skipped"] == 0
         ts = c.get("/api/trades/summary").json()
         assert ts["trades"] == 1 and ts["open"] == 1 and ts["finished"] == 0 and ts["win_rate"] is None
         assert ts["by_exchange"]["kraken"]["trades"] == 1 and ts["by_mode"]["paper"]["trades"] == 1
+
+
+async def test_shadow_trades_thin_book_at_executable_size():
+    """A book thinner than the requested capital (liquidity flag) is still a real,
+    executable trade at the size the book supports - shadow must trade it."""
+    env, sh = _env()
+    await env.warm_up()
+    await env.push("binance", 102.0)
+    env.adapters["kraken"].mark_msg()
+    # kraken book: only ~30 quote per side within slippage (< 50 % of the 100 requested)
+    await env.pipeline.on_book(env.book("kraken", 100.0, size=0.1))
+    opps = await env.push("kucoin", 102.0)
+    assert len(opps) == 1 and opps[0].econ.liquidity_ok is False and opps[0].econ.executable_quote >= env.settings.min_trade_quote
+    row = sh.trades()[0]
+    assert row["open"] is True and row["capital_quote"] == pytest.approx(opps[0].econ.executable_quote)
+    assert sh.skipped == {}

@@ -1136,12 +1136,14 @@
 
   // ------------------------------------------------------------------ diagnostics (why no signals)
   var FUNNEL_ORDER = ['exchanges_connected', 'exchanges_enabled', 'assets_scanned', 'ticks_received', 'episodes_detected',
-    'candidates', 'rejected_total', 'signals', 'opportunities', 'active_now', 'expired_today', 'alerts'];
+    'candidates', 'rejected_total', 'signals', 'opportunities', 'active_now', 'expired_today', 'alerts',
+    'shadow_opened', 'shadow_closed', 'shadow_skipped'];
   var FUNNEL_LABELS = {
     exchanges_connected: 'Exchanges connected', exchanges_enabled: 'Exchanges enabled', assets_scanned: 'Assets scanned',
     ticks_received: 'Ticks received', episodes_detected: 'Moves (episodes) detected', candidates: 'Candidates checked',
     rejected_total: 'Candidates rejected', signals: 'Passed filters (signals)', opportunities: 'Approved opportunities',
-    active_now: 'Active now', expired_today: 'Expired by TTL today', alerts: 'Telegram alerts sent'
+    active_now: 'Active now', expired_today: 'Expired by TTL today', alerts: 'Telegram alerts sent',
+    shadow_opened: 'Shadow trades opened', shadow_closed: 'Shadow trades closed', shadow_skipped: 'Shadow skipped (no executable book)'
   };
   var REASON_LABELS = {
     min_movers: 'Only one exchange moved (min_movers)', mover_volume: 'Mover 24h volume too low', mover_volume_unknown: 'Mover 24h volume unknown (no data)', target_no_data: 'Target has no fresh data',
@@ -1235,7 +1237,8 @@
         ['Status', d.enabled ? 'ON (no orders, virtual)' : 'OFF (shadow_trading=false)'],
         ['Open', String(s.open || 0)], ['Closed', String(s.closed || 0)], ['Win rate', rateOrDash(s.win_rate)],
         ['Avg expected NET', pctOrDash(s.avg_expected_net_pct)], ['Avg actual NET', pctOrDash(s.avg_actual_net_pct)],
-        ['Target reached', String(s.target_reached || 0)], ['Virtual P&L', fmtMoney(s.pnl_quote || 0, '', { sign: true })]
+        ['Target reached', String(s.target_reached || 0)], ['Virtual P&L', fmtMoney(s.pnl_quote || 0, '', { sign: true })],
+        ['Skipped', Object.keys(s.skipped || {}).map(function (k) { return k + ': ' + s.skipped[k]; }).join(', ') || '0']
       ]);
       var sb = $('strategy-body');
       clear(sb);
