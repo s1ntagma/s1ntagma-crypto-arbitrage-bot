@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import math
 import statistics
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -413,9 +413,6 @@ class EventReactionStore:
             "recent": [dict(s) for s in reversed(recent)],
             "counters": dict(self.counters),
         }
-
-    def watched_keys(self) -> Iterable[str]:
-        return list(self._pending)
 
 
 __all__ = ["DEFAULT_HORIZONS_S", "EventReactionStore"]

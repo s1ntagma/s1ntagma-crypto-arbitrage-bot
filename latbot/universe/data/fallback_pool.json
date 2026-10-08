@@ -1,0 +1,1161 @@
+{
+ "version": 1,
+ "generated": "2026-10-08",
+ "source": "research REPORT_pool-leverage 2026-10-08: CoinGecko /coins/markets top-250 + category members, listings of 12 venues, OKX USDT 1H/1D candles",
+ "notes": [
+  "Offline fallback only: used when neither CoinGecko nor the local cache is available.",
+  "Exclusion is keyed by CoinGecko id, never by ticker (bridged/wrapped/meme coins reuse BTC, ETH, SOL, TAO, BNB...).",
+  "category_members: frozen members with market cap >= 20M USD on 2026-10-08 (top 250 per category); live refresh adds to them.",
+  "symbol_aliases: futures tickers of meme coins on signal venues; ambiguous_symbols are never blocked by ticker.",
+  "ranks: CoinGecko market-cap rank on 2026-10-08 (ordering only)."
+ ],
+ "tier_a": [
+  "BTC",
+  "ETH",
+  "XRP",
+  "SOL",
+  "BNB",
+  "LINK",
+  "ADA",
+  "LTC",
+  "AVAX",
+  "SUI",
+  "HBAR",
+  "AAVE",
+  "DOT",
+  "BCH",
+  "ETC",
+  "RENDER"
+ ],
+ "tier_b": [
+  "XLM",
+  "UNI",
+  "ALGO",
+  "ATOM",
+  "POL",
+  "APT",
+  "CRV",
+  "TAO",
+  "ONDO",
+  "INJ"
+ ],
+ "pool": [
+  "BTC",
+  "ETH",
+  "XRP",
+  "SOL",
+  "BNB",
+  "LINK",
+  "ADA",
+  "LTC",
+  "AVAX",
+  "SUI",
+  "HBAR",
+  "AAVE",
+  "DOT",
+  "BCH",
+  "ETC",
+  "RENDER",
+  "XLM",
+  "UNI",
+  "ALGO",
+  "ATOM",
+  "POL",
+  "APT",
+  "CRV",
+  "TAO",
+  "ONDO",
+  "INJ"
+ ],
+ "cg_ids": {
+  "BTC": "bitcoin",
+  "ETH": "ethereum",
+  "XRP": "ripple",
+  "SOL": "solana",
+  "BNB": "binancecoin",
+  "LINK": "chainlink",
+  "ADA": "cardano",
+  "LTC": "litecoin",
+  "AVAX": "avalanche-2",
+  "SUI": "sui",
+  "HBAR": "hedera-hashgraph",
+  "AAVE": "aave",
+  "DOT": "polkadot",
+  "BCH": "bitcoin-cash",
+  "ETC": "ethereum-classic",
+  "RENDER": "render-token",
+  "XLM": "stellar",
+  "UNI": "uniswap",
+  "ALGO": "algorand",
+  "ATOM": "cosmos",
+  "POL": "polygon-ecosystem-token",
+  "APT": "aptos",
+  "CRV": "curve-dao-token",
+  "TAO": "bittensor",
+  "ONDO": "ondo-finance",
+  "INJ": "injective-protocol"
+ },
+ "ranks": {
+  "BTC": 1,
+  "ETH": 2,
+  "XRP": 5,
+  "SOL": 7,
+  "BNB": 4,
+  "LINK": 16,
+  "ADA": 17,
+  "LTC": 23,
+  "AVAX": 26,
+  "SUI": 29,
+  "HBAR": 31,
+  "AAVE": 44,
+  "DOT": 54,
+  "BCH": 22,
+  "ETC": 67,
+  "RENDER": 79,
+  "XLM": 20,
+  "UNI": 25,
+  "ALGO": 72,
+  "ATOM": 81,
+  "POL": 77,
+  "APT": 97,
+  "CRV": 106,
+  "TAO": 38,
+  "ONDO": 48,
+  "INJ": 91
+ },
+ "exclude_categories": {
+  "meme": [
+   "meme-token",
+   "solana-meme-coins",
+   "base-meme-coins",
+   "bitcoin-meme",
+   "sui-meme",
+   "ton-meme-coins",
+   "tron-meme",
+   "chinese-meme",
+   "ai-meme-coins",
+   "tiktok-meme",
+   "politifi",
+   "trump-affiliated-tokens",
+   "parody-meme-coins",
+   "celebrity-themed-coins",
+   "elon-musk-inspired-coins",
+   "dog-themed-coins",
+   "cat-themed-coins",
+   "frog-themed-coins",
+   "four-meme-ecosystem",
+   "pump-fun",
+   "pump-fun-creator",
+   "gmci-meme-index",
+   "desci-meme",
+   "ip-meme",
+   "country-themed-meme-coins",
+   "4chan-themed",
+   "zoo-themed",
+   "mascot-themed",
+   "sticker-themed-coin"
+  ],
+  "stablecoin": [
+   "stablecoins",
+   "usd-stablecoin",
+   "eur-stablecoin",
+   "fiat-backed-stablecoin",
+   "crypto-backed-stablecoin",
+   "algorithmic-stablecoin",
+   "yield-bearing-stablecoins",
+   "synthetic-dollar",
+   "bridged-stablecoins"
+  ],
+  "wrapped": [
+   "wrapped-tokens"
+  ],
+  "liquid_staking": [
+   "liquid-staking-tokens",
+   "liquid-staked-eth",
+   "liquid-staked-sol",
+   "liquid-restaking-tokens",
+   "liquid-restaked-eth"
+  ],
+  "bridged": [
+   "bridged-tokens",
+   "bridged-wbtc",
+   "bridged-weth",
+   "bridged-usdc",
+   "bridged-usdt"
+  ],
+  "gold_commodities": [
+   "tokenized-gold",
+   "gold",
+   "tokenized-commodities",
+   "tokenized-silver",
+   "commodity-backed-stablecoin"
+  ],
+  "fan_token": [
+   "fan-token"
+  ],
+  "tokenized_rwa": [
+   "tokenized-products",
+   "tokenized-stock",
+   "tokenized-treasuries"
+  ]
+ },
+ "category_members": {
+  "meme-token": [
+   "ai-companions",
+   "aixbt",
+   "america-party-5",
+   "anonymous-cat",
+   "ape-and-pepe",
+   "apes-2-2",
+   "artificial-inu-3",
+   "baby-claw",
+   "baby-doge-coin",
+   "banana-for-scale-2",
+   "based-brett",
+   "basedhype",
+   "bianrensheng",
+   "binance-peg-dogecoin",
+   "binance-peg-shib",
+   "boner-coin",
+   "bonk",
+   "book-of-meme",
+   "build-on",
+   "bulla-3",
+   "burnedfi",
+   "cash-cat",
+   "cat-in-a-dogs-world",
+   "catwifhat-2",
+   "cheems-token",
+   "chump-coin",
+   "coco-2",
+   "comedian",
+   "constitutiondao",
+   "czs-dog",
+   "degen-base",
+   "dog-go-to-the-moon-rune",
+   "dogecoin",
+   "dogelon-mars",
+   "dogs-2",
+   "dogwifcoin",
+   "fartcoin",
+   "floki",
+   "gekko",
+   "giggle-fund",
+   "gohome",
+   "hakimi",
+   "hood-sword-inu",
+   "hundred",
+   "hunter-biden-s-laptop-3",
+   "loaded-lions",
+   "lobster-2",
+   "lucidum",
+   "marscoin-4",
+   "melania-meme",
+   "meme-horse",
+   "memecoin-2",
+   "memecore",
+   "memetoon",
+   "mog-coin",
+   "moo-deng",
+   "moolah",
+   "mubarak",
+   "myonion-fun",
+   "neet",
+   "neiro-3",
+   "niu-lai",
+   "non-playable-coin",
+   "notcoin",
+   "nyc-token",
+   "official-trump",
+   "ordinals",
+   "peanut-the-squirrel",
+   "pepe",
+   "popcat",
+   "pudgy-penguins",
+   "pump-fun",
+   "purr-2",
+   "rekt-4",
+   "shiba-inu",
+   "snek",
+   "spx6900",
+   "super-inu-2",
+   "the-black-bull",
+   "theros",
+   "toshi",
+   "troll-2",
+   "turbo",
+   "useless-3",
+   "utya",
+   "wiki-cat",
+   "would",
+   "yzy",
+   "zerebro"
+  ],
+  "tiktok-meme": [
+   "moo-deng"
+  ],
+  "politifi": [
+   "constitutiondao",
+   "hunter-biden-s-laptop-3",
+   "melania-meme",
+   "official-trump"
+  ],
+  "ai-meme-coins": [
+   "ai-companions",
+   "aixbt",
+   "fartcoin",
+   "turbo",
+   "zerebro"
+  ],
+  "stablecoins": [
+   "a7a5",
+   "aegis-yusd",
+   "agora-dollar",
+   "alloy-tether",
+   "allunity-chf",
+   "apxusd",
+   "astherus-usdf",
+   "avant-usd",
+   "axis-usd",
+   "bfusd",
+   "binance-peg-busd",
+   "binance-usd",
+   "brla-digital-brla",
+   "brz",
+   "bucket-protocol-buck-stablecoin",
+   "cap-usd",
+   "cash-4",
+   "crown-brlv",
+   "crvusd",
+   "cygnus-finance-global-usd",
+   "dai",
+   "dola-usd",
+   "electronic-usd",
+   "ethena-usde",
+   "eurite",
+   "euro-coin",
+   "f-x-protocol-fxusd",
+   "falcon-finance",
+   "felix-feusd",
+   "fidelity-digital-dollar",
+   "first-digital-usd",
+   "frankencoin",
+   "frax",
+   "frax-usd",
+   "gemini-dollar",
+   "gho",
+   "global-dollar",
+   "gusd",
+   "helio-protocol-hay",
+   "hex-trust-usdx",
+   "hive_dollar",
+   "hylo-usd",
+   "jpy-coin",
+   "jpyc",
+   "jpycoin",
+   "jpysc",
+   "jupusd",
+   "liquity-bold-2",
+   "liquity-usd",
+   "main-street-usd",
+   "metamask-usd",
+   "metronome-synth-usd",
+   "mezo-usd",
+   "monerium-eur-money",
+   "monerium-eur-money-2",
+   "noon-usn",
+   "nusd-2",
+   "ondo-u-s-dollar-token",
+   "open-usd",
+   "paxos-standard",
+   "paypal-usd",
+   "polymarket-usd",
+   "precious-metals-usd",
+   "re-protocol-reusd",
+   "resupply-usd",
+   "ripple-usd",
+   "royal-euro",
+   "saturn-dollar",
+   "societe-generale-forge-eurcv",
+   "sofiusd",
+   "stable-coin-2",
+   "standx-dusd",
+   "straitsx-xusd",
+   "terrausd",
+   "tether",
+   "tokenised-gbp",
+   "tori-trusd",
+   "true-usd",
+   "united-stables",
+   "unity-usd",
+   "universal-usd",
+   "usa",
+   "usd-coin",
+   "usd1-wlfi",
+   "usda-2",
+   "usda-3",
+   "usdd",
+   "usdgo",
+   "usdh-2",
+   "usdkg",
+   "usds",
+   "usdsui",
+   "usdtb",
+   "usual-usd",
+   "usx",
+   "xdai",
+   "ylds",
+   "yuzu-usd"
+  ],
+  "wrapped-tokens": [
+   "arbitrum-bridged-wrapped-eeth",
+   "binance-wrapped-btc",
+   "bitget-wrapped-btc",
+   "bridged-wrapped-bitcoin-starkgate",
+   "bridged-wrapped-steth-gnosis",
+   "btcvc",
+   "circle-wrapped-btc",
+   "coinbase-wrapped-btc",
+   "coinbase-wrapped-staked-eth",
+   "coinbase-wrapped-xrp",
+   "etherfi-weeths",
+   "fluid-wrapped-staked-eth",
+   "gate-wrapped-btc",
+   "gteth",
+   "hastra-wrapped-ylds",
+   "hex-trust-wrapped-xrp",
+   "kraken-wrapped-btc",
+   "lorenzo-wrapped-bitcoin",
+   "mezo-wrapped-btc",
+   "okx-wrapped-btc",
+   "okx-wrapped-eth",
+   "robinhood-wrapped-eth-robinhood-chain",
+   "rserg",
+   "wbnb",
+   "weth",
+   "wormhole-bridged-wrapped-sol-sui",
+   "wrapped-aave-ethereum-usdc",
+   "wrapped-aave-ethereum-usdt",
+   "wrapped-aave-ethereum-weth",
+   "wrapped-aave-plasma-usdt0",
+   "wrapped-avax",
+   "wrapped-beacon-eth",
+   "wrapped-bitcoin",
+   "wrapped-bitcoin-pulsechain",
+   "wrapped-btt-tron",
+   "wrapped-cro",
+   "wrapped-dag",
+   "wrapped-eeth",
+   "wrapped-ether-mantle-bridge",
+   "wrapped-ethereum-sollet",
+   "wrapped-flare",
+   "wrapped-fogo",
+   "wrapped-hype",
+   "wrapped-near",
+   "wrapped-nxm",
+   "wrapped-oeth",
+   "wrapped-okb",
+   "wrapped-one",
+   "wrapped-pulse-wpls",
+   "wrapped-rseth",
+   "wrapped-savings-rusd",
+   "wrapped-solana",
+   "wrapped-steth",
+   "wrapped-stx-velar",
+   "wrapped-tao",
+   "wrapped-tron",
+   "wrapped-xpl",
+   "wrapped-xrp",
+   "wrappedm-by-m0"
+  ],
+  "liquid-staking-tokens": [
+   "ankreth",
+   "astherus-staked-bnb",
+   "avant-staked-usd",
+   "benqi-liquid-staked-avax",
+   "binance-staked-sol",
+   "blazestake-staked-sol",
+   "bybit-staked-sol",
+   "clbtc",
+   "coinbase-wrapped-staked-eth",
+   "crypto-com-staked-eth",
+   "dfdv-staked-sol",
+   "drift-staked-sol",
+   "ethena-staked-ena",
+   "ethena-staked-usde",
+   "ether-fi-liquid-eth",
+   "ether-fi-staked-btc",
+   "ether-fi-staked-eth",
+   "firelight-staked-xrp",
+   "fluid-wrapped-staked-eth",
+   "frax-ether",
+   "haedal-staked-sui",
+   "hastra-prime",
+   "helius-staked-sol",
+   "hylo-staked-sol",
+   "jito-staked-sol",
+   "jpool",
+   "jupiter-staked-sol",
+   "kinetic-staked-hype",
+   "kinetiq-earn-vault",
+   "kinetiq-markets-lst",
+   "liquid-staked-ethereum",
+   "lista",
+   "lombard-staked-btc",
+   "lorenzo-stbtc",
+   "mantle-staked-ether",
+   "merlin-s-seal-btc",
+   "msol",
+   "origin-ether",
+   "phantom-staked-sol",
+   "pumpbtc",
+   "rocket-pool-eth",
+   "saturn-susdat",
+   "sbtc-2",
+   "socean-staked-sol",
+   "solv-protocol-solvbtc-bbn",
+   "stader-ethx",
+   "staked-aave",
+   "staked-axis-usd",
+   "staked-cap-usd",
+   "staked-ether",
+   "staked-frax-ether",
+   "staked-frax-usd",
+   "staked-hype",
+   "staked-tao-root",
+   "staked-trx",
+   "staked-usd1",
+   "staked-usdt",
+   "staked-usn",
+   "staked-yuzu-usd",
+   "staked-zig",
+   "stakewise-v3-oseth",
+   "super-oeth",
+   "susdai",
+   "sweth",
+   "the-vault-staked-sol",
+   "treehouse-eth",
+   "universal-btc",
+   "volo-staked-sui",
+   "wrapped-beacon-eth",
+   "wrapped-steth"
+  ],
+  "liquid-restaking-tokens": [
+   "bedrock-btc",
+   "ether-fi-staked-btc",
+   "ether-fi-staked-eth",
+   "etherfi-weeths",
+   "kelp-dao-restaked-eth",
+   "lombard-staked-btc",
+   "mantle-restaked-eth",
+   "renzo-restaked-eth",
+   "restaked-swell-eth",
+   "wrapped-eeth"
+  ],
+  "bridged-tokens": [
+   "anubis-bridged-dai-anubis",
+   "anubis-bridged-lgns-anubis",
+   "anubis-bridged-usdt-anubis",
+   "arbitrum-bridged-wbtc-arbitrum-one",
+   "arbitrum-bridged-weth-arbitrum-one",
+   "arbitrum-bridged-wrapped-eeth",
+   "arbitrum-bridged-wsteth-arbitrum",
+   "avalanche-bridged-weth-avalanche",
+   "avalanche-old-bridged-wbtc-avalanche",
+   "binance-bridged-usdc-bnb-smart-chain",
+   "binance-bridged-usdt-bnb-smart-chain",
+   "bitcoin-avalanche-bridged-btc-b",
+   "bot-chain-bridged-usdt-bot-chain",
+   "bridged-nxpc",
+   "bridged-tether-opbnb",
+   "bridged-usd-coin-linea",
+   "bridged-usd-coin-optimism",
+   "bridged-usdc-polygon-pos-bridge",
+   "bridged-weth",
+   "bridged-wrapped-bitcoin-starkgate",
+   "bridged-wrapped-ether-starkgate",
+   "bridged-wrapped-steth-gnosis",
+   "cicle-xreserve-bridged-usdc-cardano",
+   "cronos-bridged-usdc-cronos",
+   "cronos-bridged-usdt-cronos",
+   "cronos-bridged-wbtc-cronos",
+   "dai-on-pulsechain",
+   "eni-bridged-usdt-eni",
+   "flare-bridged-xrp-flare",
+   "hybridge-bridged-aave",
+   "ibc-bridged-usdc",
+   "injective-bridged-usdt-injective",
+   "ink-bridged-weth-ink",
+   "l2-standard-bridged-usdt-base",
+   "l2-standard-bridged-weth-base",
+   "l2-standard-bridged-weth-optimism",
+   "layerzero-bridged-pyusd0",
+   "mantle-bridged-usdc-mantle",
+   "multichain-bridged-weth-fantom",
+   "near-intents-bridged-zec",
+   "omnibridge-bridged-zcash-solana",
+   "polygon-bridged-wbtc-polygon-pos",
+   "polygon-pos-bridged-dai-polygon-pos",
+   "polygon-pos-bridged-weth-polygon-pos",
+   "qusdt",
+   "rainbow-bridged-near-ethereum",
+   "ronin-bridged-weth-ronin",
+   "spx6900",
+   "stargate-bridged-usdc",
+   "superbridge-bridged-wsteth-base",
+   "superbridge-bridged-wsteth-optimism",
+   "tether-gold-tokens",
+   "tether-rainbow-bridge",
+   "usd-coin-avalanche-bridged-usdc-e",
+   "usd-coin-ethereum-bridged",
+   "usdt0",
+   "wormhole-bridged-hype",
+   "wormhole-bridged-weth-monad",
+   "wormhole-bridged-wrapped-sol-sui",
+   "wrapped-ether-mantle-bridge",
+   "zksync-bridged-usdc-zksync"
+  ],
+  "tokenized-gold": [
+   "goldfish-gold",
+   "kinesis-gold",
+   "matrixdock-gold",
+   "pax-gold",
+   "pleasing-gold",
+   "tether-gold",
+   "tether-gold-tokens"
+  ],
+  "fan-token": [
+   "croatian-ff-fan-token"
+  ],
+  "tokenized-products": [
+   "alpha-bulgaria-warrants",
+   "alphabet-bstocks-tokenized-stock",
+   "alphabet-class-a-ondo-tokenized-stock",
+   "alphabet-xstock",
+   "backed-cspx-core-s-p-500",
+   "bending-spoons-xstock",
+   "blackrock-daily-reinvestment-stablecoin-reserve-vehicle",
+   "blackrock-usd-institutional-digital-liquidity-fund",
+   "blockchain-capital",
+   "cea-industries-bstocks-tokenized-stock",
+   "circle-internet-group-bstock",
+   "circle-internet-group-ondo-tokenized-stock",
+   "circle-xstock",
+   "eutbl",
+   "fidelity-usd-digital-liquidity-fund-acc",
+   "figure-heloc",
+   "goldfish-gold",
+   "hashnote-usyc",
+   "hims-hers-health-ondo-tokenized-stock",
+   "intel-tokenized-bstocks",
+   "invesco-qqq-etf-ondo-tokenized-etf",
+   "ishares-bitcoin-trust-ondo-tokenized",
+   "ishares-core-s-p-500-etf-ondo-tokenized-etf",
+   "ishares-silver-trust-ondo-tokenized-stock",
+   "janus-henderson-anemoy-aaa-clo-fund",
+   "janus-henderson-anemoy-treasury-fund",
+   "kinesis-gold",
+   "kinesis-silver",
+   "latam-residential-sstl",
+   "matrixdock-gold",
+   "micron-technology-bstock",
+   "micron-technology-ondo-tokenized-stock",
+   "microstrategy-ondo-tokenized-stock",
+   "microstrategy-xstock",
+   "midas-mtbill",
+   "na-post-settlement-legal-financing-receivables",
+   "nasdaq-xstock",
+   "nvidia-bstocks",
+   "nvidia-ondo-tokenized-stock",
+   "nvidia-xstock",
+   "ondo-us-dollar-yield",
+   "openai-republic-pre-ipo",
+   "ousg",
+   "pax-gold",
+   "pleasing-gold",
+   "propy",
+   "reental",
+   "roundhill-memory-etf-bstocks-tokenized-stock",
+   "safo",
+   "sandisk-bstocks-tokenized-stock",
+   "securitize-corp",
+   "securitize-tokenized-aaa-clo-fund",
+   "sp500-xstock",
+   "spacex-bstocks-tokenized-stock",
+   "spacex-xstocks",
+   "spdr-s-p-500-etf-ondo-tokenized-etf",
+   "spiko-amundi-overnight-swap-fund-eur",
+   "spiko-amundi-overnight-swap-fund-gbp",
+   "spiko-us-t-bills-money-market-fund",
+   "strategy-pp-variable-xstock",
+   "strategy-stretch-preferred-ondo-tokenized",
+   "strategy-tokenized-bstocks",
+   "superstate-short-duration-us-government-securities-fund-ustb",
+   "sygnum-fiusd-liquidity-fund",
+   "tesla-bstocks-tokenized-stock",
+   "tesla-xstock",
+   "tether-gold",
+   "tether-gold-tokens",
+   "theo-short-duration-us-treasury-fund",
+   "tradable-apac-diversified-finance-provider-sstn",
+   "tradable-eu-latam-pos-financing-sstl",
+   "tradable-latam-bnpl-sstn",
+   "tradable-latam-middle-market-lender-sstl",
+   "tradable-na-legal-receivables-ssl",
+   "tradable-na-neobank-sstl",
+   "tradable-na-rent-financing-platform-sstn",
+   "tradable-na-third-party-online-merchant-sstn",
+   "tradable-north-america-pos-lender-sstn",
+   "tradable-singapore-fintech-ssl-2",
+   "usa",
+   "ustbl-tokenized-u-s-treasury-bill"
+  ]
+ },
+ "meme_blocklist": [
+  {
+   "id": "dogecoin",
+   "symbol": "DOGE"
+  },
+  {
+   "id": "shiba-inu",
+   "symbol": "SHIB"
+  },
+  {
+   "id": "pump-fun",
+   "symbol": "PUMP"
+  },
+  {
+   "id": "memecore",
+   "symbol": "M"
+  },
+  {
+   "id": "pepe",
+   "symbol": "PEPE"
+  },
+  {
+   "id": "pudgy-penguins",
+   "symbol": "PENGU"
+  },
+  {
+   "id": "official-trump",
+   "symbol": "TRUMP"
+  },
+  {
+   "id": "bianrensheng",
+   "symbol": "币安人生"
+  },
+  {
+   "id": "spx6900",
+   "symbol": "SPX"
+  },
+  {
+   "id": "ape-and-pepe",
+   "symbol": "APEPE"
+  },
+  {
+   "id": "bonk",
+   "symbol": "BONK"
+  },
+  {
+   "id": "floki",
+   "symbol": "FLOKI"
+  },
+  {
+   "id": "binance-peg-dogecoin",
+   "symbol": "DOGE"
+  },
+  {
+   "id": "dogwifcoin",
+   "symbol": "WIF"
+  },
+  {
+   "id": "useless-3",
+   "symbol": "USELESS"
+  },
+  {
+   "id": "non-playable-coin",
+   "symbol": "NPC"
+  },
+  {
+   "id": "fartcoin",
+   "symbol": "FARTCOIN"
+  },
+  {
+   "id": "build-on",
+   "symbol": "B"
+  },
+  {
+   "id": "cash-cat",
+   "symbol": "CASHCAT"
+  },
+  {
+   "id": "artificial-inu-3",
+   "symbol": "AI"
+  },
+  {
+   "id": "cheems-token",
+   "symbol": "CHEEMS"
+  },
+  {
+   "id": "melania-meme",
+   "symbol": "MELANIA"
+  },
+  {
+   "id": "dog-go-to-the-moon-rune",
+   "symbol": "DOG"
+  },
+  {
+   "id": "ordinals",
+   "symbol": "ORDI"
+  },
+  {
+   "id": "marscoin-4",
+   "symbol": "MARSCOIN"
+  },
+  {
+   "id": "mubarak",
+   "symbol": "MUBARAK"
+  },
+  {
+   "id": "baby-doge-coin",
+   "symbol": "BABYDOGE"
+  },
+  {
+   "id": "niu-lai",
+   "symbol": "牛来"
+  },
+  {
+   "id": "book-of-meme",
+   "symbol": "BOME"
+  },
+  {
+   "id": "banana-for-scale-2",
+   "symbol": "BANANAS31"
+  },
+  {
+   "id": "turbo",
+   "symbol": "TURBO"
+  },
+  {
+   "id": "comedian",
+   "symbol": "BAN"
+  },
+  {
+   "id": "snek",
+   "symbol": "SNEK"
+  },
+  {
+   "id": "based-brett",
+   "symbol": "BRETT"
+  },
+  {
+   "id": "memetoon",
+   "symbol": "MEME"
+  },
+  {
+   "id": "gekko",
+   "symbol": "GEKKO"
+  },
+  {
+   "id": "binance-peg-shib",
+   "symbol": "SHIB"
+  },
+  {
+   "id": "peanut-the-squirrel",
+   "symbol": "PNUT"
+  },
+  {
+   "id": "toshi",
+   "symbol": "TOSHI"
+  },
+  {
+   "id": "popcat",
+   "symbol": "POPCAT"
+  },
+  {
+   "id": "notcoin",
+   "symbol": "NOT"
+  },
+  {
+   "id": "boner-coin",
+   "symbol": "BONER"
+  },
+  {
+   "id": "mog-coin",
+   "symbol": "MOG"
+  },
+  {
+   "id": "loaded-lions",
+   "symbol": "LION"
+  },
+  {
+   "id": "cat-in-a-dogs-world",
+   "symbol": "MEW"
+  },
+  {
+   "id": "gohome",
+   "symbol": "GOHOME"
+  },
+  {
+   "id": "moo-deng",
+   "symbol": "MOODENG"
+  },
+  {
+   "id": "anonymous-cat",
+   "symbol": "ZCAT"
+  },
+  {
+   "id": "constitutiondao",
+   "symbol": "PEOPLE"
+  },
+  {
+   "id": "lobster-2",
+   "symbol": "龙虾"
+  },
+  {
+   "id": "troll-2",
+   "symbol": "TROLL"
+  },
+  {
+   "id": "rekt-4",
+   "symbol": "REKT"
+  },
+  {
+   "id": "wiki-cat",
+   "symbol": "WKC"
+  },
+  {
+   "id": "memecoin-2",
+   "symbol": "MEME"
+  },
+  {
+   "id": "degen-base",
+   "symbol": "DEGEN"
+  },
+  {
+   "id": "giggle-fund",
+   "symbol": "GIGGLE"
+  },
+  {
+   "id": "neiro-3",
+   "symbol": "NEIRO"
+  },
+  {
+   "id": "dogelon-mars",
+   "symbol": "ELON"
+  }
+ ],
+ "stable_blocklist": [
+  {
+   "id": "tether",
+   "symbol": "USDT"
+  },
+  {
+   "id": "usd-coin",
+   "symbol": "USDC"
+  },
+  {
+   "id": "usds",
+   "symbol": "USDS"
+  },
+  {
+   "id": "ethena-usde",
+   "symbol": "USDE"
+  },
+  {
+   "id": "dai",
+   "symbol": "DAI"
+  },
+  {
+   "id": "usd1-wlfi",
+   "symbol": "USD1"
+  },
+  {
+   "id": "global-dollar",
+   "symbol": "USDG"
+  },
+  {
+   "id": "paypal-usd",
+   "symbol": "PYUSD"
+  },
+  {
+   "id": "ripple-usd",
+   "symbol": "RLUSD"
+  },
+  {
+   "id": "falcon-finance",
+   "symbol": "USDF"
+  },
+  {
+   "id": "usdd",
+   "symbol": "USDD"
+  },
+  {
+   "id": "united-stables",
+   "symbol": "U"
+  },
+  {
+   "id": "bfusd",
+   "symbol": "BFUSD"
+  },
+  {
+   "id": "usdgo",
+   "symbol": "USDGO"
+  },
+  {
+   "id": "open-usd",
+   "symbol": "OUSD"
+  },
+  {
+   "id": "gho",
+   "symbol": "GHO"
+  },
+  {
+   "id": "usual-usd",
+   "symbol": "USD0"
+  },
+  {
+   "id": "ylds",
+   "symbol": "YLDS"
+  },
+  {
+   "id": "true-usd",
+   "symbol": "TUSD"
+  },
+  {
+   "id": "euro-coin",
+   "symbol": "EURC"
+  },
+  {
+   "id": "a7a5",
+   "symbol": "A7A5"
+  },
+  {
+   "id": "usdtb",
+   "symbol": "USDTB"
+  },
+  {
+   "id": "sofiusd",
+   "symbol": "SOFID"
+  },
+  {
+   "id": "first-digital-usd",
+   "symbol": "FDUSD"
+  },
+  {
+   "id": "apxusd",
+   "symbol": "APXUSD"
+  },
+  {
+   "id": "re-protocol-reusd",
+   "symbol": "REUSD"
+  },
+  {
+   "id": "binance-peg-busd",
+   "symbol": "BUSD"
+  },
+  {
+   "id": "frax",
+   "symbol": "FRAX"
+  },
+  {
+   "id": "crvusd",
+   "symbol": "CRVUSD"
+  },
+  {
+   "id": "agora-dollar",
+   "symbol": "AUSD"
+  },
+  {
+   "id": "usx",
+   "symbol": "USX"
+  },
+  {
+   "id": "societe-generale-forge-eurcv",
+   "symbol": "EURCV"
+  },
+  {
+   "id": "usa",
+   "symbol": "USAT"
+  },
+  {
+   "id": "polymarket-usd",
+   "symbol": "PUSD"
+  },
+  {
+   "id": "gusd",
+   "symbol": "GUSD"
+  },
+  {
+   "id": "jpycoin",
+   "symbol": "JPYC"
+  },
+  {
+   "id": "cash-4",
+   "symbol": "CASH"
+  },
+  {
+   "id": "jpysc",
+   "symbol": "JPYSC"
+  },
+  {
+   "id": "avant-usd",
+   "symbol": "AVUSD"
+  },
+  {
+   "id": "astherus-usdf",
+   "symbol": "USDF"
+  },
+  {
+   "id": "frax-usd",
+   "symbol": "FRXUSD"
+  }
+ ],
+ "symbol_aliases": {
+  "1000PEPE": {
+   "base": "PEPE",
+   "cg_id": "pepe"
+  },
+  "1000SHIB": {
+   "base": "SHIB",
+   "cg_id": "shiba-inu"
+  },
+  "1000BONK": {
+   "base": "BONK",
+   "cg_id": "bonk"
+  },
+  "1000FLOKI": {
+   "base": "FLOKI",
+   "cg_id": "floki"
+  },
+  "1000SATS": {
+   "base": "SATS",
+   "cg_id": null
+  },
+  "1000RATS": {
+   "base": "RATS",
+   "cg_id": null
+  },
+  "1000CAT": {
+   "base": "CAT",
+   "cg_id": null
+  },
+  "1MBABYDOGE": {
+   "base": "BABYDOGE",
+   "cg_id": "baby-doge-coin"
+  },
+  "1000CHEEMS": {
+   "base": "CHEEMS",
+   "cg_id": "cheems-token"
+  }
+ },
+ "ambiguous_symbols": [
+  "AI",
+  "BABY",
+  "B",
+  "M",
+  "LION",
+  "DOG",
+  "LUNA"
+ ]
+}

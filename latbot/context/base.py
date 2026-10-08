@@ -61,6 +61,10 @@ class HttpGetter(Protocol):
         timeout_s: float = 10.0,
     ) -> HttpResponse: ...
 
+    async def post(
+        self, url: str, *, json: Any = None, headers: dict[str, str] | None = None, timeout_s: float = 10.0,
+    ) -> HttpResponse: ...
+
     async def close(self) -> None: ...
 
 
@@ -92,6 +96,19 @@ class AiohttpGetter:
             async with session.get(
                 url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=float(timeout_s)),
                 allow_redirects=True,
+            ) as r:
+                text = await r.text(errors="replace")
+                return HttpResponse(r.status, text, {k.lower(): v for k, v in r.headers.items()})
+
+    async def post(
+        self, url: str, *, json: Any = None, headers: dict[str, str] | None = None, timeout_s: float = 10.0,
+    ) -> HttpResponse:
+        import aiohttp
+
+        session = await self._ensure()
+        async with self._sem:
+            async with session.post(
+                url, json=json, headers=headers, timeout=aiohttp.ClientTimeout(total=float(timeout_s)), allow_redirects=True,
             ) as r:
                 text = await r.text(errors="replace")
                 return HttpResponse(r.status, text, {k.lower(): v for k, v in r.headers.items()})

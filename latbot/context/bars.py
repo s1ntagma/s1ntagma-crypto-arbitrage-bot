@@ -42,6 +42,8 @@ MINUTE_S = 60
 HOUR_S = 3600
 WEEK_S = 7 * 86400
 
+_sleep = asyncio.sleep  # request pacing (tests replace this hook, not asyncio.sleep)
+
 
 # --------------------------------------------------------------------------- #
 # pure helpers
@@ -187,7 +189,7 @@ def stability_metrics(
         "beta": b,
         "hour_jumps": hour_jumps,
         "hour_moves": sum(1 for _, r in r_a if abs(r) >= jump_pct),
-        "jump_pct": float(jump_pct),
+        "jump_hour_pct": float(jump_pct),
         "max_7d_move_pct": max_window_move_pct(asset_closes, WEEK_S),
         "first_ts": float(keys[0]),
         "last_ts": float(keys[-1]),
@@ -538,7 +540,7 @@ class MinuteBars:
             if self._last_req_mono is not None and interval > 0:
                 wait = interval - (self._clock.mono() - self._last_req_mono)
                 if wait > 0:
-                    await asyncio.sleep(min(wait, interval))
+                    await _sleep(min(wait, interval))
             self._last_req_mono = self._clock.mono()
             self.counters["requests"] += 1
             resp = await self._http.get(url, params=params, timeout_s=10.0)

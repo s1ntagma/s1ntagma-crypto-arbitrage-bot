@@ -272,6 +272,60 @@ class Settings:
     exit_on_timeout: str = "market"  # "market" | "hold"
     min_partial_fill_ratio: float = 0.2  # below this, cancel and abort
 
+    # ---- Phase 3: selective, context-aware signals (ARCHITECTURE "Phase 3") ----
+    # Training: every opportunity with NET >= this is traded virtually (shadow), whatever its quality.
+    shadow_min_net_pct: float = 0.1
+    shadow_stop_pct: float = 1.0  # shadow stop barrier when the leverage plan has no stop
+    # quality score (engine/quality.py) - fixed, documented weights; never fitted to past trades
+    min_quality_score: int = 60  # below: hidden by default, no Telegram, no AUTO (still shadow-traded)
+    quality_event_window_bonus: int = 10  # required score is higher around high-impact US releases
+    quality_history_k: float = 10.0
+    quality_weights: dict = field(default_factory=lambda: {
+        "edge": 0.20, "breadth": 0.10, "depth": 0.10, "history": 0.20, "timing": 0.10, "context": 0.30})
+    context_weights: dict = field(default_factory=lambda: {
+        "macro_event": 1.0, "news": 1.0, "whale": 0.4, "funding": 0.6, "open_interest": 0.5,
+        "liquidations": 0.5, "btc_regime": 0.8, "tradfi": 0.3, "sentiment": 0.2, "event_reaction": 0.8,
+        "erratic": 1.0})
+    # meta-label table (engine/metalabel.py): outcomes of comparable situations
+    metalabel_min_n: int = 20
+    metalabel_kappa: float = 10.0
+    metalabel_keep: int = 20_000
+    # leverage plan (engine/leverage.py): advice + virtual P&L only, no leveraged orders are sent
+    max_leverage: float = 5.0
+    leverage_tiers: list = field(default_factory=lambda: [[70, 2], [80, 3], [90, 5]])
+    leverage_liq_buffer: float = 3.0  # liquidation distance >= this x stop distance
+    leverage_risk_frac_pct: float = 0.5  # loss at stop <= this % of total capital (risk-first sizing)
+    leverage_min_net_pct: float = 0.4
+    leverage_min_rr: float = 1.5
+    leverage_kelly_fraction: float = 0.25
+    leverage_min_stop_pct: float = 0.3
+    leverage_stop_sigma: float = 2.5
+    # market context (context/*)
+    context_enabled: bool = True
+    macro_block_before_s: float = 300.0  # high-impact US release ahead -> veto
+    macro_block_after_s: float = 120.0
+    macro_window_after_s: float = 3600.0
+    reaction_horizons_s: list = field(default_factory=lambda: [10, 60, 300, 1800])
+    reaction_min_n: int = 5
+    erratic_min_1m_pct: float = 1.0
+    erratic_max_5m_pct: float = 3.0
+    pool_jump_hour_pct: float = 3.0
+    # narrow pool (universe/pool.py): objective data + measured stability, no meme / hype / erratic coins
+    pool_enabled: bool = True
+    pool_max_assets: int = 25
+    pool_min_market_cap_usd: float = 1e9
+    pool_min_volume_24h_usd: float = 2e7  # global 24h turnover (CoinGecko); the target venue's own >= min_target_volume_quote
+    pool_max_abs_change_24h_pct: float = 15.0  # hype pump / dump today
+    pool_max_abs_change_7d_pct: float = 100.0
+    pool_include: list = field(default_factory=lambda: ["BTC", "ETH"])
+    pool_exclude: list = field(default_factory=list)
+    pool_min_signal_venues: int = 3
+    pool_min_target_venues: int = 1
+    pool_min_btc_corr: float = 0.40  # 30-day HOURLY correlation with BTC (0.55 was calibrated on daily data)
+    pool_max_hour_jumps_30d: int = 20
+    pool_min_history_days: int = 20
+    pool_refresh_h: float = 12.0
+
     # ---- ui / server -----------------------------------------------------
     host: str = "127.0.0.1"
     port: int = 8787

@@ -55,6 +55,7 @@ LIQ_KEEP_S = 1200.0  # keep events a bit longer than the 15 m window
 LS_MAX_AGE_S = 900.0  # rubik 5 m bars: older than 3 bars -> no data
 INSTRUMENTS_REFRESH_S = 3600.0
 OPTIONAL_CONCURRENCY = 4
+OPTIONAL_FAIL_PAUSE_S = 600.0  # every call of a best-effort part failed: stop hammering it for a while
 
 FNG_URL = "https://api.alternative.me/fng/"
 
@@ -227,7 +228,8 @@ class Derivatives(PollingCollector):
         self._ls: dict[str, tuple[float, float]] = {}  # asset -> (ratio, ts)
         self._ls_next_mono: dict[str, float] = {}
         self._loaded: set[str] = set()
-        self._opt_backoff_until = 0.0
+        self._opt_backoff_until = 0.0  # rate limited: all per-asset calls paused
+        self._kind_pause_until = {"liquidations": 0.0, "long_short": 0.0}  # one part keeps failing
         self._db_warned = False
         self._parts: dict[str, dict[str, Any]] = {
             k: {"ok": None, "ts": None, "error": ""} for k in ("instruments", "funding", "open_interest")
@@ -235,7 +237,8 @@ class Derivatives(PollingCollector):
         self._parts["liquidations"] = {"ok": 0, "failed": 0, "ts": None, "error": ""}
         self._parts["long_short"] = {"ok": 0, "failed": 0, "ts": None, "error": ""}
 
-        for asset in self._tracked_assets():
+        self._tracked = self._tracked_assets()
+        for asset in self._tracked:
             self._load_history_sync(asset)
 
     # ------------------------------------------------------------------ public
@@ -510,9 +513,9 @@ class Derivatives(PollingCollector):
 
         tasks = []
         now_mono = self._clock.mono()
-        if self.liq_enabled:
+        if self.liq_enabled and now_mono >= self._kind_pause_until["liquidations"]:
             tasks += [run("liquidations", a, self._poll_liquidations) for a in assets]
-        if self.ls_enabled:
+        if self.ls_enabled and now_mono >= self._kind_pause_until["long_short"]:
             for a in assets:
                 if now_mono >= self._ls_next_mono.get(a, 0.0):
                     self._ls_next_mono[a] = now_mono + self.ls_every_s
@@ -523,6 +526,8 @@ class Derivatives(PollingCollector):
         for kind, (ok, failed, error) in stats.items():
             if ok or failed:
                 self._parts[kind] = {"ok": ok, "failed": failed, "ts": now, "error": error}
+            if failed and not ok and not limited:
+                self._kind_pause_until[kind] = now_mono + OPTIONAL_FAIL_PAUSE_S
         return limited[0] if limited else None
 
     async def _poll_liquidations(self, asset: str) -> None:
@@ -655,7 +660,7 @@ class Derivatives(PollingCollector):
             d = _as_dict(r)
             if d is None or str(d.get("asset") or asset).upper() != asset:
                 continue
-            if str(d.get("source") or "okx").lower() != "okx":
+            if str(d.get("venue") or d.get("source") or "okx").lower() != "okx":
                 continue  # never mix venues in one history
             ts = _num(d.get("ts"))
             if ts is None:
@@ -686,7 +691,7 @@ class Derivatives(PollingCollector):
                 continue
             ls = self._fresh_ls(a, now)
             sample = {
-                "asset": a, "ts": now, "source": "okx", "inst_id": f"{a}-USDT-SWAP",
+                "asset": a, "ts": now, "venue": "okx", "source": "okx", "inst_id": f"{a}-USDT-SWAP",
                 "funding_rate": f["funding_rate"] if f else None,
                 "funding_rate_8h": f["funding_rate_8h"] if f else None,
                 "funding_interval_h": f["funding_interval_h"] if f else None,
@@ -786,8 +791,8 @@ class Derivatives(PollingCollector):
                 continue  # the fetched pages do not reach back to the window start
             long_usd = sum(usd for ts, is_long, usd in events if ts >= lo and is_long)
             short_usd = sum(usd for ts, is_long, usd in events if ts >= lo and not is_long)
-            out[f"liq_long_usd_{suffix}"] = round(long_usd, 2)
-            out[f"liq_short_usd_{suffix}"] = round(short_usd, 2)
+            out[f"liq_long_usd_{suffix}"] = round(float(long_usd), 2)
+            out[f"liq_short_usd_{suffix}"] = round(float(short_usd), 2)
         return out
 
     def _part_ok(self, part: str) -> None:
@@ -803,11 +808,13 @@ class Derivatives(PollingCollector):
         bits: list[str] = []
         if errors:
             bits.append("ошибки: " + "; ".join(errors))
+        now_mono = self._clock.mono()
         for kind, label in (("liquidations", "ликвидации"), ("long_short", "L/S")):
             p = self._parts[kind]
             if p.get("failed"):
-                bits.append(f"{label}: {p['failed']} ошибок ({p.get('error', '')})")
-        if self._clock.mono() < self._opt_backoff_until:
+                pause = " - нет данных, пауза 10 мин" if now_mono < self._kind_pause_until[kind] else ""
+                bits.append(f"{label}: {p['failed']} ошибок{pause} ({p.get('error', '')})")
+        if now_mono < self._opt_backoff_until:
             bits.append("ликвидации/L/S: пауза (лимит запросов)")
         return "; ".join(bits)[:300]
 

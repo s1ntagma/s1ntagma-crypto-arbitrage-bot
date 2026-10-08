@@ -82,6 +82,7 @@ def make_settings(**over: Any) -> Settings:
         total_capital_quote=10_000.0,
         price_sample_min_interval_ms=0.0,
         default_api_latency_ms=LAT_MS,
+        min_quality_score=0,  # execution mechanics; the quality gate has its own tests
     )
     base.update(over)
     return Settings(**base)

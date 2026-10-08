@@ -242,6 +242,8 @@ class Diagnostics:
         with_data = {n for n, x in ex.items() if x["books"] + x["tickers"] + x.get("polled", 0) > 0}
         uptime = float(snap.get("uptime_s", 0.0))
 
+        if f["opportunities"] > 0:
+            out.append(f"Сигналы были: возможностей {f['opportunities']}, алертов в Telegram {f['alerts']}.")
         pool = snap.get("pool") or {}
         if pool.get("enabled"):
             line = (f"Пул: {pool.get('size', 0)} предсказуемых монет (без мем/хайп/скачущих)"
@@ -253,8 +255,6 @@ class Diagnostics:
             if reasons:
                 line += "; чаще всего мешает: " + "; ".join(f"{k} ({n})" for k, n in reasons[:3])
             out.append(line + ". Остальные видны по фильтру «показать все» и торгуются виртуально (обучение).")
-        if f["opportunities"] > 0:
-            out.append(f"Сигналы были: возможностей {f['opportunities']}, алертов в Telegram {f['alerts']}.")
         if not connected:
             out.append("Ни одна биржа не подключена: нет данных вообще. Проверь интернет, логи "
                        "(logs/console.log) и что биржи не заблокированы для твоей сети.")

@@ -16,3 +16,7 @@ venv/
 .idea/
 .vscode/
 .deps_ok
+
+# bundled data inside the package (fallback asset pool)
+!latbot/universe/data/
+!latbot/universe/data/*.json

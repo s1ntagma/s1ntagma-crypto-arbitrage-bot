@@ -20,9 +20,11 @@ async def test_quality_and_leverage_are_recorded_and_target_is_a_win():
     env, sh, ml = _env()
     opp = await detect(env)
     row = sh.trades()[0]
-    assert row["quality_score"] is None and row["grade"] == ""  # not computed in this bare pipeline: honest empty
+    # the pipeline scores every opportunity (no context hub here: coverage 0, nothing counted as support)
+    assert isinstance(row["quality_score"], (int, float)) and row["grade"] in ("A", "B", "C", "D")
     assert row["first_mover"] == opp.first_mover and row["lag_pct"] == pytest.approx(opp.signal.lag_pct)
-    assert row["stop_pct"] == pytest.approx(env.settings.shadow_stop_pct if hasattr(env.settings, "shadow_stop_pct") else 1.0)
+    # the leverage plan's stop is the shadow stop barrier when it exists, else shadow_stop_pct
+    assert row["stop_pct"] == pytest.approx(opp.leverage.get("stop_pct") or env.settings.shadow_stop_pct)
     env.clock.advance(0.3)
     await env.push("kraken", 101.5)
     closed = sh.trades()[0]

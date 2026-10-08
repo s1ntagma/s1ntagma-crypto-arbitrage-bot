@@ -43,6 +43,8 @@ from .duration import DurationEstimator
 from .economics import compute_economics
 from .executability import assess_bot, assess_human
 from .explain import build_plan, build_why
+from .leverage import plan_leverage
+from .quality import assess_quality
 from ..exchanges.base import RateLimited
 from .diagnostics import Diagnostics
 from .mover import MoveDetector
@@ -84,6 +86,10 @@ class Pipeline:
         self.diag: Diagnostics = diag or getattr(detector, "diag", None) or Diagnostics(settings, clock)
         # Phase 3 narrow pool (universe.pool.AssetPool or anything with contains(asset)); None = scan everything.
         self.pool: Any = None
+        # Phase 3: context.hub.ContextHub (factors / bars / funding / event windows) and the
+        # meta-label store (learned outcomes of comparable situations); None -> not available.
+        self.context: Any = None
+        self.metalabel: Any = None
         self.pool_skipped: set[str] = set()  # assets seen but not scanned (outside the pool), for DIAG
         self._stats = stats
         self._opps = opps
@@ -434,8 +440,65 @@ class Pipeline:
             opp.human_ok, opp.human_total = h_ok, h_total
             opp.last_update_ts = clock.wall()
             opp.plan = build_plan(opp, settings, names, clock.mono(), opp.last_update_ts)
+            self._score(opp)
 
         return enrich
+
+    def _ctx(self, name: str, *args: Any) -> Any:
+        """Call a ContextHub method; None when there is no hub or it fails (no data, never a guess)."""
+        fn = getattr(self.context, name, None) if self.context is not None else None
+        if fn is None:
+            return None
+        try:
+            return fn(*args)
+        except Exception:  # noqa: BLE001 - context never blocks a signal
+            log.exception("context.%s failed", name)
+            return None
+
+    def _score(self, opp: Opportunity) -> None:
+        """Phase 3: quality report + leverage plan on the latest economics (pure, in-memory)."""
+        s = self._settings
+        now_wall = self._clock.wall()
+        try:
+            factors = self._ctx("factors", opp.asset, opp.direction, now_wall) or []
+            event_window = bool(self._ctx("event_window", now_wall))
+            stats_asset = self._ctx("asset_stats", opp.asset) or {}
+            stats_btc = stats_asset if opp.asset == "BTC" else (self._ctx("asset_stats", "BTC") or {})
+            btc_pctile = stats_btc.get("vol_pctile") if isinstance(stats_btc, dict) else None
+            ml = None
+            if self.metalabel is not None:
+                try:
+                    ml = self.metalabel.estimate(opp.asset, opp.target_exchange, opp.first_mover, opp.signal.lag_pct, btc_pctile)
+                except Exception:  # noqa: BLE001
+                    log.exception("metalabel estimate failed for %s", opp.id)
+            rs = None
+            if self._stats is not None:
+                try:
+                    rs = self._stats.get(opp.asset, opp.target_exchange)
+                except Exception:  # noqa: BLE001
+                    rs = None
+            report = assess_quality(opp.signal, opp.econ, opp.human, opp.bot, rs, factors, s,
+                                    remaining_s=opp.remaining_s(self._clock.mono()), metalabel=ml, event_window=event_window)
+            q = report.to_dict()
+            q["btc_vol_pctile"] = btc_pctile
+            q["event_window"] = event_window
+            opp.quality = q
+            funding = self._ctx("funding", opp.asset)
+            rate = interval = next_ts = None
+            if isinstance(funding, (tuple, list)) and len(funding) >= 3:
+                rate, interval, next_ts = funding[0], funding[1], funding[2]
+            sa = stats_asset if isinstance(stats_asset, dict) else {}
+            plan = plan_leverage(
+                opp.econ, report.score, s, s.exchange(opp.target_exchange),
+                sigma_1m_pct=sa.get("vol_1m_pct"), tail_1m_pct=sa.get("tail_1m_pct"),
+                hold_s=float(opp.estimated_duration_s or 0.0), funding_rate_8h=rate, funding_interval_h=interval,
+                next_funding_ts=next_ts, now_wall=now_wall,
+                p10=(ml or {}).get("p10"), n=(ml or {}).get("n"),
+                total_capital_quote=float(getattr(s, "total_capital_quote", 0.0) or 0.0), event_window=event_window,
+            )
+            opp.leverage = plan.to_dict()
+        except Exception:  # noqa: BLE001 - a scoring bug must never hide a real opportunity
+            log.exception("quality / leverage scoring failed for %s", opp.id)
 
     async def _assess(
         self, signal: LagSignal, book: OrderBook, capital: float, existing: Opportunity | None
@@ -494,6 +557,11 @@ class Pipeline:
         opp, is_new = await self._opps.upsert(signal, econ, human, bot, why, est, s.mode(), enrich=self._enricher())
         if is_new:
             self.diag.opportunity()
+            q = opp.quality or {}
+            if q:
+                vetoes = q.get("vetoes") or []
+                reason = str(vetoes[0]) if vetoes else f"качество {q.get('score')}/100 ниже {q.get('min_score', getattr(s, 'min_quality_score', 60))}"
+                self.diag.quality(bool(q.get("passed")), "" if q.get("passed") else reason)
             await self._opps.transition(opp.id, OppState.VALIDATING, "economics computed")
             await self._opps.transition(opp.id, OppState.VALID, f"net {econ.net_pct:+.2f}% on real book")
         if signal.target_move_pct * signal.direction >= s.move_threshold_pct:
