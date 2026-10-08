@@ -585,6 +585,32 @@ async def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
 # --------------------------------------------------------------------------- #
 # Application factory
 # --------------------------------------------------------------------------- #
+class _NoCacheStatic(StaticFiles):
+    """UI assets are revalidated on every load (ETag -> 304 when unchanged), so a
+    new version of the bot never runs with a stale app.js from the browser cache."""
+
+    async def get_response(self, path: str, scope: Any) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+def _asset_version(path: Path) -> str:
+    try:
+        st = path.stat()
+    except OSError:
+        return VERSION
+    return f"{int(st.st_mtime)}-{st.st_size}"
+
+
+def _versioned_index(page: Path) -> str:
+    """index.html with ``?v=<mtime-size>`` on app.js / style.css (cache busting)."""
+    html = page.read_text(encoding="utf-8")
+    for name in ("app.js", "style.css"):
+        html = html.replace(f"/static/{name}\"", f"/static/{name}?v={_asset_version(page.parent / name)}\"")
+    return html
+
+
 def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -> FastAPI:
     """Build the FastAPI app for the given application context.
 
@@ -687,7 +713,7 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
 
     # ---- UI --------------------------------------------------------------
     if UI_DIR.is_dir():
-        app.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
+        app.mount("/static", _NoCacheStatic(directory=str(UI_DIR)), name="static")
     else:  # pragma: no cover - packaging problem, not a runtime path
         log.error("UI directory missing: %s", UI_DIR)
 
@@ -696,7 +722,7 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
         page = UI_DIR / "index.html"
         if not page.is_file():
             return _error(404, "ui not installed")
-        return FileResponse(str(page), media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-cache"})
+        return Response(_versioned_index(page), media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-cache"})
 
     @app.get("/favicon.ico", include_in_schema=False)
     async def favicon() -> Response:

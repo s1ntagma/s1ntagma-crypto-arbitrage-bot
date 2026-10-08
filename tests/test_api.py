@@ -1064,3 +1064,17 @@ def test_no_secret_in_any_response(client, ctx):
     # error paths are redacted too (engine exceptions may quote exchange responses)
     r = client.put("/api/settings", json={"telegram_bot_token": TOKEN})
     assert r.status_code == 400 and not SECRET_RE.search(r.text)
+
+
+def test_ui_assets_are_cache_busted(client):
+    """A new bot version must never run with an app.js cached by the browser."""
+    import re as _re
+    from latbot.api.server import UI_DIR
+    html = client.get("/").text
+    m = _re.search(r'/static/app\.js\?v=([0-9]+-[0-9]+)"', html)
+    assert m and '/static/style.css?v=' in html
+    st = (UI_DIR / "app.js").stat()
+    assert m.group(1) == f"{int(st.st_mtime)}-{st.st_size}"
+    r = client.get("/static/app.js?v=" + m.group(1))
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+    assert client.get("/").headers["cache-control"] == "no-cache"
