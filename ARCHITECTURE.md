@@ -984,3 +984,72 @@ margin venue); `recommended` includes the venue.  Funding (perp) = notional·rat
   pool with exclusion reasons); cards show the quality badge + factor list (WHY) + leverage plan;
   filter "show low quality"; settings for pool / quality / leverage / per-exchange leverage caps;
   DIAG counts `quality` rejections and pool size.
+
+## P3.12 Research refinements (2026-10-08; reports in the session scratchpad `research/REPORT_*.md`) — these OVERRIDE P3.1–P3.11 where they differ
+
+* **Pool** (`universe/pool.py`) runs four steps; missing input → "нет данных" and the asset stays OUT
+  (except `pool_include`): (1) category exclusion by **CoinGecko id** (frozen offline id list in
+  `universe/data/fallback_pool.json` + live refresh; never block ambiguous tickers like AI, B, M, LUNA by
+  symbol); (2) venue presence: ≥ `pool_min_signal_venues=3` signal venues and ≥ `pool_min_target_venues=1`
+  target; (3) target turnover stays per signal (`min_target_volume_quote=500000`, venue's own ticker);
+  (4) **stability** from OKX `{A}-USDT` 1H candles over 30 days (`stability_fn(asset)` supplied by
+  `context/bars.py`): hourly correlation with BTC ≥ `pool_min_btc_corr=0.55`, hourly residual jumps
+  |r − β·r_BTC| ≥ `pool_jump_hour_pct=3.0` at most `pool_max_hour_jumps_30d=20`, max 7-day move ≤
+  `pool_max_abs_change_7d_pct=100`, at least `pool_min_history_days=20` of candles.  Also excluded:
+  funding interval < 8 h on the main perp venue (`funding_interval_fn`, exchanges move erratic coins to
+  4 h/1 h).  Fallback pool tier A: BTC ETH XRP SOL BNB LINK ADA LTC AVAX SUI HBAR AAVE DOT BCH ETC RENDER;
+  tier B: XLM UNI ALGO ATOM POL APT CRV TAO ONDO INJ.  Kraken symbol mapping XBT↔BTC, XDG↔DOGE.
+* **Live erratic gate** (`context/bars.py` `erratic(asset)`): in the last 60 min ≥ 2 one-minute bars with
+  |r| ≥ max(`erratic_min_1m_pct=1.0`, 8·median σ1m) **or** max |r5m| ≥ `erratic_max_5m_pct=3.0` →
+  `{"suspended": True, "reason": ...}`; the hub emits factor `erratic` with **veto**.
+* **Calendar**: prefer `ff_calendar_thisweek.xml` (UTC times, stable `ebaseId` in `<url>`, cp1252), JSON
+  as fallback (explicit offsets).  Poll ≥ 30 min apart, keep the last good copy (`fetched_ts`, age shown),
+  back off ≥ 300 s on 429 / HTML "Request Denied".  Map type by ebaseId first (CPI m/m 78, Core CPI 79,
+  CPI y/y 884, PPI 86, Core PPI 87, NFP 66, Unemployment 56, AHE 159, Fed Funds Rate 1, FOMC Statement 4,
+  Press Conference 512, Minutes 304, Fed Chair speaks 129) then exact title.  'All Day'/'Tentative' →
+  time unknown (never midnight).  No zoneinfo dependency.  **Actual values**: no keyless seconds-level
+  source exists; the surprise sign comes from squawk posts (`news.macro_surprise()` on FinancialJuice /
+  WalterBloomberg text: "ACTUAL/FORECAST", "EST.", "SURVEY", "ожид") or later from BLS (`BlsActuals`,
+  optional, BLS Atom feeds/API).  Until then `surprise=None`.  Event windows (−2…+60 min around high US
+  events) raise the required quality and lower leverage; opportunities are tagged with the event.
+* **TradFi**: Yahoo v8 is delayed (~10 min futures/DXY, ~15 min VIX/TNX): regime only, never a trigger;
+  `data_age_s` per quote, UI label "задержка", `context_weights["tradfi"]=0.3`.
+* **Derivatives**: OKX primary (one `funding-rate?instId=ANY`, one `open-interest?instType=SWAP` call
+  covers all swaps); funding normalised per 8 h (`rate·8/interval_h`, interval from nextFundingTime −
+  fundingTime) and `funding_interval_h` exposed; extremes judged as **percentiles of the asset's own
+  history** (samples persisted: duck-typed `db.save_deriv_sample(dict)` / `db.load_deriv_samples(asset,
+  since_ts)`); fewer than `derivs_min_samples=288` → funding factor unavailable ("история копится N/288").
+  OI/price quadrant over 15 min (price ±0.5 %, OI ±2 %): NEW_LONGS / NEW_SHORTS / SHORT_COVERING /
+  LONG_LIQUIDATION / QUIET.  Liquidations: OKX REST liquidation-orders best-effort (USD = sz·ctVal·bkPx;
+  side=sell & posSide=long ⇒ long liquidated).  `EtfFlows` (daily, SoSoValue keyless, fragile → "нет данных"
+  on failure) lives in `derivs.py` too.  Contrarian funding/LS rules are context, never entry triggers.
+* **News**: default channels (verified): WatcherGuru, whale_alert_io, wublockchainenglish, cointelegraph,
+  WalterBloomberg, FinancialJuice, markettwits, unfolded, BWEnews, binance_announcements,
+  okxannouncements, Bybit_Announcements, kucoin_news.  Poll `t.me/s/<ch>?after=<max_id>`; fast squawks
+  (FinancialJuice, WalterBloomberg, markettwits, WatcherGuru, whale_alert_io, wublockchainenglish) every
+  20 s, others 60 s.  RSS defaults: cointelegraph, coindesk (no trailing slash), decrypt, theblock,
+  bitcoinmagazine, Fed press_all + speeches, SEC press releases.  Dedup: sha1(normalised headline) or token
+  Jaccard ≥ 0.5 within 6 h.  **Fake-news guard**: ETF approval/denial, exchange hack/insolvency and Fed
+  decision headlines get importance > 0.85 only when corroborated (≥ 2 independent channels, or the
+  official SEC/Fed feed / the exchange's own announcement channel).  Only pool assets or market-wide
+  (`["*"]`) items feed the factor.  Claude only for items with rule importance ≥ 0.4, within the hourly
+  budget, through the existing `anthropic` SDK (no new dependency).
+* **Leverage**: `L_liq = 1/(k·stop + mmr + taker_fee)` with k = `leverage_liq_buffer=3`; **risk-first
+  sizing** notional = equity·`leverage_risk_frac_pct=0.5`% / (stop + fees + slippage) — leverage raises
+  margin efficiency only, never the per-trade risk budget; optional fractional-Kelly cap
+  (`leverage_kelly_fraction=0.25`) from the meta-label lower bound p10 when n ≥ `metalabel_min_n=20`;
+  funding only when the hold window crosses a funding timestamp; margin venues: opening fee + rollover
+  per 4 h.  Venue caps are owner settings (`ExchangeConfig.max_leverage`, default 1 = spot).
+* **Meta-label table** (new `engine/metalabel.py` — `MetaLabelStore`): measurement only.  Key =
+  (asset, target, first_mover, lag bucket `<0.5|0.5-1|1-2|>2 %`, regime bucket from BTC vol percentile
+  `low|mid|high`); every closed shadow trade records a triple-barrier outcome (target → win, stop → loss,
+  time limit → win iff NET > 0).  Posterior Beta with κ = `metalabel_kappa=10` pseudo-trades around the
+  global base rate; reports mean, 10th-percentile lower bound (stdlib regularized incomplete beta +
+  bisection) and n, with back-off to coarser keys (asset+target → asset → global) when n is small.
+  `engine/quality.py` uses p10 for the **history** component when n ≥ `metalabel_min_n`, otherwise the
+  catch-up statistics.  Persistence: duck-typed `db.save_metalabel_outcome(dict)` /
+  `db.load_metalabel_outcomes(limit)`.  Shadow trades get a stop barrier (`shadow_stop_pct=1.0` or the
+  leverage plan's stop) so outcomes are three-way.
+* **Quality**: context aggregate uses `S_eff = S·C` (missing data can never raise a score); every
+  unavailable factor is listed in WHY; the minimum score rises inside macro event windows
+  (`quality_event_window_bonus=10`) and with leverage (tiers).
