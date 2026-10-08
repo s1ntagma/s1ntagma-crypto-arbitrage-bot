@@ -396,6 +396,9 @@ class TelegramNotifier:
             return False
         if s.alert_human_only and opp.human.light is Light.RED:
             return False
+        quality = getattr(opp, "quality", None)
+        if isinstance(quality, dict) and quality and not quality.get("passed", False):
+            return False  # Phase 3: only signals that passed the quality check (score + no veto)
         if opp.id in self._messages or opp.telegram_message_id is not None:
             return False
         return True
@@ -419,6 +422,7 @@ class TelegramNotifier:
             esc(plan["timing"]),
             esc(plan["caveat"]),
             lights,
+            esc(_quality_line(opp)),
             esc(plan["updated"]),
         ]
         return "\n".join(line for line in lines if line)
@@ -894,3 +898,22 @@ class TelegramNotifier:
             f"Порог Telegram: {s.telegram_profit_threshold_pct:g}%\n"
             f"HUMAN_EXECUTION_TIME: {s.human_execution_time_s:g} с"
         )
+
+
+def _quality_line(opp: Opportunity) -> str:
+    """"Качество 78/100 (B) · плечо до 3×" - empty when the quality was not computed."""
+    q = getattr(opp, "quality", None)
+    if not isinstance(q, dict) or q.get("score") is None:
+        return ""
+    line = f"Качество {int(round(float(q['score'])))}/100 ({q.get('grade') or '?'})"
+    lev = getattr(opp, "leverage", None)
+    if isinstance(lev, dict):
+        try:
+            cap = float(lev.get("max_by_signal") or 0.0)
+        except (TypeError, ValueError):
+            cap = 0.0
+        if cap >= 2.0:
+            line += f" · плечо до {cap:g}×"
+        elif cap > 0:
+            line += " · без плеча"
+    return line

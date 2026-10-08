@@ -1291,6 +1291,12 @@ class ExecutionEngine:
         if fresh.bot.light == Light.RED:
             why = "; ".join(fresh.bot.reasons) or fresh.bot.label
             return fail(f"Bot light is RED: {why}")
+        quality = getattr(fresh, "quality", None)
+        if isinstance(quality, dict) and quality and not quality.get("passed", False):
+            # Phase 3: AUTO only on signals that pass the quality check on the LATEST book
+            vetoes = "; ".join(str(v) for v in (quality.get("vetoes") or []))
+            detail = vetoes or str(quality.get("summary") or "")
+            return fail(f"Signal quality {quality.get('score', '?')}/100 did not pass" + (f": {detail}" if detail else ""))
         executable = float(econ.executable_quote)
         if executable < s.min_trade_quote:
             return fail(f"Executable size ${executable:.2f} is below the minimum trade size ${s.min_trade_quote:.2f}")
