@@ -20,7 +20,7 @@
   var SETTINGS_FIELDS = [
     'human_execution_time_s', 'telegram_profit_threshold_pct', 'capital_quote', 'max_trade_quote',
     'min_net_pct_show', 'min_movers', 'auto_confirm', 'alert_human_only', 'telegram_require_executable',
-    'min_quality_score', 'shadow_min_net_pct', 'max_leverage', 'pool_enabled', 'context_enabled'
+    'min_quality_score', 'shadow_min_net_pct', 'max_leverage', 'pool_enabled', 'context_enabled', 'ws_assets'
   ];
 
   var state = {

@@ -183,7 +183,7 @@ DEFAULT_EXCHANGES: list[ExchangeConfig] = [
 # Runtime settings (public, user-tunable)
 # --------------------------------------------------------------------------- #
 # Bumped when a saved config.json needs a one-time upgrade (see Settings._migrate).
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 
 
 @dataclass
@@ -212,7 +212,7 @@ class Settings:
     quote_assets: list[str] = field(default_factory=lambda: ["EUR", "USDC", "USD", "USDT"])
     exchanges: list[ExchangeConfig] = field(default_factory=lambda: [ExchangeConfig(**asdict(e)) for e in DEFAULT_EXCHANGES])
     # ---- coverage: WS for the core watchlist, REST ticker polling for breadth --
-    ws_assets: int = 10  # how many watchlist assets get WebSocket streams per exchange
+    ws_assets: int = 25  # WebSocket streams per exchange: the whole Phase 3 pool (REST polling is 1-2 s slower)
     ticker_poll_enabled: bool = True  # fetch_tickers on every exchange for ALL common assets
     ticker_poll_interval_s: float = 2.0
     poll_assets_max: int = 600  # cap on polled assets (common to >= 2 exchanges)
@@ -389,6 +389,10 @@ class Settings:
             if float(data.get("min_target_volume_quote", 100_000.0)) == 100_000.0:
                 data["min_target_volume_quote"] = 500_000.0
             data["min_net_pct_show"] = 0.1
+        if version < 4:
+            # owner: faster signals - every pool asset on WebSocket (only the old default 10 is raised)
+            if int(data.get("ws_assets", 10) or 10) == 10:
+                data["ws_assets"] = 25
         data["config_version"] = CONFIG_VERSION
         return data
 
@@ -450,7 +454,7 @@ class Settings:
             if e.role == ExchangeRole.EXECUTION and e.stream == "bbo":
                 e.stream = "book"  # targets always need depth
         self.min_movers = max(1, int(self.min_movers))
-        self.ws_assets = max(1, int(self.ws_assets))
+        self.ws_assets = max(1, min(50, int(self.ws_assets)))
         if self.capital_quote <= 0 or self.max_trade_quote <= 0:
             raise ValueError("capital must be > 0")
         if self.rest_book_timeout_s <= 0:

@@ -500,6 +500,33 @@ class CcxtAdapter(ExchangeAdapter):
     def supported_symbols(self) -> set[str]:
         return set(self._streamed)
 
+    def streamed_assets(self) -> list[str]:
+        """Assets with a live WebSocket stream."""
+        return sorted({self._assets.get(sym, sym) for sym in self._streamed})
+
+    def ws_budget(self) -> int:
+        """How many assets may stream (``ws_assets`` capped by ``max_ws_subscriptions``; 0 = REST-only)."""
+        if self._rest_only:
+            return 0
+        limit = int(self.settings.ws_assets)
+        if self.cfg.max_ws_subscriptions and self.cfg.max_ws_subscriptions > 0:
+            limit = min(limit, self.cfg.max_ws_subscriptions)
+        return max(0, limit)
+
+    async def add_streams(self, assets: Iterable[str]) -> int:
+        """Stream assets that entered the pool after start (Phase 3) within ``ws_budget``;
+        streams that run are kept.  Only for an adapter that already streams (started OK).
+        Returns the number of new streams."""
+        have = self.streamed_assets()
+        if not have:
+            return 0
+        new = [a for a in dict.fromkeys(self._asset_key(x) for x in assets) if a and a not in have]
+        if not new or self.ws_budget() <= len(have):
+            return 0
+        before = len(self._streamed)
+        await self.start([*have, *new])  # running streams first: they keep their slots
+        return len(self._streamed) - before
+
     # ---- streaming loops -------------------------------------------------------------
     def _timestamps(self, exchange_ms: Any) -> Timestamps:
         ts = _num(exchange_ms)

@@ -441,12 +441,36 @@ async def _refresh_listings(ctx: AppContext) -> bool:
     return True
 
 
+async def _stream_pool(ctx: AppContext, pool_assets: list[str], tried: dict[str, set[str]]) -> None:
+    """Assets that entered the pool after start get WebSocket streams (free ``ws_assets`` slots)
+    instead of 2-second REST polling.  Each (exchange, asset) is offered once."""
+    for name, adapter in ctx.adapters.items():
+        add = getattr(adapter, "add_streams", None)
+        if not callable(add):
+            continue
+        seen = tried.setdefault(name, set())
+        new = [a for a in pool_assets if a not in seen]
+        if not new or not getattr(adapter, "streamed_assets", lambda: [])():
+            continue  # nothing new, or the adapter has not started streaming yet (retried next round)
+        seen.update(new)
+        try:
+            n = await add(new)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.info("%s: new pool streams not started (%s)", name, type(exc).__name__)
+            continue
+        if n:
+            log.info("%s: +%d WebSocket streams for new pool assets", name, n)
+
+
 async def _follow_pool(ctx: AppContext, stop: asyncio.Event) -> None:
     """Phase 3: the pool changes at runtime (CoinGecko answers, stability gets measured, every
     pool_refresh_h).  Every 30 s the REST poll set is matched to watchlist + pool, so an asset that
     enters the pool is polled and can be detected; listings for the pool's venue step are refreshed
     hourly whether or not ticker polling is on.  WebSocket subscriptions stay as started."""
     applied: set[str] | None = None
+    ws_tried: dict[str, set[str]] = {}  # exchange -> pool assets already offered a WebSocket stream
     next_listings = 0.0
     while not stop.is_set():
         try:
@@ -467,6 +491,8 @@ async def _follow_pool(ctx: AppContext, stop: asyncio.Event) -> None:
                     applied = set(wanted)
                     log.info("ticker polling follows the pool: %d assets (+%s -%s)", len(wanted),
                              ",".join(added) or "0", ",".join(removed) or "0")
+            if pool is not None:
+                await _stream_pool(ctx, list(pool.assets()), ws_tried)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
