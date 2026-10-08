@@ -83,7 +83,8 @@ latbot/
   models.py         единые структуры данных
   exchanges/        адаптеры бирж (ccxt.pro WebSocket), бумажная биржа, фейк для тестов
   market/           состояние рынка: стаканы, ряды цен, здоровье бирж
-  engine/           first mover / lagging, экономика, длительность, HUMAN/BOT, возможности, конвейер
+  engine/           first mover / lagging, экономика, длительность, HUMAN/BOT, возможности, конвейер, диагностика
+  analysis.py       разбор сделки по скриншоту через Claude (только с ANTHROPIC_API_KEY)
   execution/        риск-лимиты, исполнение MANUAL/AUTO, P&L
   notify/telegram.py  алерты и команды
   api/ + ui/        FastAPI + WebSocket + тёмный терминал
@@ -91,20 +92,36 @@ latbot/
   storage/db.py     SQLite: возможности, сделки, ордера, статистика
 tests/              офлайн-тесты (pytest)
 logs/               console.log, bot.lock, bot.pid, stop.flag
-data/               latbot.sqlite3, записи рынка
+data/               latbot.sqlite3, записи рынка, screenshots/
 .claude/skills/     скиллы-подсказки для Claude Code
 ```
 
+## Диагностика: почему нет сигналов
+
+Пустая доска - не «всё хорошо» и не «всё сломано», а вопрос. Вкладка **DIAG** (и команда `/diag` в Telegram)
+показывает воронку: бирж подключено, монет сканируется, тиков получено, движений замечено, кандидатов
+отброшено (по какой причине: одна биржа, объём, нет свежих данных, лаг меньше порога, стакан, NET после
+комиссий, ликвидность), сигналов прошло, возможностей, алертов. И прямо пишет, на каком этапе воронка
+пустеет и какая настройка за это отвечает. Каждая причина - с последними монетами.
+
+## Журнал сделок и скриншоты
+
+В таблице TRADES у каждой сделки есть **JOURNAL**: заметка, загрузка скриншота экрана биржи (PNG/JPEG/WEBP,
+до 8 МБ, хранится в `data/screenshots/`) и кнопка **ANALYZE** - разбор сделки по скриншоту и цифрам из
+журнала через Claude. Для разбора нужен `ANTHROPIC_API_KEY` в `.env`; без ключа кнопка отключена и так и
+написано (NOT AVAILABLE), фальшивого результата не будет. Модель - `analysis_model` в `config.json`.
+
 ## Telegram
 
-`/status`, `/stop` (аварийная остановка, с подтверждением), `/resume`, `/human 7`, `/threshold 3`,
+`/status`, `/diag`, `/stop` (аварийная остановка, с подтверждением), `/resume`, `/human 7`, `/threshold 3`,
 `/mode`, `/help`. Владелец - `TELEGRAM_CHAT_ID` или кто первым написал `/start`.
 
 ## Проверка
 
 ```
-python -m pytest -q
+python -m pytest -q                      # офлайн: модули, API, сквозной сценарий
 python -m pyflakes latbot tests
+pip install -r requirements-dev.txt      # playwright - браузерный тест терминала (tests/test_ui_browser.py)
 python -m latbot.backtest data/market/*.jsonl
 ```
 

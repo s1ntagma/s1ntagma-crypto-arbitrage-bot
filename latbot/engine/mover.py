@@ -33,6 +33,7 @@ from typing import Callable
 from .. import events
 from ..clock import Clock
 from ..config import Settings
+from .diagnostics import Diagnostics
 from ..links import split_symbol
 from ..market.features import move_over_window, velocity_pct_s, volume_acceleration
 from ..market.state import MarketState
@@ -85,12 +86,14 @@ class MoveDetector:
         stats: StatsStore,
         clock: Clock,
         bus: events.EventBus | None = None,
+        diag: Diagnostics | None = None,
     ) -> None:
         self._settings = settings
         self._state = state
         self._stats = stats
         self._clock = clock
         self._bus = bus
+        self.diag = diag or Diagnostics(settings, clock)
         self._cross: dict[str, dict[str, _Crossing]] = {}  # asset -> exchange -> crossing
         self._episodes: dict[str, _Episode] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -293,6 +296,7 @@ class MoveDetector:
             )
             self._episodes[asset] = ep
             self._stats.record_first_mover(asset, first)
+            self.diag.episode(asset, first)
             log.info("episode start %s first_mover=%s dir=%+d", asset, first, ep.direction)
         if ep is None:
             return []
@@ -339,6 +343,7 @@ class MoveDetector:
                 continue
             counted.append(ex)
         if len(counted) < max(1, int(s.min_movers)):
+            self.diag.reject("mover_volume" if len(movers) > len(counted) else "min_movers", asset, "", direction)
             return []
         first = min(counted, key=lambda e: (cross[e].cross_mono, e))
         first_move = moves[first][0]
@@ -348,17 +353,25 @@ class MoveDetector:
         signals: list[LagSignal] = []
         reacted_moves = {ex: m[0] for ex, m in moves.items()}
         for target in s.execution_exchanges():
-            if target == first or target not in moves:
+            if target == first:
+                continue
+            if target not in moves:
+                if target in self._state.exchanges_for(asset):
+                    self.diag.reject("target_no_data", asset, target, direction)
                 continue
             if not self.allowed_direction(target, direction):
+                self.diag.reject("direction", asset, target, direction)
                 continue
             tvol = self._state.volume24h(target, asset)
             if tvol is not None and s.min_target_volume_quote > 0 and tvol < s.min_target_volume_quote:
+                self.diag.reject("target_volume", asset, target, direction)
                 continue
             target_move = moves[target][0]
             lag = first_move * direction - target_move * direction
             if lag < s.min_lag_pct:
+                self.diag.reject("min_lag", asset, target, direction)
                 continue
+            self.diag.signal()
             if target not in ep.lagging:
                 ep.lagging.add(target)
                 self._stats.record_lagging(asset, target, lag)

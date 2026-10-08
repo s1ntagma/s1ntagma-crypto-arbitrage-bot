@@ -38,6 +38,8 @@
     balances: {},
     filters: { quick: 'ALL', exchange: '', asset: '', minNet: '', minWindow: '', human: '', bot: '' },
     tab: 'opps',
+    diag: null,
+    journal: null,
     focusId: null,
     openWhy: new Set(),
     manual: null,
@@ -969,8 +971,119 @@
         h('td', { class: 'num', text: fmtPct(t.actual_slippage_pct) }),
         h('td', { class: 'num', text: fmtSecs(t.execution_time_s) }),
         stateCell,
-        h('td', { class: 'wrap', text: t.diff_reason || t.error || '' }));
+        h('td', { class: 'wrap', text: t.diff_reason || t.error || '' }),
+        journalCell(t));
       body.appendChild(tr);
+    });
+  }
+
+  function journalCell(t) {
+    var j = t.journal || { note: '', screenshots: 0, analyzed: 0 };
+    var parts = [];
+    if (j.note) parts.push('note');
+    if (j.screenshots) parts.push(j.screenshots + ' shot' + (j.screenshots > 1 ? 's' : ''));
+    if (j.analyzed) parts.push(j.analyzed + ' reviewed');
+    var td = h('td', null, h('button', {
+      class: 'btn btn-ghost btn-sm', type: 'button', text: 'JOURNAL', title: 'note, screenshot, review',
+      onclick: function () { openJournal(t.id); }
+    }));
+    if (parts.length) td.appendChild(h('div', { class: 'journal-badge', text: parts.join(' · ') }));
+    return td;
+  }
+
+  // ------------------------------------------------------------------ trade journal
+  function openJournal(tradeId) {
+    state.journal = { tradeId: tradeId, data: null };
+    var t = state.trades.get(tradeId);
+    $('journal-trade').textContent = t ? (t.asset + ' @ ' + exchangeLabel(t.exchange) + ' · ' + (t.state || '') + ' · ' + fmtTime(t.started_ts)) : tradeId;
+    $('journal-note').value = '';
+    $('journal-note-status').textContent = '';
+    clear($('journal-shots'));
+    showModal('journal');
+    api('GET', '/api/trades/' + encodeURIComponent(tradeId) + '/journal').then(function (r) {
+      if (!r.ok) { toast('Journal: ' + r.error, 'err'); return; }
+      state.journal.data = r.data;
+      $('journal-note').value = r.data.note || '';
+      renderJournal();
+    });
+  }
+
+  function closeJournal() { hideModal('journal'); state.journal = null; }
+
+  function renderJournal() {
+    var j = state.journal && state.journal.data;
+    if (!j) return;
+    var hint = $('journal-analysis-note');
+    hint.textContent = j.analysis_available
+      ? 'ANALYZE sends the screenshot and the trade facts to Claude (' + (j.analysis_model || '') + ').'
+      : 'ANALYZE: NOT AVAILABLE — add ANTHROPIC_API_KEY to .env to enable screenshot review.';
+    var box = $('journal-shots');
+    clear(box);
+    (j.screenshots || []).forEach(function (s) {
+      var card = h('div', { class: 'journal-shot' });
+      card.appendChild(h('img', { src: s.url, alt: 'screenshot ' + s.id, loading: 'lazy' }));
+      var row = h('div', { class: 'journal-row' });
+      row.appendChild(h('span', { class: 'journal-badge', text: '#' + s.id + ' · ' + fmtTime(s.created_ts) + (s.analysis_model ? ' · ' + s.analysis_model : '') }));
+      var btn = h('button', {
+        class: 'btn btn-sm', type: 'button', text: s.analysis ? 'RE-ANALYZE' : 'ANALYZE',
+        title: j.analysis_available ? 'ask Claude to review this screenshot' : 'not available without ANTHROPIC_API_KEY'
+      });
+      if (!j.analysis_available) btn.disabled = true;
+      btn.addEventListener('click', function () { analyzeShot(s.id, btn); });
+      row.appendChild(btn);
+      card.appendChild(row);
+      if (s.analysis) card.appendChild(h('p', { class: 'journal-analysis', text: s.analysis }));
+      box.appendChild(card);
+    });
+    if (!(j.screenshots || []).length) box.appendChild(h('p', { class: 'muted', text: 'No screenshots yet.' }));
+  }
+
+  function saveJournalNote() {
+    var jr = state.journal;
+    if (!jr) return;
+    var note = $('journal-note').value;
+    $('journal-note-status').textContent = 'saving…';
+    api('POST', '/api/trades/' + encodeURIComponent(jr.tradeId) + '/note', { note: note }).then(function (r) {
+      if (!r.ok) { $('journal-note-status').textContent = ''; toast('Note: ' + r.error, 'err'); return; }
+      $('journal-note-status').textContent = 'saved';
+      var t = state.trades.get(jr.tradeId);
+      if (t) { t.journal = t.journal || { note: '', screenshots: 0, analyzed: 0 }; t.journal.note = r.data.note; renderTrades(); }
+    });
+  }
+
+  function uploadJournalShot() {
+    var jr = state.journal;
+    var input = $('journal-file');
+    if (!jr || !input.files || !input.files[0]) { toast('Choose a screenshot file first', 'warn'); return; }
+    var fd = new FormData();
+    fd.append('file', input.files[0]);
+    var btn = $('journal-upload');
+    btn.disabled = true;
+    fetch('/api/trades/' + encodeURIComponent(jr.tradeId) + '/screenshot', { method: 'POST', body: fd }).then(function (res) {
+      return res.json().then(function (data) { return { ok: res.ok, data: data }; });
+    }).catch(function (e) { return { ok: false, data: { error: String(e) } }; }).then(function (r) {
+      btn.disabled = false;
+      if (!r.ok) { toast('Upload: ' + ((r.data && r.data.error) || 'failed'), 'err'); return; }
+      input.value = '';
+      toast('Screenshot uploaded', 'ok');
+      var t = state.trades.get(jr.tradeId);
+      if (t) { t.journal = t.journal || { note: '', screenshots: 0, analyzed: 0 }; t.journal.screenshots += 1; renderTrades(); }
+      openJournal(jr.tradeId);
+    });
+  }
+
+  function analyzeShot(id, btn) {
+    btn.disabled = true;
+    btn.textContent = 'ANALYZING…';
+    api('POST', '/api/screenshots/' + id + '/analyze').then(function (r) {
+      if (!r.ok) { btn.disabled = false; btn.textContent = 'ANALYZE'; toast('Analyze: ' + r.error, 'err'); return; }
+      toast('Review ready', 'ok');
+      var jr = state.journal;
+      if (jr) {
+        var t = state.trades.get(jr.tradeId);
+        if (t) { t.journal = t.journal || { note: '', screenshots: 0, analyzed: 0 }; t.journal.analyzed += 1; renderTrades(); }
+        openJournal(jr.tradeId);
+      }
     });
   }
 
@@ -1006,9 +1119,10 @@
   function setTab(name) {
     state.tab = name;
     document.querySelectorAll('.tab').forEach(function (b) { b.setAttribute('aria-selected', b.dataset.tab === name ? 'true' : 'false'); });
-    ['opps', 'trades', 'stats'].forEach(function (n) { $('tab-' + n).classList.toggle('hidden', n !== name); });
+    ['opps', 'trades', 'stats', 'diag'].forEach(function (n) { $('tab-' + n).classList.toggle('hidden', n !== name); });
     if (name === 'trades' && !state.tradesLoaded) loadTrades();
     if (name === 'stats' && !state.statsLoaded) loadStats();
+    if (name === 'diag') loadDiag();
   }
 
   function loadTrades() {
@@ -1018,6 +1132,74 @@
       state.tradesLoaded = true;
       renderTrades();
     });
+  }
+
+  // ------------------------------------------------------------------ diagnostics (why no signals)
+  var FUNNEL_ORDER = ['exchanges_connected', 'exchanges_enabled', 'assets_scanned', 'ticks_received', 'episodes_detected',
+    'candidates', 'rejected_total', 'signals', 'opportunities', 'active_now', 'expired_today', 'alerts'];
+  var FUNNEL_LABELS = {
+    exchanges_connected: 'Exchanges connected', exchanges_enabled: 'Exchanges enabled', assets_scanned: 'Assets scanned',
+    ticks_received: 'Ticks received', episodes_detected: 'Moves (episodes) detected', candidates: 'Candidates checked',
+    rejected_total: 'Candidates rejected', signals: 'Passed filters (signals)', opportunities: 'Approved opportunities',
+    active_now: 'Active now', expired_today: 'Expired by TTL today', alerts: 'Telegram alerts sent'
+  };
+  var REASON_LABELS = {
+    min_movers: 'Only one exchange moved (min_movers)', mover_volume: 'Mover 24h volume too low', target_no_data: 'Target has no fresh data',
+    direction: 'Direction not allowed on target', target_volume: 'Target 24h volume too low', min_lag: 'Lag below min_lag_pct',
+    no_fresh_book: 'No fresh target order book', below_min_net: 'NET after fees below min_net_pct_show', liquidity: 'Book below min trade size'
+  };
+
+  function loadDiag() {
+    return api('GET', '/api/diagnostics').then(function (r) {
+      if (!r.ok) { toast('Diagnostics: ' + r.error, 'err'); return; }
+      state.diag = r.data || null;
+      renderDiag();
+    });
+  }
+
+  function kvRows(body, pairs) {
+    clear(body);
+    pairs.forEach(function (p) {
+      var tr = h('tr');
+      tr.appendChild(h('td', { text: p[0] }));
+      var td = h('td', { text: p[1] });
+      if (p[2]) td.appendChild(h('div', { class: 'diag-recent', text: p[2] }));
+      tr.appendChild(td);
+      body.appendChild(tr);
+    });
+  }
+
+  function renderDiag() {
+    var d = state.diag;
+    $('diag-empty').classList.toggle('hidden', !!d);
+    if (!d) return;
+    var why = $('diag-why');
+    clear(why);
+    (d.why || []).forEach(function (line) { why.appendChild(h('p', { class: 'why-line', text: line })); });
+    if (d.error) why.appendChild(h('p', { class: 'why-line diag-bad', text: d.error }));
+    var f = d.funnel || {};
+    kvRows($('diag-funnel'), FUNNEL_ORDER.filter(function (k) { return k in f; }).map(function (k) { return [FUNNEL_LABELS[k] || humanize(k), String(f[k])]; }));
+    var rej = f.rejected || {};
+    var recent = d.recent_rejections || {};
+    kvRows($('diag-reasons'), Object.keys(rej).map(function (k) {
+      return [REASON_LABELS[k] || humanize(k), String(rej[k]), (recent[k] || []).slice(-3).join(', ')];
+    }));
+    var ex = $('diag-exchanges');
+    clear(ex);
+    Object.keys(d.exchanges || {}).forEach(function (name) {
+      var x = d.exchanges[name];
+      var tr = h('tr');
+      tr.appendChild(h('td', { text: exchangeLabel(name) }));
+      tr.appendChild(h('td', { text: x.role }));
+      tr.appendChild(h('td', { class: x.connected ? 'diag-ok' : 'diag-bad', text: x.connected ? (x.stale ? 'stale' : 'yes') : 'NO' }));
+      tr.appendChild(h('td', { class: 'num', text: String(x.books) }));
+      tr.appendChild(h('td', { class: 'num', text: String(x.tickers) }));
+      tr.appendChild(h('td', { class: 'num', text: String(x.trades) }));
+      tr.appendChild(h('td', { class: 'num', text: x.last_data_s == null ? '—' : x.last_data_s + ' s ago' }));
+      ex.appendChild(tr);
+    });
+    var th = d.thresholds || {};
+    kvRows($('diag-thresholds'), Object.keys(th).map(function (k) { return [k, String(th[k])]; }));
   }
 
   function loadStats() {
@@ -1875,6 +2057,7 @@
     });
     $('trades-refresh').addEventListener('click', loadTrades);
     $('stats-refresh').addEventListener('click', loadStats);
+    $('diag-refresh').addEventListener('click', loadDiag);
 
     $('emergency-btn').addEventListener('click', emergencyClick);
     $('close-positions-btn').addEventListener('click', closePositionsClick);
@@ -1888,6 +2071,10 @@
 
     $('manual-close').addEventListener('click', closeManual);
     $('auto-close').addEventListener('click', closeAuto);
+    $('journal-close').addEventListener('click', closeJournal);
+    $('journal-save').addEventListener('click', saveJournalNote);
+    $('journal-upload').addEventListener('click', uploadJournalShot);
+    $('modal-journal').addEventListener('click', function (ev) { if (ev.target === $('modal-journal')) closeJournal(); });
     $('confirm-ok').addEventListener('click', function () { if (confirmResolve) confirmResolve(true); });
     $('confirm-cancel').addEventListener('click', function () { if (confirmResolve) confirmResolve(false); });
     ['modal-manual', 'modal-auto', 'modal-confirm'].forEach(function (id) {
@@ -1902,6 +2089,7 @@
       if (ev.key !== 'Escape') return;
       if (!modalHidden('confirm')) { if (confirmResolve) confirmResolve(false); return; }
       if (!modalHidden('manual')) { closeManual(); return; }
+      if (!modalHidden('journal')) { closeJournal(); return; }
       if (!modalHidden('auto')) { closeAuto(); return; }
       if ($('settings-drawer').classList.contains('open')) closeDrawer();
     });

@@ -35,6 +35,7 @@
     <button class="tab" role="tab" type="button" data-tab="opps" aria-selected="true" aria-controls="tab-opps">OPPORTUNITIES <span class="tab-count" id="opps-count">0</span></button>
     <button class="tab" role="tab" type="button" data-tab="trades" aria-selected="false" aria-controls="tab-trades">TRADES <span class="tab-count" id="trades-count">0</span></button>
     <button class="tab" role="tab" type="button" data-tab="stats" aria-selected="false" aria-controls="tab-stats">STATS</button>
+    <button class="tab" role="tab" type="button" data-tab="diag" aria-selected="false" aria-controls="tab-diag">DIAG</button>
   </nav>
 
   <main class="main">
@@ -123,6 +124,7 @@
               <th class="num">Exec</th>
               <th>State</th>
               <th>Diff reason</th>
+              <th>Journal</th>
             </tr>
           </thead>
           <tbody id="trades-body"></tbody>
@@ -151,6 +153,37 @@
         <p class="empty-title">No statistics recorded yet.</p>
         <p class="empty-sub">Reaction delays, catch-up ratios and success rates are learned per asset and exchange as opportunities expire.</p>
       </div>
+    </section>
+    <section id="tab-diag" class="tab-panel hidden" role="tabpanel" aria-label="Diagnostics">
+      <div class="panel-head">
+        <h2 class="panel-title">DIAG · why there are no signals</h2>
+        <button id="diag-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+      </div>
+      <div id="diag-why" class="diag-why" aria-live="polite"></div>
+      <div class="diag-grid">
+        <div class="diag-block">
+          <h3 class="diag-title">FUNNEL</h3>
+          <table class="table table-compact" id="diag-funnel-table"><tbody id="diag-funnel"></tbody></table>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title">REJECTED BY REASON</h3>
+          <table class="table table-compact" id="diag-reasons-table"><tbody id="diag-reasons"></tbody></table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">EXCHANGES</h3>
+        <div class="table-wrap">
+          <table class="table" id="diag-exchanges-table">
+            <thead><tr><th>Exchange</th><th>Role</th><th>Connected</th><th class="num">Books</th><th class="num">Tickers</th><th class="num">Trades</th><th class="num">Last data</th></tr></thead>
+            <tbody id="diag-exchanges"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">THRESHOLDS</h3>
+        <table class="table table-compact" id="diag-thresholds-table"><tbody id="diag-thresholds"></tbody></table>
+      </div>
+      <p id="diag-empty" class="muted hidden">Diagnostics not loaded yet.</p>
     </section>
   </main>
 
@@ -211,6 +244,31 @@
         <button id="manual-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close">✕</button>
       </div>
       <div id="manual-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="modal-journal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="journal-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="journal-title" class="panel-title">JOURNAL</h2>
+        <button id="journal-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="journal-trade" class="journal-trade muted"></div>
+        <label class="journal-label" for="journal-note">Note</label>
+        <textarea id="journal-note" class="journal-note" rows="4" maxlength="4000" placeholder="Что пошло так / не так, что сделать иначе…"></textarea>
+        <div class="journal-row">
+          <button id="journal-save" class="btn btn-primary btn-sm" type="button">SAVE NOTE</button>
+          <span id="journal-note-status" class="muted"></span>
+        </div>
+        <label class="journal-label" for="journal-file">Screenshot (PNG / JPEG / WEBP, up to 8 MB)</label>
+        <div class="journal-row">
+          <input id="journal-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
+          <button id="journal-upload" class="btn btn-sm" type="button">UPLOAD</button>
+        </div>
+        <div id="journal-analysis-note" class="muted journal-hint"></div>
+        <div id="journal-shots" class="journal-shots"></div>
+      </div>
     </div>
   </div>
 

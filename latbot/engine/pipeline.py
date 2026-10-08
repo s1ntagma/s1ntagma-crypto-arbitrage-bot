@@ -43,6 +43,7 @@ from .duration import DurationEstimator
 from .economics import compute_economics
 from .executability import assess_bot, assess_human
 from .explain import build_plan, build_why
+from .diagnostics import Diagnostics
 from .mover import MoveDetector
 from .opportunity import OpportunityManager
 from .stats import StatsStore
@@ -72,12 +73,14 @@ class Pipeline:
         adapters: dict[str, Any],
         duration: DurationEstimator,
         db: Any | None = None,
+        diag: Diagnostics | None = None,
     ) -> None:
         self._settings = settings
         self._bus = bus
         self._clock = clock
         self._state = state
         self._detector = detector
+        self.diag: Diagnostics = diag or getattr(detector, "diag", None) or Diagnostics(settings, clock)
         self._stats = stats
         self._opps = opps
         self._adapters = adapters
@@ -162,12 +165,14 @@ class Pipeline:
     # event handlers
     # ------------------------------------------------------------------ #
     def _on_trade(self, trade: Trade) -> None:
+        self.diag.tick(trade.exchange, "trade")
         self._state.on_trade(trade)
 
     def _on_health(self, h: ExchangeHealth) -> None:
         self._state.on_health(h)
 
     async def _on_ticker(self, ticker: Ticker) -> None:
+        self.diag.tick(ticker.exchange, "ticker")
         self._state.on_ticker(ticker)
         for sig in self._detector.on_ticker(ticker, source="ws"):
             await self.evaluate(sig)
@@ -179,6 +184,7 @@ class Pipeline:
         """Ingest one book: detect, evaluate signals, refresh live opps on the
         target exchange that got no new signal (their net decays naturally).
         Never waits on REST: a stale target book is confirmed in the background."""
+        self.diag.tick(book.exchange, "book")
         self._state.on_book(book)
         signals = self._detector.on_book(book)
         results: list[Opportunity] = []
@@ -439,6 +445,7 @@ class Pipeline:
         s = self._settings
         book = await self._target_book(signal)
         if book is None:
+            self.diag.reject("no_fresh_book", signal.asset, signal.target, signal.direction)
             return None
         capital = float(capital_quote) if capital_quote is not None else float(s.capital_quote)
         existing = self._opps.find_active(signal.asset, signal.target, signal.direction)
@@ -448,15 +455,18 @@ class Pipeline:
                 log.debug(
                     "no opportunity %s on %s: net %+.2f%% < %.2f%%", signal.asset, signal.target, econ.net_pct, s.min_net_pct_show
                 )
+                self.diag.reject("below_min_net", signal.asset, signal.target, signal.direction)
                 return None
             if econ.executable_quote < s.min_trade_quote:
                 log.debug(
                     "no opportunity %s on %s: book supports %.2f < min trade %.2f",
                     signal.asset, signal.target, econ.executable_quote, s.min_trade_quote,
                 )
+                self.diag.reject("liquidity", signal.asset, signal.target, signal.direction)
                 return None
         opp, is_new = await self._opps.upsert(signal, econ, human, bot, why, est, s.mode(), enrich=self._enricher())
         if is_new:
+            self.diag.opportunity()
             await self._opps.transition(opp.id, OppState.VALIDATING, "economics computed")
             await self._opps.transition(opp.id, OppState.VALID, f"net {econ.net_pct:+.2f}% on real book")
         if signal.target_move_pct * signal.direction >= s.move_threshold_pct:
@@ -590,6 +600,10 @@ class Pipeline:
                 log.exception("stats save failed")
         await self._bus.publish(events.DASHBOARD, self.dashboard())
         return expired
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Funnel snapshot + "why no signals" (see engine.diagnostics)."""
+        return self.diag.snapshot(self._state, self._adapters, self._opps.counters(self._clock.mono()))
 
     def dashboard(self) -> dict[str, Any]:
         now = self._clock.mono()

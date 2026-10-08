@@ -38,6 +38,7 @@ from .api.server import create_app
 from .backtest.recorder import MarketRecorder
 from .clock import Clock
 from .config import Secrets, Settings, load_secrets, load_settings, save_settings
+from .engine.diagnostics import Diagnostics
 from .engine.duration import DurationEstimator
 from .engine.mover import MoveDetector
 from .engine.opportunity import OpportunityManager
@@ -103,6 +104,7 @@ class AppContext:
     exec_adapters: dict[Mode, dict[str, ExchangeAdapter]]
     risk: RiskManager
     execution: ExecutionEngine
+    diag: Diagnostics | None = None
     notifier: TelegramNotifier | None = None
     recorder: MarketRecorder | None = None
     app: Any = None  # FastAPI application
@@ -156,11 +158,12 @@ def build_context(
     db = db or Database(settings.db_path, clock=clock)
     stats = StatsStore(settings, db)
     state = MarketState(settings, clock)
-    detector = MoveDetector(settings, state, stats, clock, bus)
+    diag = Diagnostics(settings, clock)
+    detector = MoveDetector(settings, state, stats, clock, bus, diag=diag)
     duration = DurationEstimator(settings, stats)
     opps = OpportunityManager(settings, bus, clock, db=db, stats=stats)
     adapters = build_market_adapters(settings, secrets, bus, clock, adapter_factory=adapter_factory)
-    pipeline = Pipeline(settings, bus, clock, state, detector, stats, opps, adapters, duration, db=db)
+    pipeline = Pipeline(settings, bus, clock, state, detector, stats, opps, adapters, duration, db=db, diag=diag)
     exec_adapters = build_execution_adapters(settings, secrets, bus, clock, adapters, db, adapter_factory=adapter_factory)
     risk = RiskManager(settings, db, clock, bus)
     execution = ExecutionEngine(settings, bus, clock, pipeline, opps, exec_adapters, risk, db, stats)
@@ -175,7 +178,7 @@ def build_context(
     cfg_path = Path(config_path)
     notifier: TelegramNotifier | None = None
     try:
-        notifier = TelegramNotifier(settings, secrets, bus, opps, execution, risk, clock, db=db, config_path=str(cfg_path))
+        notifier = TelegramNotifier(settings, secrets, bus, opps, execution, risk, clock, db=db, config_path=str(cfg_path), pipeline=pipeline)
     except Exception:  # noqa: BLE001
         log.exception("telegram notifier not created; continuing without Telegram")
 
@@ -201,6 +204,7 @@ def build_context(
         bus=bus,
         clock=clock,
         db=db,
+        diag=diag,
         state=state,
         stats=stats,
         detector=detector,

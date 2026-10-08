@@ -62,6 +62,24 @@ CREATE INDEX IF NOT EXISTS ix_trades_mode ON trades(mode);
 CREATE INDEX IF NOT EXISTS ix_trades_finished ON trades(finished_ts);
 CREATE INDEX IF NOT EXISTS ix_trades_started ON trades(started_ts);
 
+CREATE TABLE IF NOT EXISTS trade_notes (
+    trade_id TEXT PRIMARY KEY,
+    note TEXT NOT NULL,
+    updated_ts REAL
+);
+
+CREATE TABLE IF NOT EXISTS trade_screenshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    media_type TEXT,
+    created_ts REAL,
+    analysis TEXT,
+    analysis_ts REAL,
+    analysis_model TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_screenshots_trade ON trade_screenshots(trade_id);
+
 CREATE TABLE IF NOT EXISTS orders (
     id TEXT NOT NULL,
     trade_id TEXT,
@@ -349,6 +367,70 @@ class Database:
             row = self._conn.execute("SELECT json FROM trades WHERE id = ?", (trade_id,)).fetchone()
         d = self._load(row["json"]) if row else None
         return d if isinstance(d, dict) else None
+
+    # ------------------------------------------------------------------ #
+    # trade journal: notes + screenshots (+ their analysis)
+    # ------------------------------------------------------------------ #
+    def set_trade_note(self, trade_id: str, note: str) -> None:
+        now = self._clock.wall() if self._clock is not None else datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            if note.strip():
+                self._conn.execute(
+                    "INSERT INTO trade_notes (trade_id, note, updated_ts) VALUES (?, ?, ?) "
+                    "ON CONFLICT(trade_id) DO UPDATE SET note=excluded.note, updated_ts=excluded.updated_ts",
+                    (trade_id, note, now),
+                )
+            else:
+                self._conn.execute("DELETE FROM trade_notes WHERE trade_id = ?", (trade_id,))
+
+    def get_trade_note(self, trade_id: str) -> str:
+        with self._lock:
+            row = self._conn.execute("SELECT note FROM trade_notes WHERE trade_id = ?", (trade_id,)).fetchone()
+        return str(row["note"]) if row else ""
+
+    def add_screenshot(self, trade_id: str, path: str, media_type: str) -> int:
+        now = self._clock.wall() if self._clock is not None else datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO trade_screenshots (trade_id, path, media_type, created_ts) VALUES (?, ?, ?, ?)",
+                (trade_id, path, media_type, now),
+            )
+            return int(cur.lastrowid)
+
+    def get_screenshot(self, screenshot_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM trade_screenshots WHERE id = ?", (int(screenshot_id),)).fetchone()
+        return dict(row) if row else None
+
+    def list_screenshots(self, trade_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM trade_screenshots WHERE trade_id = ? ORDER BY id", (trade_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_screenshot_analysis(self, screenshot_id: int, analysis: str, model: str) -> None:
+        now = self._clock.wall() if self._clock is not None else datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE trade_screenshots SET analysis = ?, analysis_ts = ?, analysis_model = ? WHERE id = ?",
+                (analysis, now, model, int(screenshot_id)),
+            )
+
+    def journal_summary(self) -> dict[str, dict[str, Any]]:
+        """trade_id -> {note, screenshots, analyzed} for the trades table."""
+        out: dict[str, dict[str, Any]] = {}
+        with self._lock:
+            for r in self._conn.execute("SELECT trade_id, note FROM trade_notes").fetchall():
+                out.setdefault(r["trade_id"], {"note": "", "screenshots": 0, "analyzed": 0})["note"] = r["note"]
+            for r in self._conn.execute(
+                "SELECT trade_id, COUNT(*) AS n, SUM(CASE WHEN analysis IS NOT NULL THEN 1 ELSE 0 END) AS a "
+                "FROM trade_screenshots GROUP BY trade_id"
+            ).fetchall():
+                d = out.setdefault(r["trade_id"], {"note": "", "screenshots": 0, "analyzed": 0})
+                d["screenshots"] = int(r["n"] or 0)
+                d["analyzed"] = int(r["a"] or 0)
+        return out
 
     # ------------------------------------------------------------------ #
     # orders

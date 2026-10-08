@@ -52,6 +52,7 @@ class Secrets:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     coingecko_api_key: str = ""
+    anthropic_api_key: str = ""  # optional: screenshot / trade analysis through the Claude API
     exchanges: dict[str, ExchangeCredentials] = field(default_factory=dict)
 
     def creds(self, exchange: str) -> ExchangeCredentials:
@@ -65,9 +66,11 @@ def load_secrets(env_path: str | os.PathLike[str] | None = ".env") -> Secrets:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
         coingecko_api_key=os.getenv("COINGECKO_API_KEY", "").strip(),
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
     )
     register_secret(s.telegram_bot_token)
     register_secret(s.coingecko_api_key)
+    register_secret(s.anthropic_api_key)
     for i in range(1, MAX_EXCHANGE_SLOTS + 1):
         name = os.getenv(f"EXCHANGE_{i}_NAME", "").strip().lower()
         if not name:
@@ -233,6 +236,7 @@ class Settings:
     min_net_pct_bot: float = 0.3  # bot RED below this
     min_net_pct_auto: float = 0.5  # AUTO execution requires at least this at revalidation
     telegram_profit_threshold_pct: float = 3.0  # TELEGRAM_PROFIT_THRESHOLD
+    analysis_model: str = "claude-opus-5-5"  # Claude model for screenshot / trade review (needs ANTHROPIC_API_KEY)
     telegram_require_executable: bool = True
     max_slippage_pct: float = 0.3  # MAX_SLIPPAGE: liquidity counted only within this
     min_liquidity_quote: float = 50.0  # MIN_LIQUIDITY on both sides within max_slippage

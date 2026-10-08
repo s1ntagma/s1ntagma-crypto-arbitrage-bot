@@ -66,6 +66,7 @@ HELP_TEXT = (
     "/human <сек> - время ручного исполнения (1-120)\n"
     "/threshold <%> - порог NET для Telegram (0-50)\n"
     "/mode - текущий режим (PAPER/LIVE)\n"
+    "/diag - диагностика: почему нет сигналов\n"
     "/help - эта справка"
 )
 
@@ -113,11 +114,13 @@ class TelegramNotifier:
         session: Any | None = None,
         db: Any | None = None,
         config_path: str = "config.json",
+        pipeline: Any | None = None,
     ) -> None:
         self._settings = settings
         self._bus = bus
         self._opps = opps
         self._execution = execution
+        self._pipeline = pipeline
         self._risk = risk
         self._clock = clock
         self._session = session
@@ -454,6 +457,9 @@ class TelegramNotifier:
         self._alert_text[opp.id] = text
         self._last_edit[opp.id] = now
         self._prune()
+        diag = getattr(self._pipeline, "diag", None)
+        if diag is not None and hasattr(diag, "alert"):
+            diag.alert()
         wall = self._clock.wall()
         opp.telegram_message_id = mid
         opp.notified_ts = wall
@@ -720,6 +726,8 @@ class TelegramNotifier:
             await self.send(self._status_text())
         elif cmd == "/help":
             await self.send(HELP_TEXT)
+        elif cmd == "/diag":
+            await self.send(self._diag_text())
         elif cmd == "/mode":
             mode = s.mode().value
             what = "PAPER (бумажный)" if mode == "paper" else "LIVE (реальные ордера!)"
@@ -827,6 +835,29 @@ class TelegramNotifier:
     # ------------------------------------------------------------------ #
     # status
     # ------------------------------------------------------------------ #
+    def _diag_text(self) -> str:
+        """Funnel summary for /diag (plain text, numbers from Pipeline.diagnostics)."""
+        pipeline = self._pipeline
+        if pipeline is None or not hasattr(pipeline, "diagnostics"):
+            return "Диагностика недоступна (конвейер не подключён)."
+        try:
+            d = pipeline.diagnostics()
+        except Exception:  # noqa: BLE001
+            log.exception("diagnostics failed")
+            return "Диагностика: ошибка, смотри лог."
+        f = d["funnel"]
+        lines = [
+            "🔎 Диагностика",
+            f"Бирж подключено: {f['exchanges_connected']}/{f['exchanges_enabled']} · монет: {f['assets_scanned']} · тиков: {f['ticks_received']}",
+            f"Движений: {f['episodes_detected']} · отброшено: {f['rejected_total']} · сигналов: {f['signals']} · возможностей: {f['opportunities']} · алертов: {f['alerts']}",
+        ]
+        dead = [n for n, x in d["exchanges"].items() if not x["connected"]]
+        if dead:
+            lines.append("Не подключены: " + ", ".join(dead))
+        lines.append("")
+        lines.extend(d["why"])
+        return "\n".join(lines)
+
     def _status_text(self) -> str:
         s = self._settings
         now = self._clock.mono()

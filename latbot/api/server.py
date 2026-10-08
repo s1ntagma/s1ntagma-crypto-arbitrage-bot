@@ -35,14 +35,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
-from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .. import VERSION
+from .. import VERSION, analysis
 from ..config import ExchangeCredentials, Secrets, Settings, save_settings
 from ..events import BALANCE, DASHBOARD, EMERGENCY, HEALTH, OPP_NEW, OPP_STATE, OPP_UPDATE, SETTINGS, TRADE_UPDATE
 from ..logging_setup import redact
@@ -551,6 +551,10 @@ class EmergencyStopBody(BaseModel):
     reason: str = "user"
 
 
+class NoteBody(BaseModel):
+    note: str = Field("", max_length=4000)
+
+
 class CancelBody(BaseModel):
     reason: str = "user"
 
@@ -955,7 +959,145 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
                         out.append(d)
             except Exception:  # noqa: BLE001
                 log.exception("db.list_trades failed")
+        if db is not None and hasattr(db, "journal_summary"):
+            try:
+                journal = db.journal_summary()
+            except Exception:  # noqa: BLE001
+                log.exception("db.journal_summary failed")
+                journal = {}
+            for d in out:
+                j = journal.get(str(d.get("id")))
+                d["journal"] = j or {"note": "", "screenshots": 0, "analyzed": 0}
         return _json(out[:limit])
+
+    # ---- trade journal: notes, screenshots, Claude review ------------------
+    def _data_dir() -> Path:
+        settings = _settings()
+        db_path = str(getattr(settings, "db_path", "") or "")
+        if db_path and db_path != ":memory:":
+            return Path(db_path).expanduser().parent
+        return Path("data")
+
+    def _require_db() -> Any:
+        db = getattr(ctx, "db", None)
+        if db is None or not hasattr(db, "journal_summary"):
+            raise HTTPException(status_code=503, detail="database not available")
+        return db
+
+    def _trade_or_404(trade_id: str) -> dict[str, Any]:
+        execution = getattr(ctx, "execution", None)
+        if execution is not None and hasattr(execution, "trade"):
+            t = execution.trade(trade_id)
+            if t is not None:
+                return _trade_dict(t)
+        db = getattr(ctx, "db", None)
+        if db is not None and hasattr(db, "get_trade"):
+            d = db.get_trade(trade_id)
+            if isinstance(d, dict):
+                return _jsonable(d)
+        raise HTTPException(status_code=404, detail="trade not found")
+
+    def _screenshot_dict(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "trade_id": row["trade_id"],
+            "url": f"/api/screenshots/{int(row['id'])}",
+            "media_type": row.get("media_type"),
+            "created_ts": row.get("created_ts"),
+            "analysis": row.get("analysis"),
+            "analysis_ts": row.get("analysis_ts"),
+            "analysis_model": row.get("analysis_model"),
+        }
+
+    def _analysis_available() -> bool:
+        return analysis.available(getattr(ctx, "secrets", None))
+
+    @app.get("/api/trades/{trade_id}/journal")
+    async def api_trade_journal(trade_id: str) -> JSONResponse:
+        _trade_or_404(trade_id)
+        db = _require_db()
+        return _json({
+            "trade_id": trade_id,
+            "note": db.get_trade_note(trade_id),
+            "screenshots": [_screenshot_dict(r) for r in db.list_screenshots(trade_id)],
+            "analysis_available": _analysis_available(),
+            "analysis_model": str(getattr(_settings(), "analysis_model", "") or ""),
+        })
+
+    @app.post("/api/trades/{trade_id}/note")
+    async def api_trade_note(trade_id: str, body: NoteBody) -> JSONResponse:
+        _trade_or_404(trade_id)
+        db = _require_db()
+        db.set_trade_note(trade_id, body.note)
+        return _json({"ok": True, "trade_id": trade_id, "note": db.get_trade_note(trade_id)})
+
+    @app.post("/api/trades/{trade_id}/screenshot")
+    async def api_trade_screenshot(trade_id: str, file: UploadFile = File(...)) -> JSONResponse:
+        _trade_or_404(trade_id)
+        db = _require_db()
+        media_type = (file.content_type or "").lower()
+        if media_type not in analysis.MEDIA_TYPES:
+            return _error(400, f"only PNG/JPEG/WEBP/GIF screenshots are accepted (got {media_type or 'unknown'})")
+        data = await file.read()
+        if not data:
+            return _error(400, "empty file")
+        if len(data) > analysis.MAX_IMAGE_BYTES:
+            return _error(413, "screenshot larger than 8 MB")
+        ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}[media_type]
+        folder = _data_dir() / "screenshots"
+        folder.mkdir(parents=True, exist_ok=True)
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", trade_id)[:80]
+        path = folder / f"{safe_id}_{int(time.time() * 1000)}.{ext}"
+        path.write_bytes(data)
+        sid = db.add_screenshot(trade_id, str(path), media_type)
+        row = db.get_screenshot(sid)
+        log.info("screenshot %d stored for trade %s (%d bytes)", sid, trade_id, len(data))
+        return _json(_screenshot_dict(row) if row else {"id": sid})
+
+    @app.get("/api/screenshots/{screenshot_id}")
+    async def api_screenshot(screenshot_id: int) -> Response:
+        db = _require_db()
+        row = db.get_screenshot(screenshot_id)
+        if row is None or not Path(row["path"]).exists():
+            raise HTTPException(status_code=404, detail="screenshot not found")
+        return FileResponse(row["path"], media_type=row.get("media_type") or "application/octet-stream")
+
+    @app.post("/api/screenshots/{screenshot_id}/analyze")
+    async def api_screenshot_analyze(screenshot_id: int) -> JSONResponse:
+        db = _require_db()
+        row = db.get_screenshot(screenshot_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="screenshot not found")
+        if not _analysis_available():
+            return _error(409, "NOT AVAILABLE: добавь ANTHROPIC_API_KEY в .env, чтобы включить анализ скриншотов")
+        path = Path(row["path"])
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="screenshot file is missing")
+        trade = _trade_or_404(row["trade_id"])
+        model = str(getattr(_settings(), "analysis_model", "") or "claude-opus-5-5")
+        try:
+            text = await analysis.analyze_screenshot(
+                getattr(ctx, "secrets", None), model, trade, path.read_bytes(),
+                row.get("media_type") or "image/png", note=db.get_trade_note(row["trade_id"]),
+                client=getattr(ctx, "analysis_client", None),
+            )
+        except RuntimeError as exc:
+            return _error(502, str(exc))
+        db.set_screenshot_analysis(screenshot_id, text, model)
+        fresh = db.get_screenshot(screenshot_id)
+        return _json(_screenshot_dict(fresh) if fresh else {"id": screenshot_id, "analysis": text})
+
+    @app.get("/api/diagnostics")
+    async def api_diagnostics() -> JSONResponse:
+        """Signal funnel + "why there are no signals" (engine.diagnostics)."""
+        pipeline = getattr(ctx, "pipeline", None)
+        if pipeline is None or not hasattr(pipeline, "diagnostics"):
+            return _json({"error": "diagnostics unavailable", "funnel": {}, "exchanges": {}, "why": ["Конвейер не запущен."]})
+        try:
+            return _json(pipeline.diagnostics())
+        except Exception:  # noqa: BLE001
+            log.exception("diagnostics failed")
+            return _json({"error": "diagnostics failed", "funnel": {}, "exchanges": {}, "why": ["Ошибка диагностики, смотри лог."]})
 
     @app.get("/api/stats")
     async def api_stats() -> JSONResponse:
