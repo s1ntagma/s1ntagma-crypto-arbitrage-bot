@@ -1653,7 +1653,9 @@
         ['Status', d.enabled ? 'ON (no orders, virtual)' : 'OFF (shadow_trading=false)'],
         ['Open', String(s.open || 0)], ['Closed', String(s.closed || 0)], ['Win rate', rateOrDash(s.win_rate)],
         ['Avg expected NET', pctOrDash(s.avg_expected_net_pct)], ['Avg actual NET', pctOrDash(s.avg_actual_net_pct)],
-        ['Target reached', String(s.target_reached || 0)], ['Virtual P&L', fmtMoney(s.pnl_quote || 0, displayQuote(), { sign: true })],
+        ['Target reached', String(s.target_reached || 0)], ['Stopped', String(s.stopped || 0)],
+        ['Closed without a fresh price (not learned)', String(s.no_data || 0)],
+        ['Virtual P&L', fmtMoney(s.pnl_quote || 0, displayQuote(), { sign: true })],
         ['Skipped', Object.keys(s.skipped || {}).map(function (k) { return k + ': ' + s.skipped[k]; }).join(', ') || '0']
       ]);
       var sb = $('strategy-body');
@@ -1698,7 +1700,9 @@
           h('td', { text: t.asset + ' @ ' + exchangeLabel(t.target) }),
           h('td', { class: 'num', text: fmtMoney(t.entry_price, t.quote) }),
           h('td', { class: 'num', text: t.exit_price == null ? 'open · ' + fmtMoney(t.last_exit_price, t.quote) : fmtMoney(t.exit_price, t.quote) }),
+          h('td', { text: exchangeLabel(t.first_mover || '') + (t.lag_pct ? ' · lag ' + fmtPct(t.lag_pct) : '') }),
           h('td', { class: 'num', text: pctOrDash(t.expected_net_pct) }),
+          h('td', { class: 'num ' + (num(t.max_net_pct) >= 0 ? 'pos' : 'neg'), text: pctOrDash(t.max_net_pct) }),
           h('td', { class: 'num ' + (num(t.actual_net_pct) >= 0 ? 'pos' : 'neg'), text: pctOrDash(t.actual_net_pct) }),
           h('td', { class: 'num', text: t.pnl_quote == null ? '—' : fmtMoney(t.pnl_quote, t.quote, { sign: true }) }),
           h('td', { class: 'wrap', text: t.open ? 'open' : t.exit_reason })));
