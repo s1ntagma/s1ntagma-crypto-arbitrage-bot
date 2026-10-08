@@ -675,3 +675,6 @@ body.in-session { overflow: hidden; }
 .period-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; flex-wrap: wrap; }
 .field-pair { display: flex; gap: 8px; }
 .field-pair input { flex: 1; min-width: 0; }
+.proven-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: var(--fs-sm); border: 1px solid var(--line, #26262A); color: var(--muted); }
+.proven-badge.proven { color: var(--up, #1FA971); border-color: currentColor; }
+.proven-badge.failing { color: var(--down, #E5484D); border-color: currentColor; }

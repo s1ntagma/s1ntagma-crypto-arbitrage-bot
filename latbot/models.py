@@ -538,6 +538,8 @@ class Opportunity:
     # (engine.leverage.LeveragePlan.to_dict); empty when not computed.
     quality: dict = field(default_factory=dict)
     leverage: dict = field(default_factory=dict)
+    proven: dict = field(default_factory=dict)  # engine/proven.py: has this pair proven itself on virtual trades?
+    best_size: dict = field(default_factory=dict)  # simple mode: the stake with the largest expected NET on this book
 
     def age_s(self, now_mono: float) -> float:
         return max(0.0, now_mono - self.first_seen_mono)

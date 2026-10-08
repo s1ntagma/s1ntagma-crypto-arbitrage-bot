@@ -1381,6 +1381,10 @@ class ExecutionEngine:
             why = "; ".join(fresh.bot.reasons) or fresh.bot.label
             return fail(f"Bot light is RED: {why}")
         quality = getattr(fresh, "quality", None)
+        proven = getattr(fresh, "proven", None)
+        if isinstance(proven, dict) and proven and proven.get("enforced") and not proven.get("proven"):
+            # simple mode: AUTO only on pairs that proved themselves on the bot's own virtual trades
+            return fail(f"Pair not proven yet: {proven.get('text') or 'training'}")
         if isinstance(quality, dict) and quality and quality.get("enforced", True) and not quality.get("passed", False):
             # Phase 3: AUTO only on signals that pass the quality check on the LATEST book (simple mode: info only)
             vetoes = "; ".join(str(v) for v in (quality.get("vetoes") or []))

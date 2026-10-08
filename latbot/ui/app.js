@@ -23,7 +23,8 @@
     'min_quality_score', 'shadow_min_net_pct', 'max_leverage', 'pool_enabled', 'context_enabled', 'ws_assets',
     'simple_mode', 'simple_entry_deadline_s', 'simple_max_hold_s',
     'ride_enabled', 'ride_entry_max_age_s', 'ride_reversal_pct', 'ride_stall_s', 'ride_trail_arm_pct', 'ride_trail_pct',
-    'ride_stop_pct', 'ride_max_hold_s', 'shadow_balance_quote'
+    'ride_stop_pct', 'ride_max_hold_s', 'shadow_balance_quote', 'shadow_unlimited',
+    'proven_gate_enabled', 'proven_min_trades', 'proven_min_p10'
   ];
 
   var state = {
@@ -671,7 +672,30 @@
   // Phase 3: below the quality threshold (or vetoed) -> hidden by default; still traded virtually (training).
   function qualityPassed(o) {
     var q = o && o.quality;
-    return !q || q.score == null || q.enforced === false || q.passed !== false;  // simple mode: info only
+    var qOk = !q || q.score == null || q.enforced === false || q.passed !== false;  // simple mode: info only
+    return qOk && provenOk(o);
+  }
+
+  // Simple mode: only pairs that proved themselves on the bot's own virtual trades are offered.
+  function provenOk(o) {
+    var p = o && o.proven;
+    return !p || !p.enforced || !!p.proven;
+  }
+
+  function provenBadge(o) {
+    var p = o && o.proven;
+    if (!p || p.n == null) return null;
+    var cls = 'proven-badge ' + (p.status || 'training');
+    var word = p.status === 'proven' ? 'Proven ' + p.wins + '/' + p.n : p.status === 'failing' ? 'Failing ' + p.wins + '/' + p.n : 'Training ' + p.n + '/' + p.need;
+    return h('span', { class: cls, title: p.text || '', text: word });
+  }
+
+  function bestSizeLine(o) {
+    var b = o && o.best_size;
+    if (!b || !Number.isFinite(num(b.capital_quote))) return null;
+    var q = quoteOf(o);
+    return h('div', { class: 'math-line best-size' }, 'Best size on this book: ' + fmtMoney(b.capital_quote, q) + ' -> ' +
+      fmtMoney(b.net_quote, q, { sign: true }) + ' expected (NET ' + fmtPct(num(b.net_pct)) + ')');
   }
 
   function passesFilters(o) {
@@ -726,7 +750,7 @@
     var old = box.firstElementChild;
     var fresh = best ? renderCard(best, { best: true })
       : h('div', { class: 'best-empty', text: lowQualityCount() > 0
-        ? 'No opportunity passed the quality check: ' + lowQualityCount() + ' below the threshold (trained virtually; tick "Show low quality" below).'
+        ? 'Nothing proven right now: ' + lowQualityCount() + ' offer(s) are still training or below quality (traded virtually; tick "Show training / low quality" below).'
         : 'No executable opportunity right now — waiting for a real lag (no data, no signal).' });
     if (best && old && id === uiMemo.bestId) {
       flashChanged(old, fresh, '.card-net-value, .kv-v');
@@ -1014,8 +1038,8 @@
         : 'Signals need ≥2 venues to move while a target lags. ') + 'Every card is a measured lag: no data, no signal — nothing is invented to fill the grid.';
     } else if (!state.filters.lowq && lowQualityCount() > 0) {
       var lq = lowQualityCount();
-      title.textContent = 'Nothing passed the quality check right now.';
-      sub.textContent = lq + ' active opportunit' + (lq === 1 ? 'y is' : 'ies are') + ' below the quality threshold (traded virtually for training). Tick "Show low quality" to see ' + (lq === 1 ? 'it' : 'them') + '.';
+      title.textContent = 'Nothing proven right now - the bot is training.';
+      sub.textContent = lq + ' active opportunit' + (lq === 1 ? 'y is' : 'ies are') + ' on pairs that have not proven themselves yet (or below quality); they are traded virtually so the bot learns. Tick "Show training / low quality" to see ' + (lq === 1 ? 'it' : 'them') + '.';
     } else {
       title.textContent = 'No opportunities match the current filters.';
       sub.textContent = active + ' active opportunit' + (active === 1 ? 'y is' : 'ies are') + ' hidden by the filters — press Reset to see everything.';
@@ -1058,6 +1082,7 @@
       h('span', { class: 'tag ' + (o.mode === 'live' ? 'live' : 'paper'), text: String(o.mode || '').toUpperCase() }),
       h('span', { class: 'state-badge', text: String(o.state || '').replace(/_/g, ' ') }),
       qualityBadge(o),
+      provenBadge(o),
       h('span', { class: 'card-target', title: 'target exchange: ' + exchangeLabel(o.target_exchange) }, 'TARGET: ', h('b', { text: exchangeLabel(o.target_exchange) }))));
 
     card.appendChild(h('div', { class: 'card-net' },
@@ -1076,6 +1101,8 @@
 
     var math = mathLine(o);
     if (math) card.appendChild(math);
+    var bs = bestSizeLine(o);
+    if (bs) card.appendChild(bs);
     var levLine = leverageLine(o);
     if (levLine) card.appendChild(levLine);
 
@@ -1355,7 +1382,7 @@
     });
     var autoBtn = h('button', {
       class: 'btn btn-auto', type: 'button', disabled: autoDisabled,
-      title: state.emergency ? 'EMERGENCY STOP active' : term ? 'opportunity is over' : !qualityPassed(o) ? 'below the quality threshold: AUTO is blocked' : botRed ? 'bot cannot execute this one' : exec ? 'already executing' : 'let the bot execute (revalidated first)',
+      title: state.emergency ? 'EMERGENCY STOP active' : term ? 'opportunity is over' : !provenOk(o) ? 'pair not proven yet: AUTO is blocked' : !qualityPassed(o) ? 'below the quality threshold: AUTO is blocked' : botRed ? 'bot cannot execute this one' : exec ? 'already executing' : 'let the bot execute (revalidated first)',
       text: 'AUTO', onclick: function () { openAuto(o.id); }
     });
     foot.appendChild(h('div', { class: 'card-actions' }, manualBtn, autoBtn));
@@ -1690,6 +1717,29 @@
         ['Virtual P&L', fmtMoney(s.pnl_quote || 0, displayQuote(), { sign: true })],
         ['Skipped', Object.keys(s.skipped || {}).map(function (k) { return k + ': ' + s.skipped[k]; }).join(', ') || '0']
       ]);
+      var rd = s.readiness || {};
+      var rb = $('ready-body');
+      clear(rb);
+      rb.appendChild(h('tr', null, h('td', { class: rd.ready ? 'pos' : 'neg', text: rd.ready ? 'READY for real money' : 'NOT READY yet' }),
+        h('td', { class: 'muted', text: rd.ready ? 'every check below passed on the virtual record' : 'keep training: the bot trades virtually until all checks pass' })));
+      (rd.checks || []).forEach(function (c) {
+        var v = c.value;
+        var txt = v == null ? '–' : (c.key === 'avg_net' || c.key === 'drawdown') ? fmtPct(num(v)) : c.key === 'proven_win_rate' ? rateOrDash(v) : String(v);
+        rb.appendChild(h('tr', null, h('td', { class: c.ok ? 'pos' : 'neg', text: (c.ok ? 'yes · ' : 'no · ') + c.label }), h('td', { class: 'num', text: txt })));
+      });
+      var pb = $('pairs-body');
+      clear(pb);
+      var pairs = d.pairs || [];
+      $('pairs-empty').classList.toggle('hidden', pairs.length > 0);
+      pairs.forEach(function (p) {
+        pb.appendChild(h('tr', null,
+          h('td', { text: p.asset + ' @ ' + exchangeLabel(p.target) }),
+          h('td', null, h('span', { class: 'proven-badge ' + p.status, text: p.status })),
+          h('td', { class: 'num', text: p.wins + '/' + p.n }),
+          h('td', { class: 'num', text: p.p10 == null ? '–' : (num(p.p10) * 100).toFixed(0) + '%' }),
+          h('td', { class: 'num ' + (num(p.avg_net_pct) >= 0 ? 'pos' : 'neg'), text: pctOrDash(p.avg_net_pct) }),
+          h('td', { class: 'wrap muted', text: p.text || '' })));
+      });
       var sb = $('strategy-body');
       clear(sb);
       [['target', s.by_target || {}], ['asset', s.by_asset || {}]].forEach(function (pair) {

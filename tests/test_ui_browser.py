@@ -240,6 +240,7 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             assert "$" not in await page.locator("#tsum-body").inner_text()  # money in the venue's EUR, not '$'
             assert "€" in await page.locator("#shadow-sum-body").inner_text()
             assert "Virtual balance" in await page.locator("#shadow-sum-body").inner_text()  # training balance shown
+            assert "READY" in await page.locator("#ready-body").inner_text()  # live-readiness checklist renders
             # "New period": statistics count from now on, history stays
             assert "since" in await page.locator("#shadow-period").inner_text()
             before = b.ctx.shadow.period_start_ts

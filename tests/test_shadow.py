@@ -142,6 +142,7 @@ async def test_virtual_balance_grows_with_closed_trades_and_limits_new_ones():
 async def test_no_free_virtual_balance_skips_the_trade():
     env = Env()
     env.settings.shadow_balance_quote = 10.0  # less than one trade's stake
+    env.settings.shadow_unlimited = False  # a limited virtual account (the owner's training default is unlimited)
     sh = ShadowTrader(env.settings, env.bus, env.clock)
     await detect(env)
     assert sh.trades() == [] and sh.skipped.get("no free virtual balance") == 1

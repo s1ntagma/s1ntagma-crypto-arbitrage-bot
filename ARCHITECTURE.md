@@ -1076,3 +1076,11 @@ margin venue); `recommended` includes the venue.  Funding (perp) = notional·rat
   (`ExecutionEngine._ride_exit`: one MARKET exit through place_order; emergency / cancel / stale prices
   also exit).  Learning barriers: stop → "stop", others → "time" (win iff NET > 0); `exit_kind` keeps the
   reason.
+* **Proven pairs** (`engine/proven.py` `ProvenBook`): per (strategy, asset, target) counts of closed
+  virtual trades (strategy = ride / simple / full, `ShadowTrade.strategy`); proven = n ≥
+  `proven_min_trades`, Beta(1+w, 1+l) 10th percentile ≥ `proven_min_p10`, avg NET >
+  `proven_min_avg_net_pct`; failing = n ≥ min and (90th percentile < 0.5 or avg NET ≤ 0).  `opp.proven`
+  (enforced in simple mode with `proven_gate_enabled`) gates the board, Telegram and AUTO revalidation;
+  shadow trades every offer.  `Pipeline._best_size` → `opp.best_size` (largest expected NET in money over
+  `best_size_multipliers` × capital on the book); with `shadow_unlimited` the virtual trade opens at that
+  size without a balance check.  `ShadowTrader.summary()["readiness"]` = the live checklist.

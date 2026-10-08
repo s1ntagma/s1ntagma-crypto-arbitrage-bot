@@ -91,6 +91,8 @@ class Pipeline:
         # meta-label store (learned outcomes of comparable situations); None -> not available.
         self.context: Any = None
         self.metalabel: Any = None
+        self.proven: Any = None  # engine/proven.ProvenBook (set by the app)
+        self._best_size_mono: dict[str, float] = {}
         self.pool_skipped: set[str] = set()  # assets seen but not scanned (outside the pool), for DIAG
         self._stats = stats
         self._opps = opps
@@ -444,6 +446,8 @@ class Pipeline:
             opp.last_update_ts = clock.wall()
             opp.plan = build_plan(opp, settings, names, clock.mono(), opp.last_update_ts)
             self._score(opp)
+            self._prove(opp)
+            self._best_size(opp)
 
         return enrich
 
@@ -457,6 +461,55 @@ class Pipeline:
         except Exception:  # noqa: BLE001 - context never blocks a signal
             log.exception("context.%s failed", name)
             return None
+
+    def _prove(self, opp: Opportunity) -> None:
+        """Has this (asset, venue) pair proven itself on the bot's own virtual trades?"""
+        book = self.proven
+        if book is None:
+            return
+        try:
+            opp.proven = book.assess(opp.asset, opp.target_exchange)
+        except Exception:  # noqa: BLE001 - a bookkeeping bug must never hide a real opportunity
+            log.exception("proven assessment failed for %s", opp.id)
+
+    def _best_size(self, opp: Opportunity) -> None:
+        """Simple mode: the stake with the largest expected NET in money on the current book (training
+        sizes its virtual trades with it).  Recomputed at most once a second per opportunity."""
+        s = self._settings
+        if not s.simple_mode:
+            return
+        now = self._clock.mono()
+        last = self._best_size_mono.get(opp.id)
+        if opp.best_size and last is not None and now - last < 1.0:
+            return
+        book = self._state.book(opp.target_exchange, opp.asset)
+        if book is None or not book.bids or not book.asks:
+            return
+        cached = self._fees_cache.get((opp.target_exchange, book.symbol))
+        cfg = s.exchange(opp.target_exchange)
+        fees = cached[1] if cached else (Fees(maker=cfg.maker_fee, taker=cfg.taker_fee) if cfg else None)
+        if fees is None:
+            return
+        best = None
+        for mult in s.best_size_multipliers or [1.0]:
+            try:
+                e = compute_economics(book, opp.direction, fees, float(s.capital_quote) * float(mult),
+                                      opp.signal.expected_catchup_pct, s, now)
+            except Exception:  # noqa: BLE001
+                continue
+            if e.executable_quote <= 0 or e.net_pct < s.min_net_pct_show:
+                continue
+            if best is None or e.net_quote > best.net_quote:
+                best = e
+        if len(self._best_size_mono) > 2000:
+            self._best_size_mono.clear()
+        self._best_size_mono[opp.id] = now
+        opp.best_size = {} if best is None else {
+            "capital_quote": best.executable_quote, "base_amount": best.base_amount, "entry_vwap": best.entry_vwap,
+            "exit_vwap_now": best.exit_vwap_now, "exit_target": best.exit_target, "net_pct": best.net_pct,
+            "net_quote": best.net_quote, "entry_fee_pct": best.entry_fee_pct, "exit_fee_pct": best.exit_fee_pct,
+            "execution_loss_pct": best.execution_loss_pct,
+        }
 
     def _score(self, opp: Opportunity) -> None:
         """Phase 3: quality report + leverage plan on the latest economics (pure, in-memory)."""

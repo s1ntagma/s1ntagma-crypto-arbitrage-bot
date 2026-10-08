@@ -112,7 +112,7 @@
               <option value="red">red</option>
             </select>
           </label>
-          <label class="check filter-check"><input id="f-lowq" type="checkbox"> <span>Show low quality</span></label>
+          <label class="check filter-check"><input id="f-lowq" type="checkbox"> <span>Show training / low quality</span></label>
           <button id="filters-reset" class="btn btn-ghost btn-sm" type="button">Reset</button>
         </div>
       </div>
@@ -245,6 +245,20 @@
         </div>
       </div>
       <div class="diag-block">
+        <h3 class="diag-title">READY FOR REAL MONEY?</h3>
+        <table class="table table-compact"><tbody id="ready-body"></tbody></table>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">PAIRS · proven / training / failing (virtual trades of the current strategy)</h3>
+        <div class="table-wrap">
+          <table class="table" id="pairs-table">
+            <thead><tr><th>Pair</th><th>Status</th><th class="num">Wins</th><th class="num">Worst-case win rate</th><th class="num">Avg NET</th><th>Why</th></tr></thead>
+            <tbody id="pairs-body"></tbody>
+          </table>
+        </div>
+        <p id="pairs-empty" class="muted hidden">No closed virtual trades of the current strategy yet: pairs appear here as the bot trains.</p>
+      </div>
+      <div class="diag-block">
         <h3 class="diag-title">LATEST SHADOW TRADES</h3>
         <div class="table-wrap">
           <table class="table" id="shadow-table">
@@ -368,6 +382,12 @@
           <input type="number" name="min_quality_score" step="1" min="0" max="100" inputmode="numeric"></label>
         <label class="field"><span class="field-label">Training: virtual balance (stakes come out of it; New period restarts it)</span>
           <input type="number" name="shadow_balance_quote" step="any" min="10" inputmode="decimal"></label>
+        <label class="check"><input type="checkbox" name="shadow_unlimited"> <span>Training on unlimited virtual money (each offer at its best size)</span></label>
+        <label class="check"><input type="checkbox" name="proven_gate_enabled"> <span>Offer only proven pairs (board, Telegram, AUTO); the rest keeps training</span></label>
+        <label class="field"><span class="field-label">Proven: at least N virtual trades on the pair</span>
+          <input type="number" name="proven_min_trades" step="any" min="5" inputmode="numeric"></label>
+        <label class="field"><span class="field-label">Proven: worst-case win rate (0.60 = 60%)</span>
+          <input type="number" name="proven_min_p10" step="any" min="0.3" max="0.99" inputmode="decimal"></label>
         <label class="field"><span class="field-label">Training: virtual trade from NET %</span>
           <input type="number" name="shadow_min_net_pct" step="0.05" min="0" inputmode="decimal"></label>
         <label class="field"><span class="field-label">Max leverage (advice; spot venues stay 1x)</span>

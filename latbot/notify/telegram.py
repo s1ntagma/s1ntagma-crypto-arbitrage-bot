@@ -399,6 +399,9 @@ class TelegramNotifier:
         quality = getattr(opp, "quality", None)
         if isinstance(quality, dict) and quality and quality.get("enforced", True) and not quality.get("passed", False):
             return False  # Phase 3: only signals that passed the quality check (score + no veto); simple mode: info only
+        proven = getattr(opp, "proven", None)
+        if isinstance(proven, dict) and proven and proven.get("enforced") and not proven.get("proven"):
+            return False  # simple mode: only pairs that proved themselves on virtual trades are announced
         if opp.id in self._messages or opp.telegram_message_id is not None:
             return False
         return True

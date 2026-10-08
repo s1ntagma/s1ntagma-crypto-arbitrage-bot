@@ -281,7 +281,12 @@ def build_context(
     adapters = build_market_adapters(settings, secrets, bus, clock, adapter_factory=adapter_factory)
     pipeline = Pipeline(settings, bus, clock, state, detector, stats, opps, adapters, duration, db=db, diag=diag)
     metalabel = MetaLabelStore(settings, clock, db=db)
-    shadow = ShadowTrader(settings, bus, clock, db=db, diag=diag, metalabel=metalabel, market=pipeline.market_view)
+    from .engine.proven import ProvenBook
+
+    proven = ProvenBook(settings, db=db)
+    pipeline.proven = proven
+    shadow = ShadowTrader(settings, bus, clock, db=db, diag=diag, metalabel=metalabel, market=pipeline.market_view,
+                          proven=proven)
     pipeline.sweep_listeners.append(shadow.tick)  # ride the leader: virtual positions checked every sweep
     pipeline.metalabel = metalabel
     listings: dict[str, dict[str, float | None]] = {}

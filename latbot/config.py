@@ -303,6 +303,18 @@ class Settings:
     # Training: every opportunity with NET >= this is traded virtually (shadow), whatever its quality.
     shadow_min_net_pct: float = 0.1
     shadow_balance_quote: float = 1000.0  # virtual training balance: stakes come out of it, results go back in
+    shadow_unlimited: bool = True  # training on unlimited virtual money: no free-balance check, best size per offer
+    best_size_multipliers: list[float] = field(default_factory=lambda: [0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0])
+    # PROVEN PAIRS (simple mode): only (asset, venue) pairs whose own virtual trades proved themselves are
+    # offered on the board, in Telegram and to AUTO; everything else keeps training (engine/proven.py)
+    proven_gate_enabled: bool = True
+    proven_min_trades: int = 30
+    proven_min_p10: float = 0.60  # worst-case (10th percentile) win probability
+    proven_min_avg_net_pct: float = 0.05
+    # LIVE readiness checklist (Stats)
+    ready_min_trades: int = 200
+    ready_max_drawdown_pct: float = 5.0  # on the cumulative NET % curve (size-independent)
+    ready_min_proven_win_rate: float = 0.60
     shadow_stop_pct: float = 1.0  # shadow stop barrier when the leverage plan has no stop
     # quality score (engine/quality.py) - fixed, documented weights; never fitted to past trades
     min_quality_score: int = 60  # below: hidden by default, no Telegram, no AUTO (still shadow-traded)

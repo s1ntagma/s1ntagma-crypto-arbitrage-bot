@@ -28,6 +28,7 @@ from typing import Any
 
 from .. import events
 from .exit_policy import RideConfig, RidePosition, decide
+from .proven import current_strategy
 from ..models import TERMINAL_STATES, Opportunity, OppState
 
 PERIOD_KEY = "stats_period_start_ts"  # kv: Stats count virtual trades opened from here on (history stays)
@@ -74,6 +75,8 @@ class ShadowTrade:
     stop_price: float = 0.0
     barrier: str = ""  # "target" | "stop" | "time" | "no_data" (closed without a fresh price: not learned)
     exit_kind: str = ""  # ride the leader: stop / leader_reversed / caught_up / trailing / max_hold
+    strategy: str = ""  # exit logic it was traded with (ride / simple / full): proven pairs count only their own
+    proven_at_entry: bool = False  # the pair was proven when this trade was opened (readiness: proven-only win rate)
     pnl_leveraged_quote: float | None = None
 
     def net_at(self, exit_price: float) -> float:
@@ -92,7 +95,7 @@ class ShadowTrader:
     """Subscribes to OPP_NEW / OPP_UPDATE / OPP_STATE; no network, no orders."""
 
     def __init__(self, settings: Any, bus: events.EventBus, clock: Any, db: Any | None = None, diag: Any | None = None,
-                 metalabel: Any | None = None, market: Any | None = None) -> None:
+                 metalabel: Any | None = None, market: Any | None = None, proven: Any | None = None) -> None:
         self._settings = settings
         self._bus = bus
         self._clock = clock
@@ -100,6 +103,7 @@ class ShadowTrader:
         self._diag = diag
         self._metalabel = metalabel
         self._market = market  # Pipeline.market_view: prices for positions that outlive their opportunity
+        self._proven = proven  # engine/proven.ProvenBook: every closed result counts for its pair
         self._ride: dict[str, RidePosition] = {}
         self._open: dict[str, ShadowTrade] = {}
         self._closed: list[ShadowTrade] = []
@@ -144,28 +148,36 @@ class ShadowTrader:
         if float(e.net_pct) < float(getattr(self._settings, "shadow_min_net_pct", 0.1)):
             self._skip("NET below training threshold")
             return
-        if float(e.executable_quote) > self._free_balance() + 1e-9:
+        size = _best_size(opp)
+        stake = float(size["capital_quote"]) if size else float(e.executable_quote)
+        if not getattr(self._settings, "shadow_unlimited", False) and stake > self._free_balance() + 1e-9:
             self._skip("no free virtual balance")  # like a real account: open stakes are not available
             return
         now = self._clock.wall()
         quality = opp.quality if isinstance(getattr(opp, "quality", None), dict) else {}
         lev = opp.leverage if isinstance(getattr(opp, "leverage", None), dict) else {}
         stop_pct = _positive(lev.get("stop_pct")) or float(getattr(self._settings, "shadow_stop_pct", 1.0))
+        src = size or {"entry_vwap": e.entry_vwap, "base_amount": e.base_amount, "capital_quote": e.executable_quote,
+                       "entry_fee_pct": e.entry_fee_pct, "exit_fee_pct": e.exit_fee_pct,
+                       "execution_loss_pct": e.execution_loss_pct, "net_pct": e.net_pct,
+                       "exit_target": e.exit_target, "exit_vwap_now": e.exit_vwap_now}
+        proven = opp.proven if isinstance(getattr(opp, "proven", None), dict) else {}
         t = ShadowTrade(
             id=opp.id, asset=opp.asset, target=opp.target_exchange, symbol=opp.target_symbol,
             quote=getattr(opp, "quote", "") or opp.signal.target_quote, first_mover=opp.first_mover,
-            direction=int(opp.direction), opened_ts=now, entry_price=float(e.entry_vwap),
-            base_amount=float(e.base_amount), capital_quote=float(e.executable_quote),
-            entry_fee_pct=float(e.entry_fee_pct), exit_fee_pct=float(e.exit_fee_pct),
-            execution_loss_pct=float(e.execution_loss_pct), expected_net_pct=float(e.net_pct),
-            exit_target=float(e.exit_target), last_exit_price=float(e.exit_vwap_now), last_update_ts=now,
+            direction=int(opp.direction), opened_ts=now, entry_price=float(src["entry_vwap"]),
+            base_amount=float(src["base_amount"]), capital_quote=float(src["capital_quote"]),
+            entry_fee_pct=float(src["entry_fee_pct"]), exit_fee_pct=float(src["exit_fee_pct"]),
+            execution_loss_pct=float(src["execution_loss_pct"]), expected_net_pct=float(src["net_pct"]),
+            exit_target=float(src["exit_target"]), last_exit_price=float(src["exit_vwap_now"]), last_update_ts=now,
+            strategy=current_strategy(self._settings), proven_at_entry=bool(proven.get("proven")),
             lag_pct=float(getattr(opp.signal, "lag_pct", 0.0) or 0.0),
             quality_score=_number(quality.get("score")), grade=str(quality.get("grade") or ""),
             btc_vol_pctile=_number(quality.get("btc_vol_pctile")),
             leverage_max=_positive(lev.get("max_by_signal")) or 1.0,
             stop_pct=stop_pct,
             # measured on the exit side (what the trade would be sold at), so the spread does not eat the stop
-            stop_price=float(e.exit_vwap_now) * (1.0 - int(opp.direction) * stop_pct / 100.0),
+            stop_price=float(src["exit_vwap_now"]) * (1.0 - int(opp.direction) * stop_pct / 100.0),
         )
         t.max_net_pct = t.net_at(t.last_exit_price)
         self._open[opp.id] = t
@@ -297,6 +309,11 @@ class ShadowTrader:
         t.pnl_leveraged_quote = t.pnl_quote * max(1.0, t.leverage_max)
         self._save(t)
         self._learn(t)
+        if self._proven is not None:
+            try:
+                self._proven.record(t.to_dict())
+            except Exception:  # noqa: BLE001
+                log.exception("proven record failed for shadow trade %s", t.id)
         log.info("shadow close %s %s@%s net %+.2f%% (expected %+.2f%%) - %s",
                  t.id, t.asset, t.target, t.actual_net_pct, t.expected_net_pct, reason)
 
@@ -391,6 +408,9 @@ class ShadowTrader:
         cur = rows if start is None else [r for r in rows if float(r.get("opened_ts") or 0.0) >= start]
         out = summarize(cur)
         out.update(_balance_stats(cur, self._balance_start(), self._clock.wall()))
+        counts = self._proven.counts() if self._proven is not None and hasattr(self._proven, "counts") else {}
+        out["proven_pairs"] = counts
+        out["readiness"] = _readiness(cur, counts, self._settings)
         out["skipped"] = dict(self.skipped)
         out["period_start_ts"] = start
         out["all_time_closed"] = sum(1 for r in rows if r.get("closed_ts") is not None)
@@ -421,6 +441,55 @@ def _stats(closed: list[dict[str, Any]]) -> dict[str, Any]:
         "stopped": sum(1 for r in closed if r.get("barrier") == "stop"),
         "pnl_leveraged_quote": sum(float(r.get("pnl_leveraged_quote") or r.get("pnl_quote") or 0.0) for r in closed),
     }
+
+
+def _best_size(opp: Opportunity) -> dict[str, Any] | None:
+    """The stake with the largest expected NET on the book (Pipeline._best_size), when it is usable."""
+    size = getattr(opp, "best_size", None)
+    if not isinstance(size, dict) or not size:
+        return None
+    try:
+        if float(size["capital_quote"]) > 0 and float(size["entry_vwap"]) > 0 and float(size["exit_vwap_now"]) > 0:
+            return size
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _readiness(rows: list[dict[str, Any]], proven: dict[str, int], s: Any) -> dict[str, Any]:
+    """Is the measured record good enough to trade real money?  Each line says what it needs."""
+    nets = [float(r["actual_net_pct"]) for r in sorted(
+        (r for r in rows if r.get("closed_ts") is not None and r.get("actual_net_pct") is not None),
+        key=lambda r: float(r.get("closed_ts") or 0.0))]
+    n = len(nets)
+    mean = sum(nets) / n if n else None
+    lower = None
+    if n >= 2:
+        sd = (sum((x - mean) ** 2 for x in nets) / (n - 1)) ** 0.5
+        lower = mean - 1.2816 * sd / n ** 0.5  # one-sided 90 % lower bound of the average NET
+    equity = peak = dd = 0.0
+    for x in nets:
+        equity += x
+        peak = max(peak, equity)
+        dd = max(dd, peak - equity)
+    pr = [r for r in rows if r.get("proven_at_entry") and r.get("actual_net_pct") is not None]
+    pr_wr = sum(1 for r in pr if float(r["actual_net_pct"]) > 0) / len(pr) if pr else None
+    need_n = int(getattr(s, "ready_min_trades", 200))
+    max_dd = float(getattr(s, "ready_max_drawdown_pct", 5.0))
+    min_wr = float(getattr(s, "ready_min_proven_win_rate", 0.6))
+    checks = [
+        {"key": "trades", "label": f"at least {need_n} virtual trades in this period", "ok": n >= need_n, "value": n},
+        {"key": "proven", "label": "at least one proven pair", "ok": proven.get("proven", 0) >= 1,
+         "value": proven.get("proven", 0)},
+        {"key": "avg_net", "label": "average NET above 0 with 90% confidence", "ok": lower is not None and lower > 0,
+         "value": lower},
+        {"key": "drawdown", "label": f"max drawdown at most {max_dd:g}% (sum of NET %)", "ok": n > 0 and dd <= max_dd,
+         "value": dd},
+        {"key": "proven_win_rate", "label": f"win rate on proven pairs at least {min_wr * 100:.0f}%",
+         "ok": pr_wr is not None and pr_wr >= min_wr, "value": pr_wr},
+    ]
+    return {"ready": all(c["ok"] for c in checks), "checks": checks, "avg_net_pct": mean, "avg_net_lower_pct": lower,
+            "drawdown_pct": dd, "proven_trades": len(pr)}
 
 
 def _balance_stats(rows: list[dict[str, Any]], start: float, now_wall: float) -> dict[str, Any]:
