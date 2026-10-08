@@ -533,6 +533,10 @@ class Opportunity:
     human_total: int = 0
     last_update_ts: float = 0.0  # wall clock of the last upsert / refresh
     plan: dict = field(default_factory=dict)  # Russian trading plan (explain.build_plan), key -> line
+    # Phase 3: signal quality (engine.quality.QualityReport.to_dict) and leverage plan
+    # (engine.leverage.LeveragePlan.to_dict); empty when not computed.
+    quality: dict = field(default_factory=dict)
+    leverage: dict = field(default_factory=dict)
 
     def age_s(self, now_mono: float) -> float:
         return max(0.0, now_mono - self.first_seen_mono)

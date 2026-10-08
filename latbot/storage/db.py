@@ -111,6 +111,40 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     json TEXT NOT NULL
 );
+
+-- Phase 3: market context and learning (measurements only)
+CREATE TABLE IF NOT EXISTS news_items (
+    id TEXT PRIMARY KEY,
+    ts REAL,
+    json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_news_ts ON news_items(ts);
+
+CREATE TABLE IF NOT EXISTS event_reactions (
+    event_key TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    horizon_s INTEGER NOT NULL,
+    event_type TEXT,
+    event_ts REAL,
+    json TEXT NOT NULL,
+    PRIMARY KEY (event_key, asset, horizon_s)
+);
+CREATE INDEX IF NOT EXISTS ix_reactions_ts ON event_reactions(event_ts);
+
+CREATE TABLE IF NOT EXISTS deriv_samples (
+    asset TEXT NOT NULL,
+    venue TEXT NOT NULL,
+    ts REAL NOT NULL,
+    json TEXT NOT NULL,
+    PRIMARY KEY (asset, venue, ts)
+);
+
+CREATE TABLE IF NOT EXISTS metalabel_outcomes (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT UNIQUE,
+    ts REAL,
+    json TEXT NOT NULL
+);
 """
 
 
@@ -444,6 +478,73 @@ class Database:
             if isinstance(d, dict):
                 out.append(d)
         return out
+
+    # ---- Phase 3: context + learning ----------------------------------------
+    def _json_rows(self, sql: str, args: tuple[Any, ...]) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        out = []
+        for r in rows:
+            d = self._load(r["json"])
+            if isinstance(d, dict):
+                out.append(d)
+        return out
+
+    def save_news(self, item: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO news_items (id, ts, json) VALUES (?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET ts=excluded.ts, json=excluded.json",
+                (str(item["id"]), item.get("ts"), json.dumps(item, ensure_ascii=False, default=_json_default)),
+            )
+
+    def list_news(self, since_ts: float | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        """Newest first."""
+        if since_ts is None:
+            return self._json_rows("SELECT json FROM news_items ORDER BY ts DESC LIMIT ?", (int(limit),))
+        return self._json_rows("SELECT json FROM news_items WHERE ts >= ? ORDER BY ts DESC LIMIT ?", (float(since_ts), int(limit)))
+
+    def save_event_reaction(self, row: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO event_reactions (event_key, asset, horizon_s, event_type, event_ts, json) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(event_key, asset, horizon_s) DO UPDATE SET event_type=excluded.event_type, "
+                "event_ts=excluded.event_ts, json=excluded.json",
+                (str(row["event_key"]), str(row["asset"]), int(row["horizon_s"]), row.get("event_type"), row.get("event_ts"),
+                 json.dumps(row, ensure_ascii=False, default=_json_default)),
+            )
+
+    def load_event_reactions(self, limit: int = 20000) -> list[dict[str, Any]]:
+        """The most recent ``limit`` samples, oldest first."""
+        rows = self._json_rows("SELECT json FROM event_reactions ORDER BY event_ts DESC, horizon_s DESC LIMIT ?", (int(limit),))
+        rows.reverse()
+        return rows
+
+    def save_deriv_sample(self, row: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO deriv_samples (asset, venue, ts, json) VALUES (?, ?, ?, ?)",
+                (str(row["asset"]), str(row.get("venue") or ""), float(row["ts"]), json.dumps(row, ensure_ascii=False, default=_json_default)),
+            )
+
+    def load_deriv_samples(self, asset: str, since_ts: float) -> list[dict[str, Any]]:
+        """Oldest first."""
+        return self._json_rows("SELECT json FROM deriv_samples WHERE asset = ? AND ts >= ? ORDER BY ts ASC", (str(asset), float(since_ts)))
+
+    def save_metalabel_outcome(self, row: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO metalabel_outcomes (id, ts, json) VALUES (?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET ts=excluded.ts, json=excluded.json",
+                (str(row["id"]) if row.get("id") is not None else None, row.get("ts"),
+                 json.dumps(row, ensure_ascii=False, default=_json_default)),
+            )
+
+    def load_metalabel_outcomes(self, limit: int = 20000) -> list[dict[str, Any]]:
+        """The most recent ``limit`` outcomes, oldest first."""
+        rows = self._json_rows("SELECT json FROM metalabel_outcomes ORDER BY seq DESC LIMIT ?", (int(limit),))
+        rows.reverse()
+        return rows
 
     def journal_summary(self) -> dict[str, dict[str, Any]]:
         """trade_id -> {note, screenshots, analyzed} for the trades table."""

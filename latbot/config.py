@@ -173,8 +173,13 @@ DEFAULT_EXCHANGES: list[ExchangeConfig] = [
 # --------------------------------------------------------------------------- #
 # Runtime settings (public, user-tunable)
 # --------------------------------------------------------------------------- #
+# Bumped when a saved config.json needs a one-time upgrade (see Settings._migrate).
+CONFIG_VERSION = 3
+
+
 @dataclass
 class Settings:
+    config_version: int = CONFIG_VERSION
     # ---- modes -----------------------------------------------------------
     paper_mode: bool = True  # PAPER_MODE: execution engine uses paper adapters
     live_mode: bool = False  # LIVE_MODE: allow real orders (requires keys)
@@ -209,7 +214,7 @@ class Settings:
     # ---- signal quality --------------------------------------------------
     min_movers: int = 2  # at least this many exchanges must have moved (single-venue spikes revert)
     min_mover_volume_quote: float = 1_000_000.0  # 24h quote volume for a mover exchange to count
-    min_target_volume_quote: float = 100_000.0  # 24h quote volume on the target market
+    min_target_volume_quote: float = 500_000.0  # 24h quote volume on the target market (owner: >= ~500k)
     alert_human_only: bool = True  # Telegram only when HUMAN light != RED (owner trades by hand)
 
     # ---- human / bot execution ------------------------------------------
@@ -310,11 +315,25 @@ class Settings:
             e["role"] = e["role"].value if isinstance(e["role"], ExchangeRole) else e["role"]
         return json.dumps(d, indent=2, ensure_ascii=False)
 
+    @staticmethod
+    def _migrate(data: dict[str, Any]) -> dict[str, Any]:
+        """One-time upgrade of a config.json written by an older build."""
+        data = dict(data)
+        version = int(data.get("config_version") or 1)
+        if version < 3:
+            # Phase 3 (owner): target turnover >= ~500k (only the old default is raised, a custom value stays);
+            # training = every opportunity with NET >= 0.1 % is shadow-traded.
+            if float(data.get("min_target_volume_quote", 100_000.0)) == 100_000.0:
+                data["min_target_volume_quote"] = 500_000.0
+            data["min_net_pct_show"] = 0.1
+        data["config_version"] = CONFIG_VERSION
+        return data
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Settings":
         known = {f.name for f in fields(cls)}
         clean: dict[str, Any] = {}
-        for k, v in data.items():
+        for k, v in cls._migrate(data).items():
             if k not in known:
                 continue
             if k == "exchanges":
