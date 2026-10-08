@@ -99,14 +99,27 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             await page.click("#filters-reset")
             await page.wait_for_selector(".card", timeout=3000)
 
-            # 4. MANUAL: support -> entered -> trade row with JOURNAL
-            await card.locator("button.btn-manual").click()
-            await page.wait_for_selector("#modal-manual:not(.hidden)", timeout=3000)
-            await page.wait_for_selector("#modal-manual form button[type=submit]", timeout=5000)
-            await page.click("#modal-manual form button[type=submit]")
+            # 4. MANUAL TRADE SESSION: Я ЗАШЁЛ -> amount -> exact plan -> Я КУПИЛ -> escort; collapse keeps the position
+            btn = card.locator("button.btn-manual")
+            assert "Я ЗАШЁЛ" in await btn.inner_text()
+            await btn.click()
+            await page.wait_for_selector("#modal-manual:not(.hidden) input[name='capital']", timeout=5000)
+            assert await page.evaluate("document.body.classList.contains('in-session')")
+            await page.fill("#modal-manual input[name='capital']", "50")
+            await page.click("#modal-manual button:has-text('ПОКАЗАТЬ ТОЧНЫЙ ПЛАН')")
+            await page.wait_for_selector("#modal-manual button:has-text('Я КУПИЛ')", timeout=5000)
+            plan = (await page.locator("#manual-body").inner_text()).lower()  # labels are uppercased by CSS
+            assert "купить" in plan and "потом продать" in plan and "ожидаемо" in plan and "≤" in plan and "≥" in plan
+            assert "0.49995 btc" in plan  # exactly 50 EUR worth on the real book
+            href = await page.locator("#modal-manual a.btn-open").get_attribute("href")
+            assert href and "kraken" in href
+            assert await page.locator("#modal-manual input[name='quote_amount']").input_value() == "50"
+            await page.click("#modal-manual button:has-text('Я КУПИЛ')")
             await wait_for(lambda: b.ctx.risk.open_trades() == 1, timeout=5.0)
-            await page.wait_for_selector("#modal-manual:has-text('SOLD'), #modal-manual:has-text('BOUGHT BACK')", timeout=5000)
-            await page.click("#manual-close")
+            await page.wait_for_selector("#modal-manual .escort:has-text('ЖДИ')", timeout=5000)
+            await page.click("#manual-close")  # Свернуть: the position stays
+            assert not await page.evaluate("document.body.classList.contains('in-session')")
+            await page.wait_for_selector(".card button.btn-manual:has-text('СДЕЛКА')", timeout=5000)
             await page.click("button.tab[data-tab='trades']")
             await page.wait_for_selector("#trades-body tr", timeout=5000)
             row = page.locator("#trades-body tr").first
@@ -147,6 +160,24 @@ async def test_terminal_controls_do_real_work(tmp_path: Path) -> None:
             assert "BTC" in await page.locator("#shadow-body").inner_text()
             assert "ON" in await page.locator("#shadow-sum-body").inner_text()
             assert "Trades" in await page.locator("#tsum-body").inner_text()
+
+            # 8. the session comes back by itself after a reload, escorts to the target, saves the actual result
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_selector("#modal-manual:not(.hidden) .escort", timeout=8000)
+            b.clock.advance(0.3)
+            await push_all(b.fakes, {"kraken": 101.6})
+            await page.wait_for_selector("#modal-manual .escort:has-text('ПРОДАВАЙ СЕЙЧАС')", timeout=5000)
+            await page.click("#modal-manual button:has-text('Я УШЁЛ СО СДЕЛКИ')")
+            await page.fill("#modal-manual input[name='reported_pnl_quote']", "0.4")
+            await page.fill("#modal-manual textarea[name='note']", "вышел по цели")
+            await page.click("#modal-manual button:has-text('СОХРАНИТЬ РЕЗУЛЬТАТ')")
+            await page.wait_for_selector("#modal-manual:has-text('Сделка завершена и сохранена')", timeout=5000)
+            closed = b.ctx.db.get_trade(trade_id)
+            assert closed["state"] == "CLOSED" and closed["user_reported_pnl_quote"] == 0.4 and closed["user_note"] == "вышел по цели"
+            await page.click("#modal-manual button:has-text('К МОНИТОРИНГУ')")
+            await page.wait_for_selector("#modal-manual.hidden", state="attached", timeout=5000)
+            assert not await page.evaluate("document.body.classList.contains('in-session')")
+            assert b.ctx.risk.open_trades() == 0
 
             # 8. EMERGENCY STOP: confirm dialog -> server flag -> banner
             await page.click("#emergency-btn")

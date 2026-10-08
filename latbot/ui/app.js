@@ -929,8 +929,8 @@
     var autoDisabled = term || exec || botRed || state.emergency || manualMine;
     var manualBtn = h('button', {
       class: 'btn btn-manual', type: 'button', disabled: manualDisabled,
-      title: term ? 'opportunity is over' : manualOpen ? 'open manual position: report your exit price' : humanRed ? 'too fast for a human' : exec ? 'already executing' : 'trade it by hand with live support',
-      text: manualMine ? (state.manual.phase === 'sell' ? 'MANUAL · SELL ▸' : 'MANUAL ▸') : manualOpen ? 'MANUAL · SELL ▸' : 'MANUAL',
+      title: term ? 'opportunity is over' : manualOpen ? 'открытая ручная сделка: вернуться к сопровождению' : humanRed ? 'too fast for a human' : exec ? 'already executing' : 'зайти в сделку вручную: бот проведёт по шагам',
+      text: manualMine || manualOpen ? 'СДЕЛКА ▸' : 'Я ЗАШЁЛ',
       onclick: function () { openManual(o.id); }
     });
     var autoBtn = h('button', {
@@ -955,7 +955,7 @@
       if (isExecuting(t.state) && !t.entry_order && t.opportunity_id) {
         // Open MANUAL position (no entry order = bought by hand): second entry point to report the exit.
         stateCell.appendChild(h('button', {
-          class: 'btn btn-manual btn-sm', type: 'button', text: 'REPORT EXIT', title: 'open manual position: report your exit price',
+          class: 'btn btn-manual btn-sm', type: 'button', text: 'СДЕЛКА ▸', title: 'открытая ручная сделка: вернуться к сопровождению',
           onclick: function () { openManual(t.opportunity_id); }
         }));
       }
@@ -1327,12 +1327,41 @@
     });
   }
 
-  // ------------------------------------------------------------------ MANUAL modal
+  // ------------------------------------------------------------------ MANUAL TRADE SESSION
+  // "Я ЗАШЁЛ" -> amount -> exact plan -> "Я КУПИЛ" -> escort -> "Я УШЁЛ СО СДЕЛКИ" -> actual result
+  // -> saved -> back to monitoring.  The screen belongs to this one trade; the board keeps updating
+  // underneath (nothing is lost) and gets the full focus back when the trade is saved.
+  var SESSION_RETURN_S = 8;
+  var AMOUNT_CHIPS = [25, 50, 100, 250];
+
   function openManualTrade(id) {
     // A MANUAL position restored after a restart: the card is gone, the trade (EXECUTING, no entry order) is not.
     var found = null;
     state.trades.forEach(function (t) { if (t && t.opportunity_id === id && isExecuting(t.state) && !t.entry_order) found = t; });
     return found;
+  }
+
+  function inPosition(m) { return !!m && (m.phase === 'sell' || m.phase === 'result'); }
+
+  function lastAmount() {
+    try {
+      var v = num(window.localStorage.getItem('latbot.manualAmount'));
+      if (v > 0) return v;
+    } catch (e) { /* storage blocked: fall back to the settings */ }
+    var c = num(state.settings && state.settings.capital_quote);
+    return c > 0 ? c : 100;
+  }
+
+  function rememberAmount(v) {
+    try { window.localStorage.setItem('latbot.manualAmount', String(v)); } catch (e) { /* storage blocked */ }
+  }
+
+  function sessionOpen(on) { document.body.classList.toggle('in-session', !!on); }
+
+  function assetName(o, s) {
+    if (o && o.asset) return o.asset;
+    var sym = (s && s.symbol) || '';
+    return sym.split('/')[0] || '';
   }
 
   function openManual(id) {
@@ -1341,26 +1370,30 @@
     var m = state.manual;
     if (m && m.id === id && m.phase !== 'done') {
       showModal('manual');
+      sessionOpen(true);
       renderManual(true);
       startManualPoll();
       return;
     }
-    if (m && m.phase === 'sell') {
-      toast('Finish the open manual position (' + m.id + ') first.', 'warn');
+    if (inPosition(m)) {
+      toast('Сначала заверши открытую сделку — она снова на экране.', 'warn');
+      openManual(m.id);
       return;
     }
     stopManualPoll();
     api('POST', oppPath(id, '/manual')).then(function (r) {
-      if (!r.ok) { toast('MANUAL: ' + r.error, 'err'); return; }
+      if (!r.ok) { toast('Сделка: ' + r.error, 'err'); return; }
       var d = r.data || {};
-      var fresh = { id: id, phase: 'buy', support: d, supportAt: performance.now(), entered: null, trade: null, timer: null, polling: false, busy: false, error: '', rendered: '' };
+      var fresh = { id: id, phase: 'amount', capital: null, support: d, supportAt: performance.now(), entered: null, trade: null,
+        timer: null, polling: false, busy: false, error: '', rendered: '', returnAt: null, returnTimer: null };
       if (d.status === 'in_position' || d.trade_id) {
-        // The entry was already reported (page reload, another tab, WS reconnect): resume at the SELL step.
+        // The entry was already reported (page reload, another tab, WS reconnect): resume the escort.
         fresh.phase = 'sell';
         fresh.entered = manualEntryFrom(o, d);
       }
       state.manual = fresh;
       showModal('manual');
+      sessionOpen(true);
       renderManual(true);
       startManualPoll();
       scheduleRender('cards');
@@ -1394,11 +1427,17 @@
     if (state.manual && state.manual.timer) { clearInterval(state.manual.timer); state.manual.timer = null; }
   }
 
+  function supportPath(m) {
+    var p = oppPath(m.id, '/manual/support');
+    if (m.capital > 0 && !inPosition(m)) p += '?capital=' + encodeURIComponent(m.capital);
+    return p;
+  }
+
   function pollManual() {
     var m = state.manual;
     if (!m || m.phase === 'done' || m.polling) return;
     m.polling = true;
-    api('GET', oppPath(m.id, '/manual/support')).then(function (r) {
+    api('GET', supportPath(m)).then(function (r) {
       m.polling = false;
       if (state.manual !== m) return;
       if (r.ok) {
@@ -1430,7 +1469,7 @@
   function manualStatus(m) {
     var s = m.support || {};
     var rem = manualRemaining(m);
-    if (m.phase === 'sell' || s.status === 'in_position') {
+    if (inPosition(m) || s.status === 'in_position') {
       // A position already held is never "too fast": only the window can close (and no fresh data is said so).
       if (s.status === 'no_data') return { cls: 'yellow', text: '⚠️ NO FRESH DATA — exit at best price' };
       if (s.expired || rem <= 0) return { cls: 'yellow', text: '⏱ WINDOW CLOSED — exit at best price' };
@@ -1453,6 +1492,18 @@
     return isLong ? { entry: 'BUY', exit: 'SELL' } : { entry: 'SELL', exit: 'BUY' };
   }
 
+  function openExchangeLink(s, o, exch) {
+    var url = safeUrl(s.pair_url || o.pair_url);
+    if (!url) return h('p', { class: 'hint', text: 'Ссылки на пару для ' + exch + ' нет — открой биржу вручную.' });
+    return h('a', { class: 'btn btn-open', href: url, target: '_blank', rel: 'noopener noreferrer', text: 'ОТКРЫТЬ БИРЖУ · ' + exch + ' ↗' });
+  }
+
+  function othersCount(m) {
+    var n = 0;
+    state.opps.forEach(function (o) { if (o && o.id !== m.id && !isTerminal(o.state)) n++; });
+    return n;
+  }
+
   function renderManual(force) {
     var m = state.manual;
     if (!m) return;
@@ -1465,107 +1516,144 @@
     var q = o.quote || s.quote || quoteOf(o);
     var sides = entrySide(o, s);
     var exch = exchangeLabel(s.exchange || o.target_exchange);
-    $('manual-title').textContent = 'MANUAL · ' + (s.symbol || pairName(o)) + ' ' + (o.side || s.side || '') + ' · ' + exch;
+    var asset = assetName(o, s);
+    $('manual-title').textContent = 'СДЕЛКА · ' + (s.symbol || pairName(o)) + ' · ' + exch;
     m.refs = {};
+    var steps = h('ol', { class: 'session-steps', 'aria-label': 'Шаги сделки' });
+    [['amount', 'Сумма'], ['buy', 'Покупка'], ['sell', 'Сопровождение'], ['result', 'Результат']].forEach(function (st, i, all) {
+      var order = all.map(function (x) { return x[0]; });
+      var cur = m.phase === 'done' ? 4 : order.indexOf(m.phase);
+      steps.appendChild(h('li', { class: i < cur ? 'done' : i === cur ? 'current' : '', text: (i + 1) + '. ' + st[1] }));
+    });
+    body.appendChild(steps);
 
-    if (m.phase === 'buy') {
+    if (m.phase === 'amount') {
       m.refs.banner = h('div', { class: 'alert hidden', role: 'status' });
       body.appendChild(m.refs.banner);
-      var buy = h('div', { class: 'block' },
-        h('div', { class: 'block-title ' + (sides.entry === 'BUY' ? 'buy' : 'sell'), text: 'STEP 1 · ' + sides.entry + ' on ' + exch }),
+      var amountInput = h('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', name: 'capital', required: true,
+        value: fmtInputNumber(m.capital || lastAmount()), 'aria-label': 'Сумма сделки' });
+      m.refs.amountInput = amountInput;
+      var chips = h('div', { class: 'amount-chips', role: 'group', 'aria-label': 'Быстрый выбор суммы' });
+      AMOUNT_CHIPS.forEach(function (v) {
+        chips.appendChild(h('button', { class: 'chip', type: 'button', text: fmtMoney(v, q), onclick: function () { amountInput.value = String(v); } }));
+      });
+      m.refs.maxChip = h('button', { class: 'chip', type: 'button', text: 'макс. стакана', onclick: function () {
+        var cap = num((state.manual && state.manual.support || {}).capital);
+        if (cap > 0) amountInput.value = fmtInputNumber(Math.floor(cap * 100) / 100);
+      } });
+      chips.appendChild(m.refs.maxChip);
+      var showBtn = h('button', { class: 'btn btn-primary btn-lg', type: 'submit', text: 'ПОКАЗАТЬ ТОЧНЫЙ ПЛАН' });
+      m.refs.showBtn = showBtn;
+      body.appendChild(h('form', { class: 'block', onsubmit: function (ev) { ev.preventDefault(); chooseAmount(); } },
+        h('div', { class: 'block-title', text: 'ШАГ 1 · СКОЛЬКО ВЛОЖИТЬ?' }),
+        h('label', { class: 'field' }, h('span', { class: 'field-label', text: 'Сумма, ' + (q || 'quote') }), amountInput),
+        chips,
+        (m.refs.bookMax = h('p', { class: 'hint' })),
         h('div', { class: 'rows' },
-          h('span', { class: 'k', text: 'Pair' }), h('span', { class: 'v', text: s.symbol || pairName(o) }),
-          h('span', { class: 'k', text: 'Price now' }), (m.refs.priceNow = h('span', { class: 'v' })),
-          h('span', { class: 'k', text: 'Buy ≤ (max)' }), (m.refs.capPrice = h('span', { class: 'v strong' })),
-          h('span', { class: 'k', text: 'Amount' }), (m.refs.amount = h('span', { class: 'v' })),
-          h('span', { class: 'k', text: 'Capital' }), (m.refs.capital = h('span', { class: 'v' })),
-          h('span', { class: 'k', text: 'Exit target' }), (m.refs.exitTarget = h('span', { class: 'v' })),
-          h('span', { class: 'k', text: 'NET now' }), (m.refs.netNow = h('span', { class: 'v' })),
-          h('span', { class: 'k', text: 'Slippage est.' }), (m.refs.slip = h('span', { class: 'v' }))));
-      var url = safeUrl(s.pair_url || o.pair_url);
-      if (url) buy.appendChild(h('a', { class: 'link', href: url, target: '_blank', rel: 'noopener noreferrer', text: 'Open on ' + exch + ' ↗' }));
-      var mplan = (s.plan && typeof s.plan === 'object' && (s.plan.buy || s.plan.sell)) ? s.plan : (o.plan || null);
-      if (mplan && (mplan.buy || mplan.sell)) {
-        var pb = h('div', { class: 'plan plan-modal' });
-        if (mplan.buy) pb.appendChild(h('div', { class: 'plan-line plan-buy', text: String(mplan.buy) }));
-        if (mplan.sell) pb.appendChild(h('div', { class: 'plan-line plan-sell', text: String(mplan.sell) }));
-        if (mplan.caveat) pb.appendChild(h('div', { class: 'plan-line plan-caveat', text: String(mplan.caveat) }));
-        buy.appendChild(pb);
-      }
-      body.appendChild(buy);
-
+          h('span', { class: 'k', text: 'NET сейчас' }), (m.refs.netNow = h('span', { class: 'v' })),
+          h('span', { class: 'k', text: 'Окно' }), (m.refs.remaining = h('span', { class: 'v' })),
+          h('span', { class: 'k', text: 'Статус' }), (m.refs.status = h('span', { class: 'status-flag' }))),
+        (m.refs.formError = h('p', { class: 'status-line err' })),
+        showBtn,
+        h('div', { class: 'form-row' },
+          h('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: 'Отменить сделку', onclick: cancelManualOpp }))));
+    } else if (m.phase === 'buy') {
+      m.refs.banner = h('div', { class: 'alert hidden', role: 'status' });
+      body.appendChild(m.refs.banner);
+      var plan = h('div', { class: 'block' },
+        h('div', { class: 'block-title ' + (sides.entry === 'BUY' ? 'buy' : 'sell'), text: 'ШАГ 2 · ' + (sides.entry === 'BUY' ? 'КУПИ' : 'ПРОДАЙ') + ' на ' + exch }),
+        h('div', { class: 'rows session-rows' },
+          h('span', { class: 'k', text: sides.entry === 'BUY' ? 'Купить' : 'Продать' }), (m.refs.buyAmt = h('span', { class: 'v big' })),
+          h('span', { class: 'k', text: 'Цена входа' }), (m.refs.buyPx = h('span', { class: 'v big' })),
+          h('span', { class: 'k', text: 'Сумма' }), (m.refs.capital = h('span', { class: 'v' })),
+          h('span', { class: 'k', text: sides.exit === 'SELL' ? 'Потом продать' : 'Потом откупить' }), (m.refs.sellAmt = h('span', { class: 'v big' })),
+          h('span', { class: 'k', text: 'Цена выхода' }), (m.refs.sellPx = h('span', { class: 'v big' })),
+          h('span', { class: 'k', text: 'Ожидаемо' }), (m.refs.expect = h('span', { class: 'v big' }))));
+      var mplan = (s.plan && typeof s.plan === 'object' && s.plan.caveat) ? s.plan : (o.plan || null);
+      if (mplan && mplan.caveat) plan.appendChild(h('div', { class: 'plan-line plan-caveat', text: String(mplan.caveat) }));
+      body.appendChild(plan);
+      body.appendChild(openExchangeLink(s, o, exch));
       body.appendChild(h('div', { class: 'countdown' },
-        h('span', null, 'OPPORTUNITY: ', (m.refs.remaining = h('span', { class: 'big' })), ' remaining'),
-        h('span', null, 'HUMAN EXECUTION: ~', (m.refs.humanEst = h('span', { class: 'big' }))),
-        h('span', null, 'STATUS ', (m.refs.status = h('span', { class: 'status-flag' })))));
-
+        h('span', null, 'Окно: ', (m.refs.remaining = h('span', { class: 'big' }))),
+        h('span', null, 'Нужно человеку: ~', (m.refs.humanEst = h('span', { class: 'big' }))),
+        h('span', null, (m.refs.status = h('span', { class: 'status-flag' })))));
       var priceInput = h('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', name: 'price', required: true, value: fmtInputNumber(s.entry_price_now) });
-      var qtyInput = h('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', name: 'quote_amount', required: true, value: fmtInputNumber(s.capital) });
-      var boughtBtn = h('button', { class: 'btn btn-primary', type: 'submit' });
+      var qtyInput = h('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', name: 'quote_amount', required: true, value: fmtInputNumber(m.capital || s.capital) });
+      var boughtBtn = h('button', { class: 'btn btn-primary btn-lg', type: 'submit', text: sides.entry === 'BUY' ? 'Я КУПИЛ' : 'Я ПРОДАЛ' });
       m.refs.priceInput = priceInput;
       m.refs.qtyInput = qtyInput;
       m.refs.boughtBtn = boughtBtn;
-      var refreshLabel = function () {
-        boughtBtn.textContent = 'I ' + (sides.entry === 'BUY' ? 'BOUGHT' : 'SOLD') + ' AT ' + fmtMoney(priceInput.value, q);
-      };
-      priceInput.addEventListener('input', refreshLabel);
-      refreshLabel();
       var form = h('form', { class: 'block', onsubmit: function (ev) { ev.preventDefault(); submitEntered(); } },
-        h('div', { class: 'block-title', text: 'Tell the bot what you actually got' }),
+        h('div', { class: 'block-title', text: 'Купил? Впиши, что реально получилось' }),
         h('div', { class: 'form-row' },
-          h('label', { class: 'field' }, h('span', { class: 'field-label', text: 'Fill price (' + (q || 'quote') + ')' }), priceInput),
-          h('label', { class: 'field' }, h('span', { class: 'field-label', text: 'Capital used (' + (q || 'quote') + ')' }), qtyInput),
-          boughtBtn),
+          h('label', { class: 'field' }, h('span', { class: 'field-label', text: 'Цена покупки (' + (q || 'quote') + ')' }), priceInput),
+          h('label', { class: 'field' }, h('span', { class: 'field-label', text: 'Потратил (' + (q || 'quote') + ')' }), qtyInput)),
+        boughtBtn,
         (m.refs.formError = h('p', { class: 'status-line err' })),
         h('div', { class: 'form-row' },
-          h('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: 'Cancel opportunity', onclick: cancelManualOpp })));
+          h('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: 'Изменить сумму', onclick: function () { m.phase = 'amount'; renderManual(true); } }),
+          h('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: 'Отменить сделку', onclick: cancelManualOpp })));
       body.appendChild(form);
       m.refs.form = form;
     } else if (m.phase === 'sell') {
       var e = m.entered || {};
-      body.appendChild(h('div', { class: 'alert ok', text: (e.resumed ? 'Open position restored' + (e.trade_id ? ' (' + e.trade_id + ')' : '') + ': ' : 'Entry recorded: ') + sides.entry + ' ' + fmtAmount(e.base_amount || s.base_amount) + ' at ' + fmtMoney(e.entry_price, q) + '. Now the exit leg.' }));
+      body.appendChild(h('div', { class: 'alert ok', text: (e.resumed ? 'Открытая сделка восстановлена' : 'Покупка записана') + ': ' + fmtAmount(e.base_amount || s.base_amount) + ' ' + asset + ' по ' + fmtMoney(e.entry_price, q) + '.' }));
       m.refs.banner = h('div', { class: 'alert hidden', role: 'status' });
       body.appendChild(m.refs.banner);
+      m.refs.escort = h('div', { class: 'escort wait', role: 'status', 'aria-live': 'polite' });
+      body.appendChild(m.refs.escort);
       body.appendChild(h('div', { class: 'block' },
-        h('div', { class: 'block-title ' + (sides.exit === 'SELL' ? 'sell' : 'buy'), text: 'STEP 2 · ' + sides.exit + ' on ' + exch }),
-        h('div', { class: 'rows' },
-          h('span', { class: 'k', text: 'Exit target' }), h('span', { class: 'v', text: fmtMoney(e.exit_target || s.exit_target_now, q) }),
-          h('span', { class: 'k', text: 'Target now (live)' }), (m.refs.exitNow = h('span', { class: 'v' })),
-          h('span', { class: 'k', text: 'Amount' }), h('span', { class: 'v', text: fmtAmount(e.base_amount || s.base_amount) }),
-          h('span', { class: 'k', text: 'Est. fees' }), h('span', { class: 'v', text: fmtMoney(e.estimated_fees_quote, q) }),
-          h('span', { class: 'k', text: 'NET now' }), (m.refs.netNow = h('span', { class: 'v' })))));
-      body.appendChild(h('div', { class: 'countdown' },
-        h('span', null, 'OPPORTUNITY: ', (m.refs.remaining = h('span', { class: 'big' })), ' remaining'),
-        h('span', null, 'STATUS ', (m.refs.status = h('span', { class: 'status-flag' })))));
-      var sellPrice = h('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', name: 'price', required: true, value: fmtInputNumber(e.exit_target || s.exit_target_now) });
-      var soldBtn = h('button', { class: 'btn btn-primary', type: 'submit' });
-      m.refs.sellInput = sellPrice;
-      m.refs.soldBtn = soldBtn;
-      var refreshSold = function () { soldBtn.textContent = 'I ' + (sides.exit === 'SELL' ? 'SOLD' : 'BOUGHT BACK') + ' AT ' + fmtMoney(sellPrice.value, q); };
-      sellPrice.addEventListener('input', refreshSold);
-      refreshSold();
+        h('div', { class: 'block-title ' + (sides.exit === 'SELL' ? 'sell' : 'buy'), text: 'ШАГ 3 · ' + (sides.exit === 'SELL' ? 'ПРОДАЖА' : 'ОТКУП') + ' на ' + exch }),
+        h('div', { class: 'rows session-rows' },
+          h('span', { class: 'k', text: sides.exit === 'SELL' ? 'Продать' : 'Откупить' }), (m.refs.sellAmt = h('span', { class: 'v big' })),
+          h('span', { class: 'k', text: 'Цель' }), (m.refs.target = h('span', { class: 'v big' })),
+          h('span', { class: 'k', text: 'Стакан даёт сейчас' }), (m.refs.exitNow = h('span', { class: 'v big' })),
+          h('span', { class: 'k', text: 'Если выйти сейчас' }), (m.refs.pnlNow = h('span', { class: 'v big' })),
+          h('span', { class: 'k', text: 'Окно' }), (m.refs.remaining = h('span', { class: 'v' })),
+          h('span', { class: 'k', text: 'Статус' }), (m.refs.status = h('span', { class: 'status-flag' })))));
+      body.appendChild(openExchangeLink(s, o, exch));
+      body.appendChild(h('button', { class: 'btn btn-danger btn-lg', type: 'button', text: 'Я УШЁЛ СО СДЕЛКИ',
+        onclick: function () { m.phase = 'result'; renderManual(true); } }));
+      body.appendChild(h('p', { class: 'hint', text: 'Сделка твоя, пока ты не нажмёшь «Я УШЁЛ СО СДЕЛКИ». Свернуть можно — она останется на карточке и вернётся при перезагрузке.' }));
+    } else if (m.phase === 'result') {
+      var en = m.entered || {};
+      var exitPrice = h('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', name: 'price', required: true,
+        value: fmtInputNumber(s.exit_price_now || s.exit_target_now || en.exit_target) });
+      var pnlInput = h('input', { type: 'number', step: 'any', inputmode: 'decimal', name: 'reported_pnl_quote', placeholder: 'например 0.42 или -0.15' });
+      var noteInput = h('textarea', { name: 'note', rows: '2', maxlength: '2000', placeholder: 'Что получилось, что нет (необязательно)' });
+      m.refs.sellInput = exitPrice;
+      m.refs.pnlInput = pnlInput;
+      m.refs.noteInput = noteInput;
+      m.refs.soldBtn = h('button', { class: 'btn btn-primary btn-lg', type: 'submit', text: 'СОХРАНИТЬ РЕЗУЛЬТАТ' });
       body.appendChild(h('form', { class: 'block', onsubmit: function (ev) { ev.preventDefault(); submitExited(); } },
-        h('div', { class: 'form-row' },
-          h('label', { class: 'field' }, h('span', { class: 'field-label', text: 'Exit price (' + (q || 'quote') + ')' }), sellPrice),
-          soldBtn),
+        h('div', { class: 'block-title', text: 'ШАГ 4 · ТВОЙ ФАКТИЧЕСКИЙ РЕЗУЛЬТАТ' }),
+        h('label', { class: 'field' }, h('span', { class: 'field-label', text: 'Цена, по которой вышел (' + (q || 'quote') + ')' }), exitPrice),
+        h('label', { class: 'field' }, h('span', { class: 'field-label', text: 'Итог по бирже, ' + (q || 'quote') + ' (необязательно)' }), pnlInput),
+        h('label', { class: 'field' }, h('span', { class: 'field-label', text: 'Заметка' }), noteInput),
         (m.refs.formError = h('p', { class: 'status-line err' })),
-        h('p', { class: 'hint', text: 'The position is yours until you record the exit — this dialog stays available from the card.' })));
+        m.refs.soldBtn,
+        h('div', { class: 'form-row' },
+          h('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: 'Назад к сопровождению', onclick: function () { m.phase = 'sell'; renderManual(true); } }))));
     } else {
       var t = m.trade || {};
       var pnl = num(t.realized_pnl_quote);
+      var rep = num(t.user_reported_pnl_quote);
+      m.refs.returnIn = h('span', { class: 'big' });
       body.appendChild(h('div', { class: 'result' },
-        h('div', { class: 'alert ' + (pnl >= 0 ? 'ok' : 'warn'), text: 'Trade closed · ' + (t.state || 'CLOSED') }),
-        h('div', { class: 'big ' + (pnl >= 0 ? 'pos' : 'neg'), text: fmtMoney(t.realized_pnl_quote, q, { sign: true }) + ' realized' }),
+        h('div', { class: 'alert ok', text: 'Сделка завершена и сохранена' }),
+        h('div', { class: 'big ' + (pnl >= 0 ? 'pos' : 'neg'), text: fmtMoney(t.realized_pnl_quote, q, { sign: true }) + ' по твоей цене выхода' }),
         h('div', { class: 'rows' },
-          h('span', { class: 'k', text: 'Expected NET' }), h('span', { class: 'v', text: fmtPct(t.expected_net_pct) }),
-          h('span', { class: 'k', text: 'Actual NET' }), h('span', { class: 'v ' + (num(t.actual_net_pct) >= 0 ? 'pos' : 'neg'), text: fmtPct(t.actual_net_pct) }),
-          h('span', { class: 'k', text: 'Expected profit' }), h('span', { class: 'v', text: fmtMoney(t.expected_profit_quote, q, { sign: true }) }),
-          h('span', { class: 'k', text: 'Entry / exit' }), h('span', { class: 'v', text: fmtMoney(t.actual_entry_price, q) + ' → ' + fmtMoney(t.actual_exit_price, q) }),
-          h('span', { class: 'k', text: 'Slippage' }), h('span', { class: 'v', text: fmtPct(t.actual_slippage_pct) }),
-          h('span', { class: 'k', text: 'Fees' }), h('span', { class: 'v', text: fmtMoney(t.actual_fees_quote, q) }),
-          h('span', { class: 'k', text: 'Execution time' }), h('span', { class: 'v', text: fmtSecs(t.execution_time_s) }),
-          h('span', { class: 'k', text: 'Diff reason' }), h('span', { class: 'v', text: t.diff_reason || '–' })),
-        h('div', { class: 'modal-actions' }, h('button', { class: 'btn btn-primary', type: 'button', text: 'Close', onclick: closeManual }))));
+          h('span', { class: 'k', text: 'Ожидалось' }), h('span', { class: 'v', text: fmtPct(t.expected_net_pct) + ' · ' + fmtMoney(t.expected_profit_quote, q, { sign: true }) }),
+          h('span', { class: 'k', text: 'Факт' }), h('span', { class: 'v ' + (num(t.actual_net_pct) >= 0 ? 'pos' : 'neg'), text: fmtPct(t.actual_net_pct) + ' · ' + fmtMoney(t.realized_pnl_quote, q, { sign: true }) }),
+          Number.isFinite(rep) ? h('span', { class: 'k', text: 'Итог по бирже' }) : null,
+          Number.isFinite(rep) ? h('span', { class: 'v ' + (rep >= 0 ? 'pos' : 'neg'), text: fmtMoney(rep, q, { sign: true }) }) : null,
+          h('span', { class: 'k', text: 'Вход → выход' }), h('span', { class: 'v', text: fmtMoney(t.actual_entry_price, q) + ' → ' + fmtMoney(t.actual_exit_price, q) }),
+          h('span', { class: 'k', text: 'Комиссии' }), h('span', { class: 'v', text: fmtMoney(t.actual_fees_quote, q) }),
+          h('span', { class: 'k', text: 'Время до покупки' }), h('span', { class: 'v', text: fmtSecs(t.time_to_entry_s) }),
+          h('span', { class: 'k', text: 'Успел в окно' }), h('span', { class: 'v', text: t.entered_in_window === true ? 'да' : t.entered_in_window === false ? 'нет' : '–' }),
+          h('span', { class: 'k', text: 'Почему разница' }), h('span', { class: 'v', text: t.diff_reason || '–' })),
+        h('p', { class: 'hint' }, 'Бот вернётся к поиску следующей сделки через ', m.refs.returnIn, ' с.'),
+        h('div', { class: 'modal-actions' }, h('button', { class: 'btn btn-primary btn-lg', type: 'button', text: 'К МОНИТОРИНГУ', onclick: finishSession }))));
     }
     updateManualLive();
   }
@@ -1577,40 +1665,65 @@
 
   function updateManualLive() {
     var m = state.manual;
-    if (!m || !m.refs || m.phase === 'done') return;
+    var others = $('manual-others');
+    if (others) {
+      var n = m ? othersCount(m) : 0;
+      others.textContent = n ? 'ещё ' + n + ' на доске — не теряются' : '';
+    }
+    if (!m || !m.refs) return;
+    var r = m.refs;
+    if (m.phase === 'done') {
+      if (r.returnIn && m.returnAt) r.returnIn.textContent = String(Math.max(0, Math.ceil((m.returnAt - performance.now()) / 1000)));
+      return;
+    }
     var s = m.support || {};
     var o = getOpp(m.id) || {};
     var q = o.quote || s.quote || quoteOf(o);
+    var asset = assetName(o, s);
     var st = manualStatus(m);
     var rem = manualRemaining(m);
-    var r = m.refs;
-    if (r.remaining) r.remaining.textContent = rem.toFixed(1) + ' s';
+    if (r.remaining) r.remaining.textContent = rem.toFixed(1) + ' с';
     if (r.humanEst) r.humanEst.textContent = fmtSecs((s.human && s.human.est_execution_s) || state.settings.human_execution_time_s, 0);
     if (r.status) { r.status.textContent = st.text; r.status.className = 'status-flag ' + st.cls; }
-    if (r.priceNow) r.priceNow.textContent = fmtMoney(s.entry_price_now, q);
-    if (r.capPrice) r.capPrice.textContent = Number.isFinite(num(s.entry_cap_price)) ? fmtMoney(s.entry_cap_price, q) : '–';
-    if (r.amount) r.amount.textContent = fmtAmount(s.base_amount);
-    if (r.capital) r.capital.textContent = fmtMoney(s.capital, q);
-    if (r.exitTarget) r.exitTarget.textContent = fmtMoney(s.exit_target_now, q);
-    if (r.exitNow) r.exitNow.textContent = fmtMoney(s.exit_target_now, q);
     if (r.netNow) r.netNow.textContent = fmtPct(s.net_now_pct);
-    if (r.slip) r.slip.textContent = fmtPct(s.expected_slippage_pct);
+    if (r.bookMax) r.bookMax.textContent = Number.isFinite(num(s.capital)) ? 'Стакан сейчас держит до ' + fmtMoney(s.capital, q) + ' на этой паре.' : '';
+    if (r.buyAmt) r.buyAmt.textContent = fmtAmount(s.buy_amount != null ? s.buy_amount : s.base_amount) + ' ' + asset;
+    if (r.buyPx) r.buyPx.textContent = (Number.isFinite(num(s.entry_cap_price)) ? '≤ ' + fmtMoney(s.entry_cap_price, q) : '–') + ' (сейчас ' + fmtMoney(s.entry_price_now, q) + ')';
+    if (r.capital) r.capital.textContent = fmtMoney(s.capital, q) + (num(m.capital) > num(s.capital) + 0.005 ? ' — стакан держит меньше, чем ты хотел' : '');
+    if (r.sellAmt) r.sellAmt.textContent = fmtAmount(s.sell_amount != null ? s.sell_amount : s.base_amount) + ' ' + asset;
+    if (r.sellPx) r.sellPx.textContent = '≥ ' + fmtMoney(s.exit_target_now, q);
+    if (r.expect) {
+      r.expect.textContent = 'NET ' + fmtPct(s.net_now_pct) + ' · прибыль ' + fmtMoney(s.net_quote, q, { sign: true });
+      r.expect.className = 'v big ' + (num(s.net_now_pct) >= 0 ? 'pos' : 'neg');
+    }
+    if (r.target) r.target.textContent = '≥ ' + fmtMoney(s.exit_target_now, q);
+    if (r.exitNow) r.exitNow.textContent = fmtMoney(s.exit_price_now, q);
+    if (r.pnlNow) {
+      var pn = num(s.pnl_now_pct);
+      r.pnlNow.textContent = Number.isFinite(pn) ? fmtPct(pn) + ' · ' + fmtMoney(s.pnl_now_quote, q, { sign: true }) : '–';
+      r.pnlNow.className = 'v big ' + (pn >= 0 ? 'pos' : 'neg');
+    }
+    if (r.escort) {
+      var sig = s.status === 'no_data' ? 'no_data' : (s.sell_signal || 'wait');
+      r.escort.className = 'escort ' + sig;
+      r.escort.textContent = s.status === 'no_data'
+        ? '⚠️ Нет свежих данных по стакану — выходи по лучшей цене, которую видишь на бирже.'
+        : (s.sell_text || (m.error ? 'нет связи с ботом: ' + m.error : 'ЖДИ: бот сравнивает стакан с целью…'));
+    }
     var expired = manualExpired(m);
     if (r.banner) {
       var text = '';
       var cls = 'alert hidden';
-      if (m.phase === 'sell') {
-        // SELL step: the position is held - never the red TOO FAST warning here, only window / data notices.
-        if (m.error) { text = 'support unavailable: ' + m.error + ' — the position is yours until you record the exit.'; cls = 'alert warn'; }
-        else if (s.status === 'no_data') { text = (s.message || '⚠️ NO FRESH DATA') + ' — exit at the best price the book gives you.'; cls = 'alert warn'; }
-        else if (expired || rem <= 0) { text = '⚠️ OPPORTUNITY EXPIRED — window closed. Exit at the best price the book gives you.'; cls = 'alert warn'; }
+      if (inPosition(m)) {
+        if (m.error) { text = 'Нет связи с ботом: ' + m.error + ' — сделка твоя, пока ты не запишешь выход.'; cls = 'alert warn'; }
       }
-      else if (expired) { text = s.message || '⚠️ OPPORTUNITY EXPIRED'; cls = 'alert danger'; }
-      else if (m.error) { text = 'support unavailable: ' + m.error; cls = 'alert warn'; }
+      else if (expired) { text = (s.message || '⚠️ OPPORTUNITY EXPIRED') + ' — возможность закончилась, покупать уже поздно.'; cls = 'alert danger'; }
+      else if (m.error) { text = 'Нет связи с ботом: ' + m.error; cls = 'alert warn'; }
       else if (st.cls === 'red') { text = st.text + (s.message && s.message !== st.text ? ' · ' + s.message : ''); cls = 'alert warn'; }
       r.banner.textContent = text;
       r.banner.className = cls;
     }
+    if (m.phase === 'amount' && r.showBtn) r.showBtn.disabled = expired || m.busy;
     if (m.phase === 'buy' && r.form) {
       var lock = expired || m.busy;
       r.form.classList.toggle('locked', expired);
@@ -1618,10 +1731,31 @@
       r.qtyInput.disabled = lock;
       r.boughtBtn.disabled = lock;
     }
-    if (m.phase === 'sell' && r.soldBtn) {
+    if (m.phase === 'result' && r.soldBtn) {
       r.soldBtn.disabled = !!m.busy;
       r.sellInput.disabled = !!m.busy;
     }
+  }
+
+  function chooseAmount() {
+    var m = state.manual;
+    if (!m || m.busy || m.phase !== 'amount' || manualExpired(m)) return;
+    var v = num(m.refs.amountInput.value);
+    if (!(v > 0)) { m.refs.formError.textContent = 'Впиши сумму больше нуля.'; return; }
+    m.capital = v;
+    rememberAmount(v);
+    m.busy = true;
+    m.refs.formError.textContent = '';
+    updateManualLive();
+    api('GET', supportPath(m)).then(function (r) {
+      if (state.manual !== m) return;
+      m.busy = false;
+      if (!r.ok) { m.refs.formError.textContent = r.error; updateManualLive(); return; }
+      m.support = r.data || m.support;
+      m.supportAt = performance.now();
+      m.phase = 'buy';
+      renderManual(true);
+    });
   }
 
   function submitEntered() {
@@ -1629,7 +1763,7 @@
     if (!m || m.busy || m.phase !== 'buy' || manualExpired(m)) return;
     var price = num(m.refs.priceInput.value);
     var qty = num(m.refs.qtyInput.value);
-    if (!(price > 0) || !(qty > 0)) { m.refs.formError.textContent = 'Enter the real fill price and the capital you used (both > 0).'; return; }
+    if (!(price > 0) || !(qty > 0)) { m.refs.formError.textContent = 'Впиши реальную цену покупки и потраченную сумму (обе больше нуля).'; return; }
     m.busy = true;
     m.refs.formError.textContent = '';
     updateManualLive();
@@ -1653,13 +1787,22 @@
 
   function submitExited() {
     var m = state.manual;
-    if (!m || m.busy || m.phase !== 'sell') return;
+    if (!m || m.busy || m.phase !== 'result') return;
     var price = num(m.refs.sellInput.value);
-    if (!(price > 0)) { m.refs.formError.textContent = 'Enter the real exit price (> 0).'; return; }
+    if (!(price > 0)) { m.refs.formError.textContent = 'Впиши реальную цену выхода (больше нуля).'; return; }
+    var body = { price: price };
+    var rawPnl = String(m.refs.pnlInput.value || '').trim();
+    if (rawPnl !== '') {
+      var rep = num(rawPnl);
+      if (!Number.isFinite(rep)) { m.refs.formError.textContent = 'Итог по бирже — число (можно с минусом) или пусто.'; return; }
+      body.reported_pnl_quote = rep;
+    }
+    var note = String(m.refs.noteInput.value || '').trim();
+    if (note) body.note = note;
     m.busy = true;
     m.refs.formError.textContent = '';
     updateManualLive();
-    api('POST', oppPath(m.id, '/manual/exited'), { price: price }).then(function (r) {
+    api('POST', oppPath(m.id, '/manual/exited'), body).then(function (r) {
       if (state.manual !== m) return;
       m.busy = false;
       if (!r.ok) { m.refs.formError.textContent = r.error; updateManualLive(); return; }
@@ -1667,21 +1810,41 @@
       m.phase = 'done';
       stopManualPoll();
       if (m.trade.id) { state.trades.set(m.trade.id, m.trade); scheduleRender('trades'); }
+      m.returnAt = performance.now() + SESSION_RETURN_S * 1000;
+      m.returnTimer = setInterval(function () {
+        if (state.manual !== m) { clearInterval(m.returnTimer); return; }
+        if (performance.now() >= m.returnAt) { finishSession(); return; }
+        updateManualLive();
+      }, 250);
       renderManual(true);
       scheduleRender('cards');
-      toast('Manual trade recorded: ' + fmtMoney(m.trade.realized_pnl_quote, quoteOf({ target_symbol: m.trade.symbol }), { sign: true }), num(m.trade.realized_pnl_quote) >= 0 ? 'ok' : 'warn');
+      toast('Сделка сохранена: ' + fmtMoney(m.trade.realized_pnl_quote, quoteOf({ target_symbol: m.trade.symbol }), { sign: true }), num(m.trade.realized_pnl_quote) >= 0 ? 'ok' : 'warn');
     });
+  }
+
+  function finishSession() {
+    // Back to monitoring: full focus on the board and the next best opportunity.
+    var m = state.manual;
+    if (m && m.returnTimer) clearInterval(m.returnTimer);
+    stopManualPoll();
+    hideModal('manual');
+    sessionOpen(false);
+    state.manual = null;
+    setTab('opps');
+    scheduleRender('cards');
+    toast('Снова ищу следующую сделку', 'ok');
   }
 
   function cancelManualOpp() {
     var m = state.manual;
-    if (!m || m.phase !== 'buy') return;
-    confirmDialog({ title: 'Cancel this opportunity?', body: 'It is removed from the active list (no trade is recorded).', okLabel: 'Cancel opportunity', okClass: 'btn-warn' }).then(function (ok) {
+    if (!m || inPosition(m) || m.phase === 'done') return;
+    confirmDialog({ title: 'Отменить эту сделку?', body: 'Возможность уйдёт из активных (сделка не записывается).', okLabel: 'Отменить', okClass: 'btn-warn' }).then(function (ok) {
       if (!ok || state.manual !== m) return;
-      api('POST', oppPath(m.id, '/cancel'), { reason: 'user cancelled in MANUAL dialog' }).then(function (r) {
-        if (!r.ok) toast('Cancel: ' + r.error, 'err');
+      api('POST', oppPath(m.id, '/cancel'), { reason: 'user cancelled in the manual session' }).then(function (r) {
+        if (!r.ok) toast('Отмена: ' + r.error, 'err');
         stopManualPoll();
         hideModal('manual');
+        sessionOpen(false);
         state.manual = null;
         scheduleRender('cards');
       });
@@ -1689,11 +1852,29 @@
   }
 
   function closeManual() {
+    // "Свернуть": an open position stays (card / reload bring it back); a saved trade returns to monitoring.
     var m = state.manual;
+    if (m && m.phase === 'done') { finishSession(); return; }
     stopManualPoll();
     hideModal('manual');
-    if (m && m.phase !== 'sell') state.manual = null;
+    sessionOpen(false);
+    if (m && !inPosition(m)) state.manual = null;
     scheduleRender('cards');
+  }
+
+  function restoreOpenSession() {
+    // Page reload / new tab while a MANUAL position is open: the session takes the screen again.
+    if (state.manual) return;
+    api('GET', '/api/trades?limit=50').then(function (r) {
+      if (!r.ok || state.manual) return;
+      var open = null;
+      (r.data || []).forEach(function (t) {
+        if (!t || !t.id) return;
+        state.trades.set(t.id, t);
+        if (!open && t.manual && isExecuting(t.state) && !t.entry_order && t.opportunity_id) open = t;
+      });
+      if (open) openManual(open.opportunity_id);
+    });
   }
 
   // ------------------------------------------------------------------ AUTO modal
@@ -1806,7 +1987,7 @@
       if (!modalHidden('auto')) renderAuto();
     }
     var m = state.manual;
-    if (m && m.id === o.id && isTerminal(o.state) && m.phase === 'buy') {
+    if (m && m.id === o.id && isTerminal(o.state) && (m.phase === 'buy' || m.phase === 'amount')) {
       m.support = Object.assign({}, m.support, { valid: false, expired: true, message: '⚠️ OPPORTUNITY ' + o.state });
       updateManualLive();
     }
@@ -2172,6 +2353,7 @@
       uiMemo.loaded = true;
       renderAll();
       handleHash();
+      restoreOpenSession();
     });
     connectWs();
     setInterval(tick, 250);

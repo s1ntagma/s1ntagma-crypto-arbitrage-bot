@@ -554,3 +554,37 @@ a:hover { color: #67e8f9; }
 .journal-shot img { max-width: 100%; max-height: 260px; display: block; border-radius: 4px; margin-bottom: 6px; }
 .journal-analysis { white-space: pre-wrap; font-size: var(--fs-sm); line-height: 1.45; margin: 6px 0 0; }
 .journal-badge { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted); }
+
+/* ---- MANUAL TRADE SESSION: one trade takes the whole screen ---- */
+body.in-session { overflow: hidden; }
+.modal.session-modal { padding: 0; align-items: stretch; background: rgba(4, 7, 11, 0.88); }
+.modal.session-modal .modal-card {
+  width: 100%; max-width: 860px; max-height: none; min-height: 100vh; margin: 0 auto;
+  border-radius: 0; border-width: 0 1px; padding: 16px; overflow-y: auto;
+}
+@media (min-width: 900px) {
+  .modal.session-modal { padding: 24px; align-items: flex-start; overflow-y: auto; }
+  .modal.session-modal .modal-card { min-height: 0; border-radius: var(--radius); border-width: 1px; }
+}
+.session-others { color: var(--muted); font-size: var(--fs-sm); margin-left: auto; white-space: nowrap; }
+.session-steps { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; }
+.session-steps li { font-size: var(--fs-sm); padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.session-steps li.current { border-color: var(--accent); color: var(--text); font-weight: 700; background: var(--accent-dim); }
+.session-steps li.done { color: var(--green-text); border-color: var(--green); }
+.session-rows { gap: 8px 16px; }
+.session-rows .v.big, .rows .v.big { font-size: 1.15rem; }
+.amount-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.amount-chips .chip { min-height: 40px; }
+.btn-lg { min-height: 48px; font-size: 1.05rem; font-weight: 800; letter-spacing: 0.04em; width: 100%; }
+.btn-open {
+  min-height: 48px; width: 100%; font-weight: 800; letter-spacing: 0.04em; text-decoration: none;
+  background: var(--accent-dim); border: 1px solid var(--accent); color: var(--text);
+}
+.btn-open:hover { color: var(--text); }
+.escort { padding: 14px 16px; border-radius: var(--radius-sm); font-size: 1.1rem; font-weight: 800; line-height: 1.4; border: 2px solid; }
+.escort.wait { border-color: var(--yellow); background: var(--yellow-dim); color: #fde68a; }
+.escort.sell_now { border-color: var(--green); background: var(--green-dim); color: #bbf7d0; animation: pulse 1.6s ease-in-out infinite; }
+.escort.sell_market { border-color: var(--red); background: var(--red-dim); color: #fecaca; }
+.escort.no_data { border-color: var(--yellow); background: var(--yellow-dim); color: #fde68a; }
+.session-modal textarea { width: 100%; box-sizing: border-box; background: var(--panel-2); color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: 8px; font: inherit; resize: vertical; }
+@media (prefers-reduced-motion: reduce) { .escort.sell_now { animation: none; } }
