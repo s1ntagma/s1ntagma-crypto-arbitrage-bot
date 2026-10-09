@@ -1145,6 +1145,7 @@ async def test_auto_and_manual_refuse_when_mode_changed_since_detection() -> Non
     env.engine._exec_adapters[Mode.LIVE] = live_adapters  # type: ignore[index]
     env.engine.readiness = lambda: {"ready": True, "checks": []}  # the Stats READY checklist passed (LIVE AUTO gate)
     opp = env.opps.add(make_opp(env.clock))
+    opp.proven = {"enforced": True, "proven": True}  # LIVE AUTO trades proven pairs only
     assert opp.mode is Mode.PAPER
     env.settings.update({"paper_mode": False, "live_mode": True})
     assert env.settings.mode() is Mode.LIVE

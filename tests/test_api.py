@@ -804,6 +804,9 @@ def test_settings_put_exchange_budgets_from_text(client, ctx, tmp_path):
     assert cfg["exchange_budget_quote"] == {"kraken": 200.0, "okx": 500.0}
     r = client.put("/api/settings", json={"exchange_budget_quote": ""})
     assert r.json()["settings"]["exchange_budget_quote"] == {}
+    r = client.put("/api/settings", json={"exchange_budget_quote": "kraken=200; okx=500"})  # a typo is never "Saved"
+    assert r.status_code == 400 and "exchange budget" in r.json()["error"]
+    assert ctx.settings.exchange_budget_quote == {}
 
 
 def test_settings_put(client, ctx, tmp_path):

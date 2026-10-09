@@ -201,9 +201,10 @@ class RiskManager:
             ("exchange exposure", float(s.max_exposure_per_exchange_quote) - self.exposure(exchange=exchange)),
             ("asset exposure", float(s.max_exposure_per_asset_quote) - self.exposure(asset=asset)),
         ]
-        budget = float((getattr(s, "exchange_budget_quote", None) or {}).get(str(exchange).lower(), 0.0) or 0.0)
-        if budget > 0:
-            caps.append((f"budget on {exchange}", budget - self.exposure(exchange=exchange)))
+        budgets = getattr(s, "exchange_budget_quote", None) or {}
+        budget = budgets.get(exchange, budgets.get(str(exchange).lower()))
+        if budget is not None:  # 0 = nothing on this venue
+            caps.append((f"budget on {exchange}", float(budget) - self.exposure(exchange=exchange)))
         binding, allowed = min(caps, key=lambda c: c[1])
         allowed = max(0.0, allowed)
         if allowed < float(s.min_trade_quote):

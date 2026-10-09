@@ -27,6 +27,7 @@ from latbot.api.server import build_state
 from latbot.app import AppContext, InstanceLock, build_context, main, run_app
 from latbot.clock import SimClock
 from latbot.config import ExchangeConfig, Secrets, Settings
+from latbot.engine.proven import current_strategy
 from latbot.events import EventBus
 from latbot.exchanges.fake import FakeAdapter
 from latbot.exchanges.paper import PaperAdapter
@@ -422,7 +423,12 @@ async def test_autopilot_trades_without_a_click(tmp_path: Path) -> None:
     try:
         assert ctx.autopilot is not None
         ctx.execution.poll_interval_s = 0.01
+        strategy = current_strategy(ctx.settings)
+        for i in range(40):  # BTC @ kraken proved itself on 40 winning virtual trades
+            ctx.pipeline.proven.record({"id": f"sh{i}", "strategy": strategy, "asset": "BTC", "target": "kraken",
+                                        "actual_net_pct": 0.5, "opened_ts": b.clock.wall(), "closed_ts": b.clock.wall()})
         opp = await detect(b)
+        assert opp.proven.get("proven"), opp.proven
         ex = ctx.execution
 
         def entry_filled() -> bool:

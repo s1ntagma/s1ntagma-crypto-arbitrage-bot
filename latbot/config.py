@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -478,8 +479,8 @@ class Settings:
             if k == "exchanges":
                 new = _merge_default_exchanges([_exchange_from_dict(x) for x in v])
             elif isinstance(cur, dict):
-                new = _budgets(v)
-            elif isinstance(cur, bool):
+                new = _budgets(v, self.exchanges, strict=True)
+            elif isinstance(cur, bool) or known[k].type in ("bool", bool):
                 new = _to_bool(v)
             elif isinstance(cur, int) and not isinstance(cur, bool):
                 new = int(float(v))
@@ -518,7 +519,10 @@ class Settings:
                          ("ride_trail_pct", 0.01), ("ride_max_hold_s", 5.0), ("ride_stale_s", 2.0)):
             setattr(self, name, max(lo, float(getattr(self, name))))
         self.ws_assets = max(1, min(50, int(self.ws_assets)))
-        self.exchange_budget_quote = _budgets(self.exchange_budget_quote)
+        self.exchange_budget_quote = _budgets(self.exchange_budget_quote, self.exchanges, strict=False)
+        for f in fields(self):  # a hand-edited config.json may hold "false" / "0": never truthy strings
+            if f.type in ("bool", bool) and not isinstance(getattr(self, f.name), bool):
+                setattr(self, f.name, _to_bool(getattr(self, f.name)))
         if self.capital_quote <= 0 or self.max_trade_quote <= 0:
             raise ValueError("capital must be > 0")
         if self.rest_book_timeout_s <= 0:
@@ -536,19 +540,53 @@ class Settings:
             self.live_mode = False
 
 
-def _budgets(v: Any) -> dict[str, float]:
-    """Exchange budgets from a dict or the UI text "kraken=200, okx=500"; unreadable or <= 0 entries dropped."""
-    items = v.items() if isinstance(v, dict) else (
-        part.split("=", 1) for part in str(v or "").split(",") if "=" in part)
+def _budget_key(name: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def _budgets(v: Any, exchanges: list[ExchangeConfig], *, strict: bool) -> dict[str, float]:
+    """Exchange budgets from a dict or the UI text "kraken=200, OKX EEA=500".  A venue may be named by
+    its internal name, ccxt id or the label the UI shows; it is stored under the internal name.
+    0 = nothing on that venue.  ``strict`` (a patch from the UI / API / Telegram): an unreadable part,
+    an unknown venue or a negative amount is a ValueError (the API answers 400, never a false "Saved");
+    otherwise (config.json on load) such entries are dropped with a warning."""
+    names: dict[str, str] = {}
+    for e in exchanges:
+        for alias in (e.name, e.ccxt_name, e.label):
+            if alias:
+                names.setdefault(_budget_key(alias), e.name)
+    items: list[tuple[Any, Any]] = []
+    problems: list[str] = []
+    if isinstance(v, dict):
+        items = list(v.items())
+    else:
+        for part in (p.strip() for p in str(v or "").split(",")):
+            if not part:
+                continue
+            if "=" not in part:
+                problems.append(f"'{part}' (use name=amount, e.g. kraken=200)")
+                continue
+            name, amount = part.split("=", 1)
+            items.append((name, amount))
     out: dict[str, float] = {}
     for name, amount in items:
+        key = names.get(_budget_key(name))
         try:
-            x = float(amount)
+            x = float(amount if isinstance(amount, (int, float)) else str(amount).strip())
         except (TypeError, ValueError):
-            continue
-        name = str(name).strip().lower()
-        if name and x > 0 and x == x and x != float("inf"):
-            out[name] = x
+            x = None
+        if key is None:
+            problems.append(f"unknown exchange '{str(name).strip()}'")
+        elif x is None or x != x or x in (float("inf"), float("-inf")):
+            problems.append(f"'{str(amount).strip()}' for {str(name).strip()} is not a number")
+        elif x < 0:
+            problems.append(f"{str(name).strip()} must be 0 or more")
+        else:
+            out[key] = x
+    if problems:
+        if strict:
+            raise ValueError("exchange budget: " + "; ".join(problems))
+        log.warning("exchange budget entries ignored: %s", "; ".join(problems))
     return out
 
 

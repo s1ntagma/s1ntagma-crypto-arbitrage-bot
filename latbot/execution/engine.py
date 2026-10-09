@@ -194,13 +194,34 @@ class ExecutionEngine:
     # ------------------------------------------------------------------ #
     # small helpers
     # ------------------------------------------------------------------ #
+    def pair_busy(self, exchange: str, symbol: str, opp_id: str | None = None) -> str | None:
+        """Why a new AUTO entry on (exchange, symbol) must wait, in either direction: an AUTO trade
+        started before ``opp_id``'s own, the owner's MANUAL position, or a position / unresolved order a
+        FAILED or restored trade left (hard rule 5: reconcile first).  None = the pair is free."""
+        def same(t: Any) -> bool:
+            return t is not None and t.exchange == exchange and t.symbol == symbol
+
+        where = f"{symbol}@{exchange}"
+        for oid, trade in self._active.items():  # insertion order: only trades that started before this one
+            if oid == opp_id:
+                break
+            if same(trade):
+                return f"AUTO trade {trade.id} is already running on {where}"
+        for oid, trade in self._manual.items():
+            if oid != opp_id and same(trade):
+                return f"manual position open on {where}"
+        for pos in self._open_positions.values():
+            if same(pos.trade):
+                return f"position or unresolved order open on {where}; reconcile first"
+        return None
+
     def not_ready(self, max_age_s: float = 0.0) -> str | None:
         """None when the Stats READY checklist passes; otherwise what is missing (no record = not ready).
-        ``max_age_s`` > 0 reuses an answer that young (the autopilot asks on every opportunity update)."""
+        ``max_age_s`` > 0 reuses a "not ready" answer that young (the autopilot asks on every update)."""
         now = self._clock.mono()
         cached = self._ready_cache
-        if max_age_s > 0 and cached is not None and now - cached[0] <= max_age_s:
-            return cached[1]
+        if max_age_s > 0 and cached is not None and cached[1] is not None and now - cached[0] <= max_age_s:
+            return cached[1]  # only "not ready" is reused: a "ready" answer is always fresh
         why = self._not_ready()
         self._ready_cache = (now, why)
         return why
@@ -265,10 +286,11 @@ class ExecutionEngine:
             return True
         try:
             managed = await self._opps.transition(opp.id, state, reason)
-            if managed is not None and managed is not opp:
-                opp.state = managed.state
-            else:
+            if managed is None:
                 opp.state = state
+            elif managed is not opp:
+                opp.state = managed.state
+            # managed is opp: the manager set the state; a handler of its OPP_STATE may have moved it on
             return True
         except KeyError:
             opp.state = state  # not managed (backtest / synthetic) - keep local state
@@ -1236,6 +1258,9 @@ class ExecutionEngine:
             return "manual position is open for this opportunity"
         if self.adapter_for(opp) is None:
             return f"No {self._settings.mode().value} execution adapter for {opp.target_exchange}"
+        busy = self.pair_busy(opp.target_exchange, opp.target_symbol, opp.id)
+        if busy is not None:
+            return busy
         mismatch = self._mode_mismatch(opp)
         if mismatch is not None:
             return mismatch
@@ -1303,6 +1328,11 @@ class ExecutionEngine:
         opp = self._opps.get(opp_id)
         if opp is None:
             return {"ok": False, "reason": "unknown opportunity", "opp_id": opp_id}
+        running = self._tasks.get(opp_id)
+        if running is not None and not running.done():
+            trade = self._active.get(opp_id)
+            return {"ok": False, "reason": "AUTO execution already in progress for this opportunity", "opp_id": opp_id,
+                    "state": opp.state.value, "trade_id": trade.id if trade else None}
         reason = await self._prepare_auto(opp)
         if reason is not None:
             trade = self._active.get(opp_id)
@@ -1435,6 +1465,14 @@ class ExecutionEngine:
         if isinstance(proven, dict) and proven and proven.get("enforced") and not proven.get("proven"):
             # simple mode: AUTO only on pairs that proved themselves on the bot's own virtual trades
             return fail(f"Pair not proven yet: {proven.get('text') or 'training'}")
+        if s.mode() == Mode.LIVE and getattr(s, "proven_gate_enabled", True) and not (
+                isinstance(proven, dict) and proven.get("proven")):
+            # real money: only a proven pair, in any mode (no assessment = not proven)
+            text = proven.get("text") if isinstance(proven, dict) else ""
+            return fail(f"Pair not proven yet: {text or 'no record'}")
+        busy = self.pair_busy(opp.target_exchange, opp.target_symbol, opp.id)
+        if busy is not None:
+            return fail(busy)
         if s.mode() == Mode.LIVE and getattr(s, "live_requires_ready", True):
             missing = self.not_ready()
             if missing is not None:
