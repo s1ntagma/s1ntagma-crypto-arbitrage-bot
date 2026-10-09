@@ -32,6 +32,9 @@ from .proven import current_strategy
 from ..models import TERMINAL_STATES, Opportunity, OppState
 
 PERIOD_KEY = "stats_period_start_ts"  # kv: Stats count virtual trades opened from here on (history stays)
+# kv: set by the first start of the build that rejects crossed books - older virtual trades may have
+# bought at a stale ask and sold above it (fake profit), so Stats / PAIRS / READY start over once
+PERIOD_RESET_FLAG = "period_reset_crossed_books_v1"
 
 # expiry reasons that mean the last seen price is old (pipeline / OpportunityManager.sweep)
 _STALE_REASONS = frozenset({"target book stale", "no updates"})
@@ -376,9 +379,12 @@ class ShadowTrader:
             return None
         try:
             v = kv_get(PERIOD_KEY)
-            if v is None:
+            if v is None or not kv_get(PERIOD_RESET_FLAG):
+                if v is not None:
+                    log.info("stats: new period - virtual trades of older builds may sit on crossed order books")
                 v = self._clock.wall()
                 kv_set(PERIOD_KEY, v)
+                kv_set(PERIOD_RESET_FLAG, v)
             return float(v)
         except Exception:  # noqa: BLE001
             log.exception("stats period not available; counting every trade")

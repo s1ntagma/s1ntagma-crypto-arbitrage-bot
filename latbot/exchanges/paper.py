@@ -202,7 +202,7 @@ class PaperAdapter(ExchangeAdapter):
         """The inner book for ``symbol`` when it is no older than
         ``settings.max_data_age_ms``; None when missing or stale."""
         book = self.inner.order_book(symbol)
-        if book is None or book.age_ms(self.clock.mono()) > float(self.settings.max_data_age_ms):
+        if book is None or book.age_ms(self.clock.mono()) > float(self.settings.max_data_age_ms) or book.is_crossed:
             return None
         return book
 

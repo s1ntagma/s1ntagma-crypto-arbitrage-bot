@@ -109,6 +109,8 @@ ExchangeFactory = Callable[[str, dict[str, Any]], Any]
 
 _DEMO_MARKERS = ("api-demo", "demo", "testnet", "sandbox", "test")
 _TRADES_MAX_FAILURES = 3
+_CROSSED_REST_S = 5.0  # a crossed WS book is replaced by at most one REST snapshot per symbol this often
+_CROSSED_RESUB_S = 30.0  # ... and the WS book is re-subscribed (fresh snapshot) at most this often
 
 # Rate limits: floors per response kind, escalation on repeated hits (see _rate_limited)
 _RL_FLOOR_429_S = 1.0  # RateLimitExceeded (HTTP 429 / Binance -1003)
@@ -240,6 +242,10 @@ class CcxtAdapter(ExchangeAdapter):
         self._ws_depth: int | None = snap_depth(cfg.book_depth, _WS_BOOK_LIMITS.get(cfg.ccxt_name, [cfg.book_depth]))
         self._err_log_mono: dict[str, float] = {}
         self._err_counts: dict[str, int] = {}
+        self.crossed_books = 0  # WS books dropped as crossed (bid >= ask): shown in DIAG
+        self._crossed_rest_mono: dict[str, float] = {}
+        self._crossed_resub_mono: dict[str, float] = {}
+        self._crossed_log_mono: dict[str, float] = {}
         self._health_interval = health_interval_s
         opts = self._build_opts()
         self.public: Any = self._factory(cfg.ccxt_name, opts)
@@ -582,6 +588,10 @@ class CcxtAdapter(ExchangeAdapter):
                 else:
                     ob = await self.public.watch_order_book(symbol, self._ws_depth)
                 book = self._normalise_book(asset, symbol, ob)
+                if book.is_crossed:
+                    backoff = self._backoff_min
+                    await self._on_crossed(asset, symbol, book)
+                    continue
                 self._books[asset] = book
                 self._mark_msg(book.ts.exchange_ts, book.ts.recv_ts, book.ts.recv_mono)
                 backoff = self._backoff_min
@@ -599,6 +609,48 @@ class CcxtAdapter(ExchangeAdapter):
                 self._on_stream_error("book", symbol, exc, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, self._backoff_max)
+
+    async def _on_crossed(self, asset: str, symbol: str, book: OrderBook) -> None:
+        """A crossed WS book (bid >= ask) is a broken cache - typically stale levels on one side after a
+        reconnect - and is never published (hard rule 1).  The venue has no price for ``asset`` until a
+        sane book arrives: one REST snapshot is tried at once (throttled) and the WS book is
+        re-subscribed so the library loads a fresh snapshot."""
+        self.crossed_books += 1
+        self._books.pop(asset, None)  # the last book is not current any more
+        now = self.clock.mono()
+        last_log = self._crossed_log_mono.get(symbol)
+        if last_log is None or now - last_log >= 60.0:
+            log.warning("%s: crossed order book for %s dropped (bid %.10g >= ask %.10g; %d so far)",
+                        self.name, symbol, book.best_bid or 0.0, book.best_ask or 0.0, self.crossed_books)
+            self._crossed_log_mono[symbol] = now
+        last_resub = self._crossed_resub_mono.get(symbol)
+        unwatch = getattr(self.public, "un_watch_order_book", None)
+        if unwatch is not None and (getattr(self.public, "has", None) or {}).get("unWatchOrderBook") and (
+                last_resub is None or now - last_resub >= _CROSSED_RESUB_S):
+            self._crossed_resub_mono[symbol] = now
+            try:
+                await unwatch(symbol)  # the next watch_order_book subscribes again from a fresh snapshot
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.debug("%s: un_watch_order_book %s failed: %s", self.name, symbol, exc)
+        last = self._crossed_rest_mono.get(symbol)
+        if last is not None and now - last < _CROSSED_REST_S:
+            return
+        self._crossed_rest_mono[symbol] = now
+        try:
+            rest = await self.fetch_order_book(symbol)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.debug("%s: REST book for %s after a crossed WS book failed: %s", self.name, symbol, exc)
+            return
+        if rest.is_crossed or not rest.bids or not rest.asks:
+            self.crossed_books += 1 if rest.is_crossed else 0
+            return
+        self._books[asset] = rest
+        self._mark_msg(rest.ts.exchange_ts, rest.ts.recv_ts, rest.ts.recv_mono)
+        await self.bus.publish(events.BOOK, rest)
 
     def _ticker_from(self, asset: str, symbol: str, t: dict[str, Any]) -> Ticker:
         return Ticker(

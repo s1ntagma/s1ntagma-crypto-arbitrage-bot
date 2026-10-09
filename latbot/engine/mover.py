@@ -416,7 +416,7 @@ class MoveDetector:
             if lag < s.min_lag_pct:
                 self.diag.reject("min_lag", asset, target, direction)
                 continue
-            self.diag.signal()
+            self.diag.signal(asset, target, direction)
             if target not in ep.lagging:
                 ep.lagging.add(target)
                 self._stats.record_lagging(asset, target, lag)

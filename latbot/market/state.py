@@ -103,6 +103,10 @@ class MarketState:
         if not asset:
             log.debug("book without asset/symbol ignored exchange=%s", book.exchange)
             return
+        if book.is_crossed:
+            log.debug("crossed book ignored exchange=%s asset=%s bid=%s ask=%s", book.exchange, asset,
+                      book.best_bid, book.best_ask)
+            return  # a data error, never a price (hard rule 1): the stream stays without fresh data
         key = (book.exchange, asset)
         self._books[key] = book
         self._register(book.exchange, asset)

@@ -216,6 +216,9 @@ class Pipeline:
         target exchange that got no new signal (their net decays naturally).
         Never waits on REST: a stale target book is confirmed in the background."""
         self.diag.tick(book.exchange, "book")
+        if book.is_crossed:  # bid >= ask: a data error (stale side), never a price - no detection, no economics
+            self.diag.tick(book.exchange, "crossed")
+            return []
         self._state.on_book(book)
         signals = self._detector.on_book(book) if self.scanned(MarketState.asset_of(book)) else []
         results: list[Opportunity] = []
@@ -798,7 +801,7 @@ class Pipeline:
         cannot carry (hard rule 2).  A REST-only venue has only a ticker: its top of book is charged the
         whole max_slippage_pct budget and flagged approximate."""
         d = 1 if direction >= 0 else -1
-        if book is not None and book.bids and book.asks and book.age_ms(now_mono) <= bound_ms:
+        if book is not None and book.bids and book.asks and not book.is_crossed and book.age_ms(now_mono) <= bound_ms:
             levels = book.bids if d > 0 else book.asks
             w = walk_book(levels, base_amount=max(0.0, float(base_amount)) or None, side=Side.SELL if d > 0 else Side.BUY)
             if w.exhausted or not w.vwap:

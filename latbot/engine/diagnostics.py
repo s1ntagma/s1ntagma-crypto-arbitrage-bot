@@ -71,7 +71,7 @@ class Diagnostics:
     def tick(self, exchange: str, kind: str) -> None:
         d = self.ticks.get(exchange)
         if d is None:
-            d = self.ticks[exchange] = {"book": 0, "ticker": 0, "trade": 0, "poll": 0}
+            d = self.ticks[exchange] = {"book": 0, "ticker": 0, "trade": 0, "poll": 0, "crossed": 0}
         d[kind] = d.get(kind, 0) + 1
 
     def episode(self, asset: str, first_mover: str) -> None:
@@ -102,7 +102,16 @@ class Diagnostics:
             label += f" ({detail})"
         self.recent[reason].append(label)
 
-    def signal(self) -> None:
+    def signal(self, asset: str = "", target: str = "", direction: int = 0) -> None:
+        """Count one lag that reached evaluation.  The same (asset, target, direction) re-evaluated on
+        every book update within ``_DEDUPE_S`` is one signal - counted like the rejections."""
+        if asset or target:
+            now = self._mono()
+            key = ("signal", asset, target, direction)
+            last = self._last_reject.get(key)
+            if last is not None and now - last < _DEDUPE_S:
+                return
+            self._last_reject[key] = now
         self.signals += 1
 
     def opportunity(self) -> None:
@@ -176,6 +185,8 @@ class Diagnostics:
                 "tickers": int(t.get("ticker", 0)),
                 "trades": int(t.get("trade", 0)),
                 "polled": int(t.get("poll", 0)),
+                # broken books (bid >= ask) dropped: by the adapter (WebSocket) and by the pipeline (REST / paper)
+                "crossed": int(t.get("crossed", 0)) + int(getattr(adapter, "crossed_books", 0) or 0),
                 "volumes": int(coverage.get(e.name, 0)),
                 "status": status,
                 "rate_limited_s": rl_left,

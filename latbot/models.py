@@ -198,6 +198,12 @@ class OrderBook:
         return (self.bids[0].price + self.asks[0].price) / 2.0
 
     @property
+    def is_crossed(self) -> bool:
+        """Best bid at or above best ask: impossible on a live venue (the two would have traded), so the
+        book is broken - e.g. stale levels kept on one side after a WebSocket reconnect.  Never a price."""
+        return bool(self.bids and self.asks and self.bids[0].price >= self.asks[0].price)
+
+    @property
     def spread_pct(self) -> float | None:
         if not self.bids or not self.asks:
             return None

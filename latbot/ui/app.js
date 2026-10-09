@@ -1668,6 +1668,7 @@
       tr.appendChild(h('td', { class: 'num', text: String(x.tickers) }));
       tr.appendChild(h('td', { class: 'num', text: String(x.trades) }));
       tr.appendChild(h('td', { class: 'num', text: String(x.polled == null ? 0 : x.polled) }));
+      tr.appendChild(h('td', { class: 'num' + (x.crossed ? ' diag-bad' : ''), text: String(x.crossed == null ? 0 : x.crossed) }));
       tr.appendChild(h('td', { class: 'num', text: String(x.volumes == null ? '—' : x.volumes) }));
       tr.appendChild(h('td', { class: 'num', text: x.last_data_s == null ? '—' : x.last_data_s + ' s ago' }));
       tr.appendChild(h('td', { class: 'wrap ' + (x.status ? 'diag-bad' : ''), text: x.status || 'ok' }));

@@ -21,6 +21,7 @@ Key = tuple[str, str]  # (asset, exchange)
 
 
 _CATCHUP_FLAG = "catchup_unbiased_v2"
+_CLEAN_BOOKS_FLAG = "catchup_clean_books_v3"  # samples measured before crossed books were rejected
 
 
 class StatsStore:
@@ -42,10 +43,14 @@ class StatsStore:
                 log.exception("stats load failed; starting empty")
 
     def _drop_biased_catchups(self) -> None:
-        """Builds before the fix recorded catch-up ratios only for targets that DID follow (survivor
-        bias): those samples are dropped once; everything else stays."""
+        """Catch-up samples recorded by older builds are dropped once per fix; everything else stays:
+        v2 - only targets that DID follow were recorded (survivor bias); v3 - target moves were measured
+        on crossed (broken) books, which moved the target's mid without a real trade."""
         kv_get, kv_set = getattr(self._db, "kv_get", None), getattr(self._db, "kv_set", None)
-        if kv_get is None or kv_set is None or kv_get(_CATCHUP_FLAG):
+        if kv_get is None or kv_set is None:
+            return
+        missing = [flag for flag in (_CATCHUP_FLAG, _CLEAN_BOOKS_FLAG) if not kv_get(flag)]
+        if not missing:
             return
         n = 0
         for rs in self._stats.values():
@@ -54,8 +59,10 @@ class StatsStore:
                 rs.catchup_ratios = []
                 self._touch(rs)
         self.save()
-        kv_set(_CATCHUP_FLAG, True)
-        log.info("stats: dropped %d biased catch-up samples (re-learned from every episode now)", n)
+        for flag in missing:
+            kv_set(flag, True)
+        log.info("stats: dropped %d catch-up samples of older builds (%s); re-learned from every episode now",
+                 n, ", ".join(missing))
 
     # ------------------------------------------------------------------ #
     # access
