@@ -460,6 +460,11 @@ class ShadowTrader:
         return out
 
 
+    def readiness(self) -> dict[str, Any]:
+        """The Stats READY checklist of the current period (LIVE AUTO waits for it)."""
+        return self.summary().get("readiness") or {}
+
+
 def _group(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for r in rows:

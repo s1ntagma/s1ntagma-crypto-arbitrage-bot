@@ -38,7 +38,7 @@ import dataclasses
 import inspect
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .. import events
 from ..clock import Clock
@@ -187,10 +187,37 @@ class ExecutionEngine:
         self._rest_book_mono: dict[tuple[str, str], float] = {}  # (exchange, symbol) -> last REST book attempt
         self._rate_limited_until: dict[str, float] = {}  # exchange -> loop time a RateLimited told us to stay away until
         self._restored: list[TradeRecord] = []
+        # the Stats READY checklist (ShadowTrader.readiness); LIVE AUTO waits for it (live_requires_ready)
+        self.readiness: Callable[[], dict[str, Any]] | None = None
+        self._ready_cache: tuple[float, str | None] | None = None  # (mono, answer) of the last READY check
 
     # ------------------------------------------------------------------ #
     # small helpers
     # ------------------------------------------------------------------ #
+    def not_ready(self, max_age_s: float = 0.0) -> str | None:
+        """None when the Stats READY checklist passes; otherwise what is missing (no record = not ready).
+        ``max_age_s`` > 0 reuses an answer that young (the autopilot asks on every opportunity update)."""
+        now = self._clock.mono()
+        cached = self._ready_cache
+        if max_age_s > 0 and cached is not None and now - cached[0] <= max_age_s:
+            return cached[1]
+        why = self._not_ready()
+        self._ready_cache = (now, why)
+        return why
+
+    def _not_ready(self) -> str | None:
+        try:
+            r = self.readiness() if self.readiness is not None else None
+        except Exception:  # noqa: BLE001
+            log.exception("readiness check failed")
+            r = None
+        if not isinstance(r, dict):
+            return "no measured record (Stats READY unavailable)"
+        if r.get("ready"):
+            return None
+        missing = [str(c.get("label")) for c in (r.get("checks") or []) if isinstance(c, dict) and not c.get("ok")]
+        return "; ".join(missing) or "Stats READY says no"
+
     def adapter_for(self, opp: Opportunity) -> ExchangeAdapter | None:
         """Execution adapter of the current mode for the opportunity's target."""
         return self._exec_adapters.get(self._settings.mode(), {}).get(opp.target_exchange)
@@ -1408,6 +1435,10 @@ class ExecutionEngine:
         if isinstance(proven, dict) and proven and proven.get("enforced") and not proven.get("proven"):
             # simple mode: AUTO only on pairs that proved themselves on the bot's own virtual trades
             return fail(f"Pair not proven yet: {proven.get('text') or 'training'}")
+        if s.mode() == Mode.LIVE and getattr(s, "live_requires_ready", True):
+            missing = self.not_ready()
+            if missing is not None:
+                return fail(f"Not ready for LIVE: {missing}")
         if isinstance(quality, dict) and quality and quality.get("enforced", True) and not quality.get("passed", False):
             # Phase 3: AUTO only on signals that pass the quality check on the LATEST book (simple mode: info only)
             vetoes = "; ".join(str(v) for v in (quality.get("vetoes") or []))

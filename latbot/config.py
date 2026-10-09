@@ -289,6 +289,11 @@ class Settings:
     max_daily_loss_quote: float = 50.0  # MAX_DAILY_LOSS
     max_exposure_per_exchange_quote: float = 500.0
     max_exposure_per_asset_quote: float = 300.0
+    # what AUTO may keep in open trades on ONE venue ("сколько я закину на каждую биржу"); a venue
+    # without an entry is limited by max_exposure_per_exchange_quote and its real free balance only
+    exchange_budget_quote: dict[str, float] = field(default_factory=dict)
+    live_requires_ready: bool = True  # LIVE AUTO only while the Stats READY checklist says yes
+    autopilot: bool = False  # AUTO without a click (execution/autopilot.py); every gate still applies
     allow_downsize: bool = True  # if balance < capital -> use max available
 
     # ---- execution behaviour ---------------------------------------------
@@ -472,6 +477,8 @@ class Settings:
             cur = getattr(self, k)
             if k == "exchanges":
                 new = _merge_default_exchanges([_exchange_from_dict(x) for x in v])
+            elif isinstance(cur, dict):
+                new = _budgets(v)
             elif isinstance(cur, bool):
                 new = _to_bool(v)
             elif isinstance(cur, int) and not isinstance(cur, bool):
@@ -511,6 +518,7 @@ class Settings:
                          ("ride_trail_pct", 0.01), ("ride_max_hold_s", 5.0), ("ride_stale_s", 2.0)):
             setattr(self, name, max(lo, float(getattr(self, name))))
         self.ws_assets = max(1, min(50, int(self.ws_assets)))
+        self.exchange_budget_quote = _budgets(self.exchange_budget_quote)
         if self.capital_quote <= 0 or self.max_trade_quote <= 0:
             raise ValueError("capital must be > 0")
         if self.rest_book_timeout_s <= 0:
@@ -526,6 +534,22 @@ class Settings:
         if self.live_mode and self.paper_mode:
             # paper wins; live requires explicitly turning paper off
             self.live_mode = False
+
+
+def _budgets(v: Any) -> dict[str, float]:
+    """Exchange budgets from a dict or the UI text "kraken=200, okx=500"; unreadable or <= 0 entries dropped."""
+    items = v.items() if isinstance(v, dict) else (
+        part.split("=", 1) for part in str(v or "").split(",") if "=" in part)
+    out: dict[str, float] = {}
+    for name, amount in items:
+        try:
+            x = float(amount)
+        except (TypeError, ValueError):
+            continue
+        name = str(name).strip().lower()
+        if name and x > 0 and x == x and x != float("inf"):
+            out[name] = x
+    return out
 
 
 def _to_bool(v: Any) -> bool:

@@ -343,6 +343,19 @@
           <input type="number" name="max_trade_quote" step="1" min="1" inputmode="decimal"></label>
       </fieldset>
       <fieldset class="fieldset">
+        <legend>AUTO limits</legend>
+        <label class="check"><input type="checkbox" name="autopilot"> <span>Autopilot: AUTO opens and closes trades by itself (proven pairs only, every limit below applies)</span></label>
+        <label class="check"><input type="checkbox" name="live_requires_ready"> <span>LIVE AUTO only when Stats READY says yes (proven pairs only in any case)</span></label>
+        <label class="field"><span class="field-label">Budget per exchange (quote), e.g. kraken=200, okx=500</span>
+          <input type="text" name="exchange_budget_quote" data-kind="budgets" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span class="field-label">Max per exchange, any venue (quote)</span>
+          <input type="number" name="max_exposure_per_exchange_quote" step="any" min="1" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">MAX_DAILY_LOSS (quote)</span>
+          <input type="number" name="max_daily_loss_quote" step="any" min="1" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">Max simultaneous trades</span>
+          <input type="number" name="max_simultaneous_trades" step="1" min="1" inputmode="numeric"></label>
+      </fieldset>
+      <fieldset class="fieldset">
         <legend>Thresholds</legend>
         <label class="field"><span class="field-label">Show opportunities from NET %</span>
           <input type="number" name="min_net_pct_show" step="0.05" min="0" inputmode="decimal"></label>

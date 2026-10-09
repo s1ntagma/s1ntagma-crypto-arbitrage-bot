@@ -1143,6 +1143,7 @@ async def test_auto_and_manual_refuse_when_mode_changed_since_detection() -> Non
             a.books[sym] = make_book(sym, env.clock, exchange=cfg.name)
         live_adapters[cfg.name] = a
     env.engine._exec_adapters[Mode.LIVE] = live_adapters  # type: ignore[index]
+    env.engine.readiness = lambda: {"ready": True, "checks": []}  # the Stats READY checklist passed (LIVE AUTO gate)
     opp = env.opps.add(make_opp(env.clock))
     assert opp.mode is Mode.PAPER
     env.settings.update({"paper_mode": False, "live_mode": True})

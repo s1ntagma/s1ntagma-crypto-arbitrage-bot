@@ -436,6 +436,29 @@ async def test_fetch_tickers_keyed_by_asset():
     assert h.public.loaded == 1
 
 
+async def test_fetch_tickers_falls_back_when_the_venue_takes_one_symbol_only():
+    """Crypto.com: fetchTickers(symbols) refuses more than one symbol -> one call for all markets,
+    filtered; later rounds skip the refused form (no error every poll)."""
+    h = Harness(spot_cfg())
+    h.public.tickers = {
+        "BTC/EUR": {"symbol": "BTC/EUR", "bid": 1, "ask": 2, "last": 1.5, "quoteVolume": 100.0},
+        "ETH/USDC": {"symbol": "ETH/USDC", "bid": 1, "ask": 2, "last": 1.5, "quoteVolume": 50.0},
+    }
+    calls: list[Any] = []
+    plain = h.public.fetch_tickers
+
+    async def one_symbol_only(symbols: Any = None, params: Any = None) -> Any:
+        calls.append(symbols)
+        if symbols is not None and len(symbols) > 1:
+            raise ccxt.BadRequest("cryptocom fetchTickers() symbols argument cannot contain more than 1 symbol")
+        return await plain(symbols, params)
+
+    h.public.fetch_tickers = one_symbol_only
+    assert set(await h.adapter.fetch_tickers(["BTC", "ETH"])) == {"BTC", "ETH"}
+    assert set(await h.adapter.fetch_tickers(["BTC", "ETH"])) == {"BTC", "ETH"}
+    assert calls == [["BTC/EUR", "ETH/USDC"], None, None]
+
+
 async def test_fetch_tickers_returns_the_whole_universe_after_start():
     """The app starts the adapter with the watchlist first; a later
     ``fetch_tickers()`` (registry.resolve_universe) must still see every

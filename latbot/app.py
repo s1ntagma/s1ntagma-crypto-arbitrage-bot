@@ -59,6 +59,7 @@ from .exchanges.registry import (
 )
 from .execution.engine import ExecutionEngine
 from .execution.risk import RiskManager
+from .execution.autopilot import Autopilot
 from .logging_setup import setup_logging
 from .market.state import MarketState
 from .models import Mode
@@ -128,6 +129,7 @@ class AppContext:
     metalabel: Any = None
     http: Any = None
     listings: dict[str, dict[str, float | None]] = field(default_factory=dict)
+    autopilot: Autopilot | None = None  # AUTO without a click (Settings.autopilot)
     server: Any = None  # uvicorn Server while serving
     server_port: int | None = None  # bound port (port=0 -> OS assigned)
     stop_reason: str = ""
@@ -296,6 +298,8 @@ def build_context(
     exec_adapters = build_execution_adapters(settings, secrets, bus, clock, adapters, db, adapter_factory=adapter_factory)
     risk = RiskManager(settings, db, clock, bus)
     execution = ExecutionEngine(settings, bus, clock, pipeline, opps, exec_adapters, risk, db, stats)
+    execution.readiness = shadow.readiness  # LIVE AUTO waits for the Stats READY checklist
+    autopilot = Autopilot(settings, bus, execution, risk)  # idle until Settings.autopilot is on
     try:
         restored = execution.restore_from_db()  # positions a crash / restart left behind stay tracked
     except Exception:  # noqa: BLE001
@@ -329,6 +333,7 @@ def build_context(
 
     ctx = AppContext(
         settings=settings,
+        autopilot=autopilot,
         secrets=secrets,
         bus=bus,
         clock=clock,

@@ -270,6 +270,7 @@ class CcxtAdapter(ExchangeAdapter):
         self._fee_fetched: set[str] = set()
         self._markets_loaded = False
         self._universe_resolved = False  # resolve_assets(None) ran on the current markets
+        self._tickers_all_only = False  # venue refuses fetchTickers(symbols) with several symbols (Crypto.com)
         self._market_source: ExchangeAdapter | None = None  # see the ``market_source`` property
 
     # ---- construction helpers ---------------------------------------------------
@@ -759,9 +760,19 @@ class CcxtAdapter(ExchangeAdapter):
         if not wanted:
             return {}
         symbols = list(wanted.values())
-        if assets is not None and len(symbols) <= 50:
-            raw = await self._public_call(self.public.fetch_tickers, symbols)
-        else:
+        raw: Any = None
+        if assets is not None and len(symbols) <= 50 and not self._tickers_all_only:
+            try:
+                raw = await self._public_call(self.public.fetch_tickers, symbols)
+            except RateLimited:
+                raise
+            except ExchangeError as exc:
+                refused = (ccxt.BadRequest, ccxt.NotSupported, ccxt.ArgumentsRequired)
+                if len(symbols) < 2 or not isinstance(exc.__cause__, refused):
+                    raise
+                self._tickers_all_only = True  # one call for every market from now on, filtered below
+                log.info("%s: fetchTickers takes no symbol list here; polling every market instead", self.name)
+        if raw is None:
             raw = await self._public_call(self.public.fetch_tickers)
         out: dict[str, Ticker] = {}
         for asset, sym in wanted.items():

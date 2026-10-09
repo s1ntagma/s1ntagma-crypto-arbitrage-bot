@@ -796,6 +796,16 @@ def test_settings_get_has_no_secrets(client):
     assert not SECRET_RE.search(r.text)
 
 
+def test_settings_put_exchange_budgets_from_text(client, ctx, tmp_path):
+    r = client.put("/api/settings", json={"exchange_budget_quote": "kraken=200, OKX=500"})
+    assert r.status_code == 200, r.text
+    assert r.json()["settings"]["exchange_budget_quote"] == {"kraken": 200.0, "okx": 500.0}
+    cfg = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert cfg["exchange_budget_quote"] == {"kraken": 200.0, "okx": 500.0}
+    r = client.put("/api/settings", json={"exchange_budget_quote": ""})
+    assert r.json()["settings"]["exchange_budget_quote"] == {}
+
+
 def test_settings_put(client, ctx, tmp_path):
     seen: list[tuple[str, Any]] = []
     ctx.bus.subscribe_all(lambda topic, payload: seen.append((topic, payload)))

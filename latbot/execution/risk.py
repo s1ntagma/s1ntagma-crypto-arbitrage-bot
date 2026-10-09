@@ -8,6 +8,7 @@
 * ``total_capital_quote * max_risk_per_trade_pct / 100`` - position size cap
 * ``max_exposure_per_exchange_quote``        - open quote per exchange
 * ``max_exposure_per_asset_quote``           - open quote per asset
+* ``exchange_budget_quote[exchange]``        - the owner's budget on one venue (open quote)
 * ``max_simultaneous_trades``               - open round trips
 * ``max_daily_loss_quote``                  - realized P&L of the UTC day
 * emergency stop
@@ -200,6 +201,9 @@ class RiskManager:
             ("exchange exposure", float(s.max_exposure_per_exchange_quote) - self.exposure(exchange=exchange)),
             ("asset exposure", float(s.max_exposure_per_asset_quote) - self.exposure(asset=asset)),
         ]
+        budget = float((getattr(s, "exchange_budget_quote", None) or {}).get(str(exchange).lower(), 0.0) or 0.0)
+        if budget > 0:
+            caps.append((f"budget on {exchange}", budget - self.exposure(exchange=exchange)))
         binding, allowed = min(caps, key=lambda c: c[1])
         allowed = max(0.0, allowed)
         if allowed < float(s.min_trade_quote):

@@ -24,7 +24,9 @@
     'simple_mode', 'simple_entry_deadline_s', 'simple_max_hold_s',
     'ride_enabled', 'ride_entry_max_age_s', 'ride_reversal_pct', 'ride_stall_s', 'ride_trail_arm_pct', 'ride_trail_pct',
     'ride_stop_pct', 'ride_max_hold_s', 'shadow_balance_quote', 'shadow_unlimited',
-    'proven_gate_enabled', 'proven_min_trades', 'proven_min_p10'
+    'proven_gate_enabled', 'proven_min_trades', 'proven_min_p10',
+    'autopilot', 'live_requires_ready', 'max_daily_loss_quote', 'max_exposure_per_exchange_quote', 'max_simultaneous_trades',
+    'exchange_budget_quote'
   ];
 
   var state = {
@@ -2681,6 +2683,7 @@
       var el = form.elements[name];
       if (!el) return;
       if (el.type === 'checkbox') el.checked = !!s[name];
+      else if (el.dataset.kind === 'budgets') el.value = budgetText(s[name]);
       else el.value = s[name] === undefined || s[name] === null ? '' : String(s[name]);
     });
     var mode = s.mode || state.mode || 'paper';
@@ -2693,6 +2696,12 @@
     $('settings-status').className = 'status-line';
   }
 
+  // {"kraken": 200, "okx": 500} <-> "kraken=200, okx=500" (Settings: exchange_budget_quote)
+  function budgetText(v) {
+    if (!v || typeof v !== 'object') return '';
+    return Object.keys(v).sort().map(function (k) { return k + '=' + v[k]; }).join(', ');
+  }
+
   function readSettingsPatch() {
     var form = $('settings-form');
     var s = state.settings || {};
@@ -2702,6 +2711,9 @@
       if (!el) return;
       if (el.type === 'checkbox') {
         if (el.checked !== !!s[name]) patch[name] = el.checked;
+      } else if (el.dataset.kind === 'budgets') {
+        var text = el.value.trim();
+        if (text !== budgetText(s[name])) patch[name] = text;  // "" clears every budget
       } else {
         if (el.value === '') return;
         var n = num(el.value);

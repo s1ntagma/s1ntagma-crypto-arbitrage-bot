@@ -415,6 +415,31 @@ async def test_auto_flow_to_closed_paper_trade(tmp_path: Path) -> None:
         ctx.db.close()
 
 
+async def test_autopilot_trades_without_a_click(tmp_path: Path) -> None:
+    """Settings.autopilot: the detected opportunity is executed by itself (PAPER), same flow as AUTO."""
+    b = build(tmp_path, autopilot=True)
+    ctx = b.ctx
+    try:
+        assert ctx.autopilot is not None
+        ctx.execution.poll_interval_s = 0.01
+        opp = await detect(b)
+        ex = ctx.execution
+
+        def entry_filled() -> bool:
+            trades = ex.trades()
+            return bool(trades and trades[0].entry_order is not None and trades[0].entry_order.filled > 0)
+
+        await wait_for(entry_filled, timeout=5.0)  # nobody pressed AUTO
+        await push_all(b.fakes, {"kraken": 102.0})
+        await wait_for(lambda: ex.trades()[0].state is OppState.CLOSED, timeout=10.0)
+        trade = ex.trades()[0]
+        assert trade.opportunity_id == opp.id and trade.mode is Mode.PAPER and trade.realized_pnl_quote > 0
+        assert len(ex.trades()) == 1  # one attempt per opportunity
+    finally:
+        await ctx.pipeline.stop()
+        ctx.db.close()
+
+
 # --------------------------------------------------------------------------- #
 # 6. hard rule 4: revalidation cancels when the edge is gone
 # --------------------------------------------------------------------------- #
