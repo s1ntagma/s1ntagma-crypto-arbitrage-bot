@@ -344,6 +344,8 @@ class ExecutionEngine:
         s = self._settings
         now = self._clock.mono()
         book = adapter.order_book(symbol)
+        if book is not None and book.is_broken:
+            book = None  # a broken cache (bid >= ask, stale levels) is no book
         age = book.age_ms(now) if book is not None else None
         if book is not None and age is not None and age <= s.max_data_age_ms:
             return book, age
@@ -362,9 +364,12 @@ class ExecutionEngine:
         if rest is None:
             return book, age
         try:
-            await self._bus.publish(events.BOOK, rest)
+            await self._bus.publish(events.BOOK, rest)  # the pipeline's state sees it (a broken one invalidates)
         except Exception:  # noqa: BLE001
             log.exception("BOOK publish failed")
+        if rest.is_broken:
+            log.warning("%s: REST book for %s is crossed (bid >= ask): no price", adapter.name, symbol)
+            return None, None
         return rest, rest.age_ms(self._clock.mono())
 
     # ------------------------------------------------------------------ #

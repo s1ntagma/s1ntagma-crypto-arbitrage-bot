@@ -50,7 +50,8 @@ async def test_crossed_ws_book_is_dropped_and_rest_snapshot_used():
     finally:
         await h.adapter.stop()
     books = h.of(events.BOOK)
-    assert len(books) == 1 and not books[0].is_crossed and books[0].best_bid == 101.0  # the REST snapshot
+    assert [b.is_broken for b in books] == [True, False]  # the broken one first (invalidation), then the REST snapshot
+    assert books[1].best_bid == 101.0
     assert h.adapter.crossed_books == 1
     assert not h.adapter.order_book("BTC").is_crossed
 
@@ -64,7 +65,7 @@ async def test_crossed_ws_book_without_a_sane_snapshot_leaves_no_price():
         await asyncio.sleep(0.05)
     finally:
         await h.adapter.stop()
-    assert all(not b.is_crossed for b in h.of(events.BOOK))
+    assert [b.is_broken for b in h.of(events.BOOK)] == [False, True]  # the sane book, then the invalidation
     assert h.adapter.order_book("BTC") is None  # the last sane book is not kept as if it were current
     assert h.adapter.crossed_books >= 1
 
@@ -102,7 +103,7 @@ def test_market_state_ignores_a_crossed_book():
 def test_economics_refuse_a_crossed_book():
     clock = SimClock()
     e = compute_economics(book(105.0, 103.0, clock), 1, Fees(maker=0.001, taker=0.001), 100.0, 1.0, Settings(), clock.mono())
-    assert not e.liquidity_ok and "crossed" in e.liquidity_reason and e.executable_quote == 0.0
+    assert not e.liquidity_ok and "bid >= ask" in e.liquidity_reason and e.executable_quote == 0.0
 
 
 def test_paper_venue_never_fills_from_a_crossed_book():

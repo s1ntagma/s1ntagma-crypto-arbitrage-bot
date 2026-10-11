@@ -187,18 +187,20 @@ def compute_economics(
     exit_side = Side.SELL if d > 0 else Side.BUY
     spread = book.spread_pct or 0.0
 
-    crossed = book.is_crossed  # a broken book (bid >= ask) is a data error, never a price (hard rule 1)
+    crossed = book.is_broken  # a broken book (bid >= ask, stale levels) is a data error, never a price (hard rule 1)
     if not entry_levels or not exit_levels or crossed:
+        px_in = entry_levels[0].price if entry_levels and not crossed else 0.0
+        px_out = exit_levels[0].price if exit_levels and not crossed else 0.0
         return ExecutionEconomics(
             direction=d,
             capital_quote=capital,
             executable_quote=0.0,
             base_amount=0.0,
-            entry_best=entry_levels[0].price if entry_levels else 0.0,
-            entry_vwap=entry_levels[0].price if entry_levels else 0.0,
-            exit_best=exit_levels[0].price if exit_levels else 0.0,
-            exit_vwap_now=exit_levels[0].price if exit_levels else 0.0,
-            exit_target=exit_levels[0].price if exit_levels else 0.0,
+            entry_best=px_in,
+            entry_vwap=px_in,
+            exit_best=px_out,
+            exit_vwap_now=px_out,
+            exit_target=px_out,
             spread_pct=spread,
             entry_fee_pct=taker_pct,
             exit_fee_pct=taker_pct,
@@ -210,7 +212,8 @@ def compute_economics(
             net_pct=-total_cost,
             net_quote=0.0,
             liquidity_ok=False,
-            liquidity_reason="crossed book (bid >= ask): data error, no price" if crossed else "empty book side",
+            liquidity_reason=(f"broken book ({book.broken or 'bid >= ask'}): data error, no price" if crossed
+                              else "empty book side"),
             book_age_ms=age_ms,
             bid_depth_quote=bid_depth,
             ask_depth_quote=ask_depth,

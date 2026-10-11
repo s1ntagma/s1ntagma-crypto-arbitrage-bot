@@ -541,6 +541,11 @@ class Database:
                  json.dumps(row, ensure_ascii=False, default=_json_default)),
             )
 
+    def clear_metalabel_outcomes(self) -> None:
+        """Drop every persisted meta-label outcome (one-time cleanup of data measured on broken books)."""
+        with self._lock:
+            self._conn.execute("DELETE FROM metalabel_outcomes")
+
     def load_metalabel_outcomes(self, limit: int = 20000) -> list[dict[str, Any]]:
         """The most recent ``limit`` outcomes, oldest first."""
         rows = self._json_rows("SELECT json FROM metalabel_outcomes ORDER BY seq DESC LIMIT ?", (int(limit),))

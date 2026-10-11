@@ -47,6 +47,7 @@ class MarketState:
         self._last_append_mono: dict[Key, float] = {}  # throttle anchor per stream
         self._pending_tick: dict[Key, tuple[float, float]] = {}  # held outlier ticker tick per stream
         self._last_data_mono: dict[Key, float] = {}  # last book OR ticker recv_mono
+        self._broken: set[Key] = set()  # book streams whose cache broke (crossed / stale levels): no price until a sane book
         self._volume24h: dict[Key, float] = {}
         self._health: dict[str, ExchangeHealth] = {}
         self._assets: dict[str, set[str]] = {}
@@ -103,11 +104,17 @@ class MarketState:
         if not asset:
             log.debug("book without asset/symbol ignored exchange=%s", book.exchange)
             return
-        if book.is_crossed:
-            log.debug("crossed book ignored exchange=%s asset=%s bid=%s ask=%s", book.exchange, asset,
-                      book.best_bid, book.best_ask)
-            return  # a data error, never a price (hard rule 1): the stream stays without fresh data
         key = (book.exchange, asset)
+        if book.is_broken:
+            # a data error, never a price (hard rule 1): the previous book is not current either - the
+            # stream has no price (is_fresh False, no mid) until a sane book arrives
+            self._books.pop(key, None)
+            self._broken.add(key)
+            self._register(book.exchange, asset)
+            log.debug("broken book exchange=%s asset=%s bid=%s ask=%s %s", book.exchange, asset,
+                      book.best_bid, book.best_ask, book.broken or "crossed")
+            return
+        self._broken.discard(key)
         self._books[key] = book
         self._register(book.exchange, asset)
         mono = book.ts.recv_mono
@@ -141,7 +148,9 @@ class MarketState:
         if prev is None or mono >= prev:
             self._last_data_mono[key] = mono
         mid: float | None = None
-        if ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
+        if ticker.is_crossed:
+            mid = None  # bid >= ask: a data error - liveness and volume count, the price does not
+        elif ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
             mid = (ticker.bid + ticker.ask) / 2.0
         elif ticker.last and ticker.last > 0:
             mid = ticker.last
@@ -243,8 +252,8 @@ class MarketState:
         """True when the stream has data not older than ``max_age_ms`` and the
         exchange is not flagged stale / in maintenance."""
         last = self._last_data_mono.get((exchange, asset))
-        if last is None:
-            return False
+        if last is None or (exchange, asset) in self._broken:
+            return False  # a broken book cache has no price, whatever else (tickers) arrived since
         if (now_mono - last) * 1000.0 > max_age_ms:
             return False
         h = self._health.get(exchange)

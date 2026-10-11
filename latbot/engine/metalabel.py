@@ -247,6 +247,9 @@ def _key_str(key: Key) -> str:
     return "|".join(key) if key else "*"
 
 
+_CLEAN_BOOKS_FLAG = "metalabel_clean_books_v1"  # kv: outcomes of builds that accepted broken books were dropped
+
+
 class MetaLabelStore:
     """Bounded table of triple-barrier outcomes with Beta-posterior estimates."""
 
@@ -262,7 +265,8 @@ class MetaLabelStore:
         self._updated_ts: float | None = None
         self._rejected = 0
         self._duplicates = 0
-        self._load()
+        if not self._clean_old_builds():
+            self._load()
 
     # ------------------------------------------------------------------ #
     # settings
@@ -411,6 +415,26 @@ class MetaLabelStore:
                 save(dict(row))
             except Exception:  # noqa: BLE001
                 log.exception("metalabel: save_metalabel_outcome failed")
+        return True
+
+    def _clean_old_builds(self) -> bool:
+        """Outcomes recorded before crossed / stale books were rejected can be fake wins (a stale ask
+        bought, a real bid sold above it): they are cleared once (kv flag); the store starts empty."""
+        db = self._db
+        kv_get, kv_set = getattr(db, "kv_get", None), getattr(db, "kv_set", None)
+        if kv_get is None or kv_set is None:
+            return False
+        try:
+            if kv_get(_CLEAN_BOOKS_FLAG):
+                return False
+            clear = getattr(db, "clear_metalabel_outcomes", None)
+            if callable(clear):
+                clear()
+            kv_set(_CLEAN_BOOKS_FLAG, True)
+        except Exception:  # noqa: BLE001
+            log.exception("metalabel: cleanup of older outcomes failed; loading them")
+            return False
+        log.info("metalabel: outcomes of older builds cleared (measured before broken books were rejected)")
         return True
 
     def _load(self) -> None:

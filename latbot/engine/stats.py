@@ -54,7 +54,15 @@ class StatsStore:
             return
         n = 0
         for rs in self._stats.values():
-            if rs.catchup_ratios:
+            if _CLEAN_BOOKS_FLAG in missing:
+                # every measurement taken from the target's mid (broken books moved it without a trade);
+                # the owner's real trades (manual_*, success / fail, realized returns) stay
+                n += len(rs.catchup_ratios) + len(rs.reaction_delays_s) + len(rs.opp_durations_s) + len(rs.lag_sizes_pct)
+                rs.catchup_ratios, rs.reaction_delays_s, rs.opp_durations_s, rs.lag_sizes_pct = [], [], [], []
+                rs.caught_up_total = rs.caught_up_ok = rs.human_window_total = rs.human_window_ok = 0
+                rs.false_signal_count = rs.lagging_count = rs.first_mover_count = 0
+                self._touch(rs)
+            elif rs.catchup_ratios:
                 n += len(rs.catchup_ratios)
                 rs.catchup_ratios = []
                 self._touch(rs)

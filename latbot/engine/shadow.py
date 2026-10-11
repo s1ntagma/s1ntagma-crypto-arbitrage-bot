@@ -37,7 +37,7 @@ PERIOD_KEY = "stats_period_start_ts"  # kv: Stats count virtual trades opened fr
 PERIOD_RESET_FLAG = "period_reset_crossed_books_v1"
 
 # expiry reasons that mean the last seen price is old (pipeline / OpportunityManager.sweep)
-_STALE_REASONS = frozenset({"target book stale", "no updates"})
+_STALE_REASONS = frozenset({"target book stale", "no updates", "target book broken"})
 
 log = logging.getLogger(__name__)
 

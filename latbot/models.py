@@ -182,6 +182,7 @@ class OrderBook:
     ts: Timestamps
     asset: str = ""  # canonical key (base), filled by adapter
     seq: int | None = None
+    broken: str = ""  # why this book is a data error (set by the adapter, e.g. a print outside its top of book)
 
     @property
     def best_bid(self) -> float | None:
@@ -202,6 +203,11 @@ class OrderBook:
         """Best bid at or above best ask: impossible on a live venue (the two would have traded), so the
         book is broken - e.g. stale levels kept on one side after a WebSocket reconnect.  Never a price."""
         return bool(self.bids and self.asks and self.bids[0].price >= self.asks[0].price)
+
+    @property
+    def is_broken(self) -> bool:
+        """Never a price: crossed, or flagged broken by the adapter.  Consumers check this one."""
+        return bool(self.broken) or self.is_crossed
 
     @property
     def spread_pct(self) -> float | None:
@@ -239,6 +245,12 @@ class Ticker:
     asset: str = ""
     base_volume: float | None = None
     quote_volume: float | None = None
+
+    @property
+    def is_crossed(self) -> bool:
+        """bid ABOVE ask (both > 0): a data error, never a price.  A locked ticker (bid == ask) is a
+        coarse quote some venues send and stays a price; a locked BOOK cannot exist (OrderBook.is_crossed)."""
+        return bool(self.bid and self.ask and self.bid > 0 and self.ask > 0 and self.bid > self.ask)
 
 
 @dataclass(slots=True)

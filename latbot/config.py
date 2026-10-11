@@ -216,6 +216,9 @@ class Settings:
     ws_assets: int = 25  # WebSocket streams per exchange: the whole Phase 3 pool (REST polling is 1-2 s slower)
     ticker_poll_enabled: bool = True  # fetch_tickers on every exchange for ALL common assets
     ticker_poll_interval_s: float = 2.0
+    # re-subscribe every WebSocket book stream this often (a fresh snapshot: a silent reconnect cannot
+    # keep stale levels in the library's cache); 0 = off
+    ws_book_resubscribe_s: float = 300.0
     poll_assets_max: int = 600  # cap on polled assets (common to >= 2 exchanges)
     confirm_with_rest_book: bool = True  # for polled assets fetch the target REST book before creating an opportunity
     rest_book_timeout_s: float = 2.0  # REST book confirmation: per-request timeout (single-flight, bounded per exchange)
@@ -519,6 +522,7 @@ class Settings:
                          ("ride_trail_pct", 0.01), ("ride_max_hold_s", 5.0), ("ride_stale_s", 2.0)):
             setattr(self, name, max(lo, float(getattr(self, name))))
         self.ws_assets = max(1, min(50, int(self.ws_assets)))
+        self.ws_book_resubscribe_s = max(0.0, float(self.ws_book_resubscribe_s))
         self.exchange_budget_quote = _budgets(self.exchange_budget_quote, self.exchanges, strict=False)
         for f in fields(self):  # a hand-edited config.json may hold "false" / "0": never truthy strings
             if f.type in ("bool", bool) and not isinstance(getattr(self, f.name), bool):

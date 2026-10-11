@@ -202,6 +202,8 @@ class Pipeline:
 
     async def _on_ticker(self, ticker: Ticker) -> None:
         self.diag.tick(ticker.exchange, "ticker")
+        if ticker.is_crossed:
+            self.diag.tick(ticker.exchange, "crossed")
         self._state.on_ticker(ticker)
         if not self.scanned(MarketState.asset_of(ticker)):
             return
@@ -216,8 +218,10 @@ class Pipeline:
         target exchange that got no new signal (their net decays naturally).
         Never waits on REST: a stale target book is confirmed in the background."""
         self.diag.tick(book.exchange, "book")
-        if book.is_crossed:  # bid >= ask: a data error (stale side), never a price - no detection, no economics
+        if book.is_broken:  # bid >= ask / stale levels: a data error, never a price - no detection, no economics
             self.diag.tick(book.exchange, "crossed")
+            self._state.on_book(book)  # invalidates the stream: no price until a sane book arrives
+            await self._broken_target(book.exchange, MarketState.asset_of(book))
             return []
         self._state.on_book(book)
         signals = self._detector.on_book(book) if self.scanned(MarketState.asset_of(book)) else []
@@ -236,6 +240,13 @@ class Pipeline:
                 await self.refresh(opp)
         book.ts.proc_mono = self._clock.mono()
         return results
+
+    async def _broken_target(self, exchange: str, asset: str) -> None:
+        """The target's book cache broke: its live offers rest on a price that no longer exists."""
+        for direction in (1, -1):
+            opp = self._opps.find_active(asset, exchange, direction)
+            if opp is not None:
+                await self._opps.expire(opp.id, "target book broken")
 
     # ------------------------------------------------------------------ #
     # fresh target books (REST confirmation)
@@ -302,6 +313,10 @@ class Pipeline:
                 if not fresh.asset:
                     fresh.asset = asset
                 self._state.on_book(fresh)
+                if fresh.is_broken:  # a crossed REST snapshot is no price either
+                    self.diag.tick(target, "crossed")
+                    await self._broken_target(target, asset)
+                    fresh = None
             return fresh
         finally:
             if not fut.done():
@@ -791,7 +806,7 @@ class Pipeline:
         if series and (now - series[-1][0]) * 1000.0 <= bound and self._state.is_fresh(leader, asset, now, bound):
             return float(series[-1][1])
         t = self._state.ticker(leader, asset)
-        if t is not None and t.bid and t.ask and (now - t.ts.recv_mono) * 1000.0 <= bound:
+        if t is not None and t.bid and t.ask and not t.is_crossed and (now - t.ts.recv_mono) * 1000.0 <= bound:
             return (float(t.bid) + float(t.ask)) / 2.0
         return None
 
@@ -801,13 +816,13 @@ class Pipeline:
         cannot carry (hard rule 2).  A REST-only venue has only a ticker: its top of book is charged the
         whole max_slippage_pct budget and flagged approximate."""
         d = 1 if direction >= 0 else -1
-        if book is not None and book.bids and book.asks and not book.is_crossed and book.age_ms(now_mono) <= bound_ms:
+        if book is not None and book.bids and book.asks and not book.is_broken and book.age_ms(now_mono) <= bound_ms:
             levels = book.bids if d > 0 else book.asks
             w = walk_book(levels, base_amount=max(0.0, float(base_amount)) or None, side=Side.SELL if d > 0 else Side.BUY)
             if w.exhausted or not w.vwap:
                 return None
             return float(w.vwap), (book.bids[0].price + book.asks[0].price) / 2.0, False
-        if ticker is not None and ticker.bid and ticker.ask and (now_mono - ticker.ts.recv_mono) * 1000.0 <= bound_ms:
+        if ticker is not None and ticker.bid and ticker.ask and not ticker.is_crossed and (now_mono - ticker.ts.recv_mono) * 1000.0 <= bound_ms:
             slip = max(0.0, float(self._settings.max_slippage_pct)) / 100.0
             px = float(ticker.bid) * (1.0 - slip) if d > 0 else float(ticker.ask) * (1.0 + slip)
             return px, (float(ticker.bid) + float(ticker.ask)) / 2.0, True
