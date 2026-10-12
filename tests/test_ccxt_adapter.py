@@ -491,7 +491,31 @@ async def test_rest_errors_are_translated():
     h.public.fetch_order_book = boom  # type: ignore[assignment]
     with pytest.raises(ExchangeError):
         await h.adapter.fetch_order_book("BTC/EUR")
-    assert h.adapter.health.maintenance is True and h.adapter.health.error_count == 1
+    # a connection blip is not maintenance: the flag would hide the venue's data until restart
+    assert h.adapter.health.maintenance is False and h.adapter.health.error_count == 1
+
+
+async def test_maintenance_is_set_only_by_on_maintenance_and_clears_on_the_next_success():
+    h = Harness(spot_cfg())
+    real = h.public.fetch_order_book
+
+    async def maint(*a, **k):
+        raise ccxt.OnMaintenance("system upgrade")
+
+    h.public.fetch_order_book = maint  # type: ignore[assignment]
+    with pytest.raises(ExchangeError):
+        await h.adapter.fetch_order_book("BTC/EUR")
+    assert h.adapter.health.maintenance is True
+    h.public.fetch_order_book = real  # type: ignore[assignment]
+    await h.adapter.fetch_order_book("BTC/EUR")
+    assert h.adapter.health.maintenance is False  # the venue answers again: no longer in maintenance
+
+
+async def test_maintenance_clears_when_stream_data_arrives():
+    h = Harness(spot_cfg())
+    h.adapter.health.maintenance = True
+    h.adapter._mark_msg(None, h.clock.wall(), h.clock.mono())
+    assert h.adapter.health.maintenance is False
 
 
 async def test_fees_from_market_cfg_and_private_fetch():
@@ -631,7 +655,7 @@ async def test_place_order_error_mapping(exc, expected):
     if expected is RateLimited:
         assert h.adapter.health.rate_limited_until_mono is not None and h.adapter.health.rate_limited_until_mono > h.clock.mono()
         assert info.value.retry_after_s > 0
-    if isinstance(exc, ccxt.ExchangeNotAvailable):
+    if isinstance(exc, ccxt.OnMaintenance):
         assert h.adapter.health.maintenance is True
     else:
         assert h.adapter.health.maintenance is False

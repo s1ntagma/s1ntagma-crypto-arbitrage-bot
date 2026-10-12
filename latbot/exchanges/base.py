@@ -138,6 +138,7 @@ class ExchangeAdapter(abc.ABC):
         self.health.ws_connected = True
         self.health.last_msg_mono = recv_mono
         self.health.stale = False
+        self.health.maintenance = False  # data flows: a maintenance flag from an earlier error is over
         if exchange_ts is not None:
             lat = (recv_ts - exchange_ts) * 1000.0
             if -5000 < lat < 60_000:

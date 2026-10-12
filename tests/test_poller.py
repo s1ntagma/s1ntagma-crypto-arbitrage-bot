@@ -180,6 +180,15 @@ async def test_set_assets_restricts_polling(tmp_path: Path) -> None:
     env.ctx.db.close()
 
 
+async def test_a_successful_poll_clears_a_stale_maintenance_flag(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    env.books({"binance": 100.0, "kucoin": 100.0, "kraken": 100.0})
+    env.fakes["kraken"].health.maintenance = True  # left over from an earlier error
+    await env.poller.poll_once()
+    assert env.fakes["kraken"].health.maintenance is False
+    env.ctx.db.close()
+
+
 async def test_backoff_on_errors_and_rate_limits(tmp_path: Path) -> None:
     env = Env(tmp_path)
     env.books({"binance": 100.0, "kucoin": 100.0, "kraken": 100.0})

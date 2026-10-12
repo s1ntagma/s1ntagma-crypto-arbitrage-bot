@@ -206,6 +206,7 @@ class TickerPoller:
         if health is not None and res:
             try:
                 health.last_poll_mono = now
+                health.maintenance = False  # the venue answers: a flag from an earlier error is over
             except Exception:  # noqa: BLE001
                 pass
         if name in self._failing:

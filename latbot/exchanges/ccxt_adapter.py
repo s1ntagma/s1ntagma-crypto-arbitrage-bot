@@ -880,6 +880,7 @@ class CcxtAdapter(ExchangeAdapter):
             self._mark_error(type(exc).__name__)
             raise self._translate(exc, self.public) from exc
         self._mark_rest_latency((self.clock.mono() - t0) * 1000.0)
+        self.health.maintenance = False  # the venue answers: not in maintenance (any more)
         if self._rest_only:
             # no WebSocket exists: a successful REST call is the liveness signal
             self._mark_msg(None, self.clock.wall(), self.clock.mono())
@@ -1034,7 +1035,9 @@ class CcxtAdapter(ExchangeAdapter):
             return RateLimited(retry_after_s=retry, msg=msg)
         if isinstance(exc, ccxt.InvalidOrder):
             return OrderRejected(msg)
-        if isinstance(exc, ccxt.ExchangeNotAvailable):  # includes OnMaintenance
+        if isinstance(exc, ccxt.OnMaintenance):
+            # only the venue's explicit maintenance answer; a plain ExchangeNotAvailable is how ccxt
+            # reports a connection blip (Wi-Fi, PC sleep) and must not hide the venue's data
             self.health.maintenance = True
             return ExchangeError(msg)
         return ExchangeError(msg)
