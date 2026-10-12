@@ -113,7 +113,8 @@ _DEMO_MARKERS = ("api-demo", "demo", "testnet", "sandbox", "test")
 _TRADES_MAX_FAILURES = 3
 _CROSSED_REST_S = 5.0  # a crossed WS book is replaced by at most one REST snapshot per symbol this often
 _CROSSED_RESUB_S = 30.0  # ... and the WS book is re-subscribed (fresh snapshot) at most this often
-_SWEEP_SETTLE_S = 0.25  # a print outside the top of book is a stale level only if the next book, this much later, still shows it
+_STALE_PRINTS = 3  # a top-of-book level is stale only when this many prints went through it ...
+_STALE_CONFIRM_S = 2.0  # ... over at least this long while every book kept showing exactly that level
 
 # Rate limits: floors per response kind, escalation on repeated hits (see _rate_limited)
 _RL_FLOOR_429_S = 1.0  # RateLimitExceeded (HTTP 429 / Binance -1003)
@@ -249,7 +250,7 @@ class CcxtAdapter(ExchangeAdapter):
         self._crossed_rest_mono: dict[str, float] = {}
         self._crossed_resub_mono: dict[str, float] = {}
         self._crossed_log_mono: dict[str, float] = {}
-        self._suspect: dict[str, tuple[float, float]] = {}  # asset -> (print price outside the cached top of book, recv_mono)
+        self._suspect: dict[str, list] = {}  # asset -> [side 'ask'|'bid', level price, first print recv_mono, prints]
         self._health_interval = health_interval_s
         opts = self._build_opts()
         self.public: Any = self._factory(cfg.ccxt_name, opts)
@@ -751,36 +752,46 @@ class CcxtAdapter(ExchangeAdapter):
                 backoff = min(backoff * 2.0, self._backoff_max)
 
     def _note_print(self, asset: str, trade: Trade) -> None:
-        """A print outside the cached top of book is a *suspicion* of a stale level - the trade channel
-        normally runs ahead of the aggregated book channel - resolved by ``_print_contradicts`` on the
-        next book.  Needs the venue's own timestamps: a print not newer than the book proves nothing."""
+        """A print through the cached top of book (above the best ask / below the best bid) is a
+        *suspicion* of a stale level: the trade channel normally runs ahead of the aggregated book
+        channel and a fast market refills levels, so one print proves nothing.  Prints through the
+        same level are counted; ``_print_contradicts`` confirms or clears on every book.  Needs the
+        venue's own timestamps: a print not newer than the book proves nothing."""
         cached = self._books.get(asset)
-        if cached is None or trade.ts.exchange_ts is None or asset in self._suspect:
+        if cached is None or trade.ts.exchange_ts is None:
             return
         book_ts = cached.ts.exchange_ts if cached.ts.exchange_ts is not None else cached.ts.recv_ts - 0.5
         if trade.ts.exchange_ts <= book_ts:
             return
         price = trade.price
-        if (cached.best_ask is not None and price > cached.best_ask) or (
-                cached.best_bid is not None and price < cached.best_bid):
-            self._suspect[asset] = (price, trade.ts.recv_mono)
+        if cached.best_ask is not None and price > cached.best_ask:
+            side, level = "ask", cached.best_ask
+        elif cached.best_bid is not None and price < cached.best_bid:
+            side, level = "bid", cached.best_bid
+        else:
+            return
+        suspect = self._suspect.get(asset)
+        if suspect is not None and suspect[0] == side and suspect[1] == level:
+            suspect[3] += 1
+        else:
+            self._suspect[asset] = [side, level, trade.ts.recv_mono, 1]
 
     async def _print_contradicts(self, asset: str, symbol: str, book: OrderBook) -> bool:
-        """Resolve a print suspicion with ``book``: a book received ``_SWEEP_SETTLE_S`` after the print
-        that still shows the level the taker would have swept is a stale cache -> broken; a consistent
-        book clears the suspicion; an earlier book waits for the next one."""
+        """Resolve a print suspicion with ``book``: a top that moved off the suspected level clears it;
+        the same level after ``_STALE_PRINTS`` prints through it over ``_STALE_CONFIRM_S`` is a stale
+        cache -> broken (a live market cannot keep trading through a level that never moves)."""
         suspect = self._suspect.get(asset)
         if suspect is None:
             return False
-        price, since = suspect
-        outside = (book.best_ask is not None and price > book.best_ask) or (
-            book.best_bid is not None and price < book.best_bid)
-        if not outside:
+        side, level, since, prints = suspect
+        top = book.best_ask if side == "ask" else book.best_bid
+        if top != level:
             self._suspect.pop(asset, None)
             return False
-        if book.ts.recv_mono - since < _SWEEP_SETTLE_S:
+        if prints < _STALE_PRINTS or book.ts.recv_mono - since < _STALE_CONFIRM_S:
             return False
-        await self._on_broken(asset, symbol, book, f"print {price:.10g} outside the top of book persisted")
+        await self._on_broken(asset, symbol, book,
+                              f"{prints} prints through the {side} {level:.10g} that never moved")
         return True
 
     async def _trades_loop(self, asset: str, symbol: str) -> None:

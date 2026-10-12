@@ -168,13 +168,14 @@ class Reconnecting(FakeCcxt):
         self.unwatched.append(symbol)
 
     served_books = 0
+    step = 0.06  # seconds the adapter's clock moves per message
 
     async def watch_order_book(self, symbol, limit=None, params=None):
         if self.served_books:
             await asyncio.sleep(0.001)  # let the trades loop run between two books, as on a real socket
         clock = getattr(self, "clock", None)
         if clock is not None:
-            clock.advance(0.06)  # the adapter's clock moves between two books (periodic re-subscribe)
+            clock.advance(self.step)  # the adapter's clock moves between two books (periodic re-subscribe)
         ob = await self._next(self.books)
         self.served_books += 1
         return ob
@@ -184,7 +185,7 @@ class Reconnecting(FakeCcxt):
             await asyncio.sleep(0.001)  # a print is checked against a cached book: the book comes first
         clock = getattr(self, "clock", None)
         if clock is not None:
-            clock.advance(0.06)
+            clock.advance(self.step)
         return await self._next(self.trades)
 
 
@@ -270,7 +271,7 @@ async def test_a_single_print_outside_the_top_of_book_is_not_broken():
     await run(h, clock=True)
     assert h.adapter.crossed_books == 0 and h.public.unwatched == []
     assert h.adapter.order_book("BTC").best_bid == 101.0
-    assert h.adapter._suspect.get("BTC", (None,))[0] == 102.5  # noted, waiting for the next book
+    assert h.adapter._suspect["BTC"][:2] == ["ask", 102.0]  # noted, waiting for more evidence
 
 
 async def test_a_print_followed_by_a_consistent_book_clears_the_suspicion():
@@ -282,17 +283,41 @@ async def test_a_print_followed_by_a_consistent_book_clears_the_suspicion():
     assert h.adapter.order_book("BTC").best_bid == 102.4
 
 
-async def test_a_print_still_outside_the_next_book_marks_it_broken_once():
+def _prints(*prices: float) -> list[list[dict]]:
+    return [[]] + [[_print(p, ts_ms=1_700_000_000_500 + i)] for i, p in enumerate(prices)]
+
+
+async def test_a_level_traded_through_repeatedly_without_moving_is_broken_once():
     h = Harness(spot_cfg(), fake_cls=Reconnecting)
+    h.public.step = 0.5
     stale = dict(SANE_TS, timestamp=1_700_000_002_000)
-    h.public.books = [dict(SANE_TS)] + [dict(stale) for _ in range(6)]  # the cache keeps ask 102 after the print
-    h.public.trades = [[], [_print(102.5)]]
+    h.public.books = [dict(SANE_TS)] + [dict(stale) for _ in range(12)]  # the cache keeps ask 102 forever
+    h.public.trades = _prints(102.5, 102.6, 102.55)
     h.public.rest_book = dict(SHIFTED)
     await run(h, clock=True)
     assert h.adapter.crossed_books == 1 and h.public.unwatched == ["BTC/EUR"]
     broken = [b for b in h.of(events.BOOK) if b.is_broken]
-    assert len(broken) == 1 and "persisted" in broken[0].broken
+    assert len(broken) == 1 and "never moved" in broken[0].broken
     assert "BTC/EUR" in h.public.orderbooks  # the subscription is alive: no pop
+
+
+async def test_a_fast_market_that_refills_the_level_is_not_broken():
+    h = Harness(spot_cfg(), fake_cls=Reconnecting)
+    h.public.step = 0.5
+    refilled = {"bids": [[101.0, 1.0]], "asks": [[102.01, 1.0]], "timestamp": 1_700_000_002_000}
+    h.public.books = [dict(SANE_TS)] + [dict(refilled) for _ in range(12)]  # the ask moved: makers refilled
+    h.public.trades = _prints(102.5, 102.6, 102.55)
+    await run(h, clock=True)
+    assert h.adapter.crossed_books == 0
+
+
+async def test_a_few_prints_in_a_short_burst_are_not_enough():
+    h = Harness(spot_cfg(), fake_cls=Reconnecting)
+    stale = dict(SANE_TS, timestamp=1_700_000_002_000)
+    h.public.books = [dict(SANE_TS)] + [dict(stale) for _ in range(12)]
+    h.public.trades = _prints(102.5, 102.6, 102.55)  # 0.06 s per message: far below 2 s
+    await run(h, clock=True)
+    assert h.adapter.crossed_books == 0
 
 
 async def test_a_historical_or_first_batch_print_is_ignored():
