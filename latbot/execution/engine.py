@@ -363,13 +363,15 @@ class ExecutionEngine:
             return book, age
         if rest is None:
             return book, age
-        try:
-            await self._bus.publish(events.BOOK, rest)  # the pipeline's state sees it (a broken one invalidates)
-        except Exception:  # noqa: BLE001
-            log.exception("BOOK publish failed")
         if rest.is_broken:
+            # no price - and not published: a crossed REST snapshot must not set the sticky broken mark
+            # that only a sane WS book can clear (a polled venue would stay dead until restart)
             log.warning("%s: REST book for %s is crossed (bid >= ask): no price", adapter.name, symbol)
             return None, None
+        try:
+            await self._bus.publish(events.BOOK, rest)  # the pipeline's state sees it too
+        except Exception:  # noqa: BLE001
+            log.exception("BOOK publish failed")
         return rest, rest.age_ms(self._clock.mono())
 
     # ------------------------------------------------------------------ #

@@ -213,6 +213,11 @@ class MarketState:
     def book(self, exchange: str, asset: str) -> OrderBook | None:
         return self._books.get((exchange, asset))
 
+    def forget_book(self, exchange: str, asset: str) -> None:
+        """Drop the stored book of ``(exchange, asset)`` without marking the stream broken: for a
+        crossed REST snapshot - a polled venue has no WS book that could clear the sticky mark."""
+        self._books.pop((exchange, asset), None)
+
     def books_for(self, asset: str) -> dict[str, OrderBook]:
         out: dict[str, OrderBook] = {}
         for ex in self._assets.get(asset, ()):

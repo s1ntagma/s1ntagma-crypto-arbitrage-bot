@@ -312,11 +312,13 @@ class Pipeline:
             if fresh is not None:
                 if not fresh.asset:
                     fresh.asset = asset
-                self._state.on_book(fresh)
-                if fresh.is_broken:  # a crossed REST snapshot is no price either
-                    self.diag.tick(target, "crossed")
+                if fresh.is_broken:  # a crossed REST snapshot is no price either - but not a sticky mark:
+                    self.diag.tick(target, "crossed")  # the next sane snapshot of a polled venue must count
+                    self._state.forget_book(target, asset)
                     await self._broken_target(target, asset)
                     fresh = None
+                else:
+                    self._state.on_book(fresh)
             return fresh
         finally:
             if not fut.done():

@@ -21,8 +21,10 @@ needs the network.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import re
+import zlib
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Iterable
 
@@ -111,6 +113,7 @@ _DEMO_MARKERS = ("api-demo", "demo", "testnet", "sandbox", "test")
 _TRADES_MAX_FAILURES = 3
 _CROSSED_REST_S = 5.0  # a crossed WS book is replaced by at most one REST snapshot per symbol this often
 _CROSSED_RESUB_S = 30.0  # ... and the WS book is re-subscribed (fresh snapshot) at most this often
+_SWEEP_SETTLE_S = 0.25  # a print outside the top of book is a stale level only if the next book, this much later, still shows it
 
 # Rate limits: floors per response kind, escalation on repeated hits (see _rate_limited)
 _RL_FLOOR_429_S = 1.0  # RateLimitExceeded (HTTP 429 / Binance -1003)
@@ -246,6 +249,7 @@ class CcxtAdapter(ExchangeAdapter):
         self._crossed_rest_mono: dict[str, float] = {}
         self._crossed_resub_mono: dict[str, float] = {}
         self._crossed_log_mono: dict[str, float] = {}
+        self._suspect: dict[str, tuple[float, float]] = {}  # asset -> (print price outside the cached top of book, recv_mono)
         self._health_interval = health_interval_s
         opts = self._build_opts()
         self.public: Any = self._factory(cfg.ccxt_name, opts)
@@ -581,32 +585,49 @@ class CcxtAdapter(ExchangeAdapter):
 
     def _drop_cached_book(self, symbol: str) -> None:
         """ccxt.pro keeps its order book across reconnects and applies new deltas on top of stale levels:
-        the cache is dropped so the next watch rebuilds it from a fresh snapshot."""
+        after a connection-level error (the client is gone, the re-watch subscribes again) the cache is
+        dropped so the next watch rebuilds it from a fresh snapshot.  Never while a subscription is alive:
+        the venue's handler then raises on the missing book and the receive loop dies with it."""
         cache = getattr(self.public, "orderbooks", None)
         if isinstance(cache, dict):
             cache.pop(symbol, None)
 
-    async def _resubscribe(self, symbol: str, why: str) -> None:
-        """Fresh snapshot for ``symbol``: un-watch (when the venue supports it) and drop the cache."""
-        unwatch = getattr(self.public, "un_watch_order_book", None)
-        if unwatch is not None and (getattr(self.public, "has", None) or {}).get("unWatchOrderBook"):
-            try:
-                await unwatch(symbol)  # the next watch_order_book subscribes again from a fresh snapshot
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                log.debug("%s: un_watch_order_book %s (%s) failed: %s", self.name, symbol, why, exc)
-        self._drop_cached_book(symbol)
+    def _can_resubscribe(self) -> bool:
+        has = getattr(self.public, "has", None) or {}
+        return getattr(self.public, "un_watch_order_book", None) is not None and bool(has.get("unWatchOrderBook"))
+
+    async def _resubscribe(self, symbol: str, why: str) -> bool:
+        """Fresh snapshot for ``symbol`` where the venue supports un-watching (the library drops its
+        book with the subscription and the next watch loads a new snapshot).  Returns False where it
+        cannot: the broken flag and the throttled REST snapshot keep the price honest until a sane book."""
+        if not self._can_resubscribe():
+            return False
+        try:
+            await self.public.un_watch_order_book(symbol)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.debug("%s: un_watch_order_book %s (%s) failed: %s", self.name, symbol, why, exc)
+            return False
+        return True
+
+    def _next_resub_mono(self, symbol: str, *, first: bool) -> float:
+        """When the periodic re-subscribe of ``symbol`` is due (inf = never: off or unsupported).
+        The first one is staggered per symbol so all streams do not reconnect in the same second."""
+        resub = float(getattr(self.settings, "ws_book_resubscribe_s", 0.0) or 0.0)
+        if resub <= 0 or not self._can_resubscribe():
+            return float("inf")
+        spread = (zlib.crc32(symbol.encode()) % 1000) / 1000.0 * resub if first else 0.0
+        return self.clock.mono() + resub + spread
 
     async def _book_loop(self, asset: str, symbol: str) -> None:
         backoff = self._backoff_min
-        subscribed_mono = self.clock.mono()
+        resub_due = self._next_resub_mono(symbol, first=True)
         while True:
             try:
-                resub = float(getattr(self.settings, "ws_book_resubscribe_s", 0.0) or 0.0)
-                if resub > 0 and self.clock.mono() - subscribed_mono >= resub:
+                if self.clock.mono() >= resub_due:
                     await self._resubscribe(symbol, "periodic")  # a silent reconnect cannot keep stale levels
-                    subscribed_mono = self.clock.mono()
+                    resub_due = self._next_resub_mono(symbol, first=False)
                 if self._ws_depth is None:
                     ob = await self.public.watch_order_book(symbol)
                 else:
@@ -615,6 +636,9 @@ class CcxtAdapter(ExchangeAdapter):
                 if book.is_crossed:
                     backoff = self._backoff_min
                     await self._on_broken(asset, symbol, book, "crossed")
+                    continue
+                if await self._print_contradicts(asset, symbol, book):
+                    backoff = self._backoff_min
                     continue
                 self._books[asset] = book
                 self._mark_msg(book.ts.exchange_ts, book.ts.recv_ts, book.ts.recv_mono)
@@ -631,7 +655,10 @@ class CcxtAdapter(ExchangeAdapter):
                         self._ws_depth = new_depth
                         continue
                 self._on_stream_error("book", symbol, exc, backoff)
-                self._drop_cached_book(symbol)  # never re-watch on top of the pre-disconnect levels
+                if isinstance(exc, ccxt.NetworkError):
+                    self._drop_cached_book(symbol)  # the client is gone: never re-watch on top of the old levels
+                self._suspect.pop(asset, None)
+                resub_due = self._next_resub_mono(symbol, first=False)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, self._backoff_max)
 
@@ -643,7 +670,8 @@ class CcxtAdapter(ExchangeAdapter):
         re-subscribed so the library loads a fresh snapshot."""
         self.crossed_books += 1
         self._books.pop(asset, None)  # the last book is not current any more
-        book.broken = why
+        self._suspect.pop(asset, None)
+        book = dataclasses.replace(book, broken=why)  # never mutate an object that was already published
         await self.bus.publish(events.BOOK, book)
         now = self.clock.mono()
         last_log = self._crossed_log_mono.get(symbol)
@@ -655,8 +683,6 @@ class CcxtAdapter(ExchangeAdapter):
         if last_resub is None or now - last_resub >= _CROSSED_RESUB_S:
             self._crossed_resub_mono[symbol] = now
             await self._resubscribe(symbol, why)
-        else:
-            self._drop_cached_book(symbol)
         last = self._crossed_rest_mono.get(symbol)
         if last is not None and now - last < _CROSSED_REST_S:
             return
@@ -724,9 +750,43 @@ class CcxtAdapter(ExchangeAdapter):
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, self._backoff_max)
 
+    def _note_print(self, asset: str, trade: Trade) -> None:
+        """A print outside the cached top of book is a *suspicion* of a stale level - the trade channel
+        normally runs ahead of the aggregated book channel - resolved by ``_print_contradicts`` on the
+        next book.  Needs the venue's own timestamps: a print not newer than the book proves nothing."""
+        cached = self._books.get(asset)
+        if cached is None or trade.ts.exchange_ts is None or asset in self._suspect:
+            return
+        book_ts = cached.ts.exchange_ts if cached.ts.exchange_ts is not None else cached.ts.recv_ts - 0.5
+        if trade.ts.exchange_ts <= book_ts:
+            return
+        price = trade.price
+        if (cached.best_ask is not None and price > cached.best_ask) or (
+                cached.best_bid is not None and price < cached.best_bid):
+            self._suspect[asset] = (price, trade.ts.recv_mono)
+
+    async def _print_contradicts(self, asset: str, symbol: str, book: OrderBook) -> bool:
+        """Resolve a print suspicion with ``book``: a book received ``_SWEEP_SETTLE_S`` after the print
+        that still shows the level the taker would have swept is a stale cache -> broken; a consistent
+        book clears the suspicion; an earlier book waits for the next one."""
+        suspect = self._suspect.get(asset)
+        if suspect is None:
+            return False
+        price, since = suspect
+        outside = (book.best_ask is not None and price > book.best_ask) or (
+            book.best_bid is not None and price < book.best_bid)
+        if not outside:
+            self._suspect.pop(asset, None)
+            return False
+        if book.ts.recv_mono - since < _SWEEP_SETTLE_S:
+            return False
+        await self._on_broken(asset, symbol, book, f"print {price:.10g} outside the top of book persisted")
+        return True
+
     async def _trades_loop(self, asset: str, symbol: str) -> None:
         failures = 0
         backoff = self._backoff_min
+        first_batch = True  # the first batch after a (re)subscription is history, not a live print
         while True:
             try:
                 trades = await self.public.watch_trades(symbol)
@@ -749,17 +809,15 @@ class CcxtAdapter(ExchangeAdapter):
                         asset=asset,
                         trade_id=str(t["id"]) if t.get("id") is not None else None,
                     )
-                    cached = self._books.get(asset)
-                    if cached is not None and cached.ts.recv_mono <= trade.ts.recv_mono and (
-                            (cached.best_ask is not None and price > cached.best_ask)
-                            or (cached.best_bid is not None and price < cached.best_bid)):
-                        # a taker would have filled the better cached level first: that level is stale
-                        await self._on_broken(asset, symbol, cached, f"print {price:.10g} outside the cached top of book")
+                    if not first_batch:
+                        self._note_print(asset, trade)
                     await self.bus.publish(events.TRADE, trade)
+                first_batch = False
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 failures += 1
+                first_batch = True
                 if failures >= _TRADES_MAX_FAILURES:
                     log.warning("%s: trades stream %s disabled after %d failures (%s: %s)",
                                 self.name, symbol, failures, type(exc).__name__, str(exc)[:100])

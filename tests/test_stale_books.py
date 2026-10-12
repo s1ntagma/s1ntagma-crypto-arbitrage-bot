@@ -19,7 +19,7 @@ from latbot.market.state import MarketState
 from latbot.models import Fees, OppState, Ticker, Timestamps
 from latbot.storage.db import Database
 from test_ccxt_adapter import FakeCcxt, Harness, spot_cfg
-from test_crossed_books import SANE, book
+from test_crossed_books import CROSSED, SANE, book
 
 
 def ticker(bid: float, ask: float, clock: SimClock, exchange: str = "revolutx") -> Ticker:
@@ -91,6 +91,19 @@ async def test_pipeline_refuses_a_crossed_rest_snapshot():
     assert env.pipeline.diag.snapshot()["exchanges"]["kraken"]["crossed"] >= 1
 
 
+async def test_a_crossed_rest_snapshot_is_not_sticky_for_a_polled_venue():
+    env = tp.Env(tp.make_settings())
+    opp = await tp.detect(env)
+    env.clock.advance(2.0)
+    env.adapters["kraken"].rest_book = book(105.0, 103.0, env.clock, exchange="kraken")
+    assert await env.pipeline.refresh(opp) is None
+    env.clock.advance(2.0)
+    env.adapters["kraken"].rest_book = book(101.0, 102.0, env.clock, exchange="kraken")
+    sane = await env.pipeline._fetch_book("kraken", "BTC", "BTC/EUR")
+    assert sane is not None and sane.best_bid == 101.0
+    assert env.state.is_fresh("kraken", "BTC", env.clock.mono(), 1500.0)  # the next sane snapshot counts
+
+
 async def test_engine_refuses_a_crossed_rest_snapshot():
     env = tx.make_env()
     a = env.adapters["testex"]
@@ -102,8 +115,11 @@ async def test_engine_refuses_a_crossed_rest_snapshot():
         return crossed
 
     a.fetch_order_book = rest
+    published = []
+    env.bus.subscribe(events.BOOK, lambda b: published.append(b))
     b, age = await env.engine._fresh_book(a, "BTC/USDT")
     assert b is None and age is None
+    assert published == []  # a crossed REST snapshot is never published: it would stick in MarketState
 
 
 async def test_manual_support_reports_no_data_on_a_crossed_book():
@@ -137,9 +153,10 @@ def test_crossed_ticker_gives_no_mid_exit_or_leader_price():
     assert env.pipeline.leader_price("BTC", "binance") is None
 
 
-# ---- 3 / 7. the ccxt cache: dropped on reconnect, broken by a print outside the top of book --------
+# ---- 3 / 7. the ccxt cache: dropped only after a connection-level error; a print outside the top of
+# book is a suspicion that the next book confirms or clears (review of ef70cfe: 5 verified findings) ----
 class Reconnecting(FakeCcxt):
-    """ccxt.pro keeps ``orderbooks[symbol]`` across reconnects; the adapter must drop it."""
+    """ccxt.pro keeps ``orderbooks[symbol]`` across reconnects; the adapter drops it only when the client is gone."""
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
@@ -150,51 +167,142 @@ class Reconnecting(FakeCcxt):
     async def un_watch_order_book(self, symbol, params=None):
         self.unwatched.append(symbol)
 
+    served_books = 0
+
     async def watch_order_book(self, symbol, limit=None, params=None):
+        if self.served_books:
+            await asyncio.sleep(0.001)  # let the trades loop run between two books, as on a real socket
         clock = getattr(self, "clock", None)
         if clock is not None:
             clock.advance(0.06)  # the adapter's clock moves between two books (periodic re-subscribe)
-        return await self._next(self.books)
+        ob = await self._next(self.books)
+        self.served_books += 1
+        return ob
+
+    async def watch_trades(self, symbol, since=None, limit=None, params=None):
+        while not self.served_books:
+            await asyncio.sleep(0.001)  # a print is checked against a cached book: the book comes first
+        clock = getattr(self, "clock", None)
+        if clock is not None:
+            clock.advance(0.06)
+        return await self._next(self.trades)
 
 
-async def test_ccxt_book_cache_is_dropped_before_rewatching_after_an_error():
+class NoUnwatch(Reconnecting):
+    """Kraken / Coinbase / Crypto.com / Bitget: ccxt has no ``unWatchOrderBook`` for them."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.has = dict(self.has, unWatchOrderBook=None)
+
+
+async def run(h: Harness, assets=("BTC",), for_s: float = 0.1, *, clock: bool = False) -> None:
+    await h.adapter.start(list(assets))
+    if clock:
+        h.public.clock = h.clock  # the loops have not run yet: every message advances the clock
+    try:
+        await asyncio.sleep(for_s)
+    finally:
+        await h.adapter.stop()
+
+
+async def test_ccxt_book_cache_is_dropped_only_after_a_network_error():
+    import ccxt
+
     h = Harness(spot_cfg(), fake_cls=Reconnecting, backoff_min_s=0.01, backoff_max_s=0.02)
-    h.public.books = [dict(SANE), RuntimeError("socket closed"), dict(SANE)]
-    await h.adapter.start(["BTC"])
-    try:
-        await asyncio.sleep(0.1)
-    finally:
-        await h.adapter.stop()
-    assert "BTC/EUR" not in h.public.orderbooks  # popped on the error path, before the re-watch
-    assert len([b for b in h.of(events.BOOK) if not b.is_crossed]) == 2
+    h.public.books = [dict(SANE), ccxt.NetworkError("socket closed"), dict(SANE)]
+    await run(h)
+    assert "BTC/EUR" not in h.public.orderbooks  # the client is gone: popped before the re-watch
+    assert len([b for b in h.of(events.BOOK) if not b.is_broken]) == 2
 
 
-async def test_a_print_outside_the_cached_top_of_book_marks_it_broken():
+async def test_ccxt_book_cache_survives_other_stream_errors():
+    h = Harness(spot_cfg(), fake_cls=Reconnecting, backoff_min_s=0.01, backoff_max_s=0.02)
+    h.public.books = [dict(SANE), RuntimeError("handler hiccup"), dict(SANE)]
+    await run(h)
+    assert "BTC/EUR" in h.public.orderbooks  # the subscription is alive: popping it would kill the receive loop
+
+
+async def test_a_broken_book_never_pops_the_cache_of_a_live_subscription():
+    h = Harness(spot_cfg(), fake_cls=NoUnwatch)
+    h.public.books = [dict(CROSSED)]
+    h.public.rest_book = dict(SANE)
+    await run(h)
+    assert h.adapter.crossed_books == 1 and h.public.unwatched == []
+    assert "BTC/EUR" in h.public.orderbooks
+    assert h.adapter.order_book("BTC").best_bid == 101.0  # the throttled REST snapshot keeps the price honest
+
+
+async def test_a_broken_book_is_published_as_a_copy():
     h = Harness(spot_cfg(), fake_cls=Reconnecting)
-    h.public.books = [dict(SANE)]  # bid 101 / ask 102 stays cached
-    h.public.rest_book = {"bids": [[102.4, 1.0]], "asks": [[102.6, 1.0]], "timestamp": None}
-    h.public.trades = [[{"id": "t1", "price": 102.5, "amount": 0.2, "side": "buy", "timestamp": 1_700_000_000_000}]]
-    await h.adapter.start(["BTC"])
-    try:
-        await asyncio.sleep(0.1)
-    finally:
-        await h.adapter.stop()
-    assert h.adapter.crossed_books == 1 and h.public.unwatched == ["BTC/EUR"]
-    books = h.of(events.BOOK)
-    assert books[-1].best_bid == 102.4  # the REST snapshot replaced the stale cache
+    h.public.books = [dict(SANE), dict(CROSSED)]
+    h.public.rest_book = dict(CROSSED)
+    await run(h)
+    sane, broken = h.of(events.BOOK)[:2]
+    assert not sane.is_broken and broken.is_broken and broken is not sane
+    assert broken.best_bid == 105.0 and broken.broken == "crossed"
+
+
+async def test_books_are_resubscribed_periodically_only_where_supported():
+    h = Harness(spot_cfg(), settings=Settings(ws_book_resubscribe_s=0.05), fake_cls=Reconnecting)
+    h.public.books = [dict(SANE) for _ in range(6)]
+    await run(h, clock=True)
+    assert h.public.unwatched.count("BTC/EUR") >= 1 and "BTC/EUR" in h.public.orderbooks  # never popped by us
+
+    h2 = Harness(spot_cfg(), settings=Settings(ws_book_resubscribe_s=0.05), fake_cls=NoUnwatch)
+    h2.public.books = [dict(SANE) for _ in range(6)]
+    await run(h2, clock=True)
+    assert h2.public.unwatched == [] and "BTC/EUR" in h2.public.orderbooks
+
+
+def _print(price: float, ts_ms: int | None = 1_700_000_000_500, side: str = "buy") -> dict:
+    return {"id": f"t{price}", "price": price, "amount": 0.2, "side": side, "timestamp": ts_ms}
+
+
+SANE_TS = dict(SANE, timestamp=1_700_000_000_000)
+SHIFTED = {"bids": [[102.4, 1.0]], "asks": [[102.6, 1.0]], "timestamp": 1_700_000_001_000}
+
+
+async def test_a_single_print_outside_the_top_of_book_is_not_broken():
+    h = Harness(spot_cfg(), fake_cls=Reconnecting)
+    h.public.books = [dict(SANE_TS)]  # bid 101 / ask 102 stays cached, no further book arrives
+    h.public.trades = [[], [_print(102.5)]]  # the first batch is history and is skipped anyway
+    await run(h, clock=True)
+    assert h.adapter.crossed_books == 0 and h.public.unwatched == []
+    assert h.adapter.order_book("BTC").best_bid == 101.0
+    assert h.adapter._suspect.get("BTC", (None,))[0] == 102.5  # noted, waiting for the next book
+
+
+async def test_a_print_followed_by_a_consistent_book_clears_the_suspicion():
+    h = Harness(spot_cfg(), fake_cls=Reconnecting)
+    h.public.books = [dict(SANE_TS), dict(SHIFTED)]  # the book caught up with the print
+    h.public.trades = [[], [_print(102.5)]]
+    await run(h, clock=True)
+    assert h.adapter.crossed_books == 0 and "BTC" not in h.adapter._suspect
     assert h.adapter.order_book("BTC").best_bid == 102.4
 
 
-async def test_books_are_resubscribed_periodically():
-    h = Harness(spot_cfg(), settings=Settings(ws_book_resubscribe_s=0.05), fake_cls=Reconnecting)
-    h.public.books = [dict(SANE) for _ in range(6)]
-    await h.adapter.start(["BTC"])
-    h.public.clock = h.clock  # the loop has not run yet: every book advances the clock by 0.06 s
-    try:
-        await asyncio.sleep(0.1)
-    finally:
-        await h.adapter.stop()
-    assert h.public.unwatched.count("BTC/EUR") >= 2 and "BTC/EUR" not in h.public.orderbooks
+async def test_a_print_still_outside_the_next_book_marks_it_broken_once():
+    h = Harness(spot_cfg(), fake_cls=Reconnecting)
+    stale = dict(SANE_TS, timestamp=1_700_000_002_000)
+    h.public.books = [dict(SANE_TS)] + [dict(stale) for _ in range(6)]  # the cache keeps ask 102 after the print
+    h.public.trades = [[], [_print(102.5)]]
+    h.public.rest_book = dict(SHIFTED)
+    await run(h, clock=True)
+    assert h.adapter.crossed_books == 1 and h.public.unwatched == ["BTC/EUR"]
+    broken = [b for b in h.of(events.BOOK) if b.is_broken]
+    assert len(broken) == 1 and "persisted" in broken[0].broken
+    assert "BTC/EUR" in h.public.orderbooks  # the subscription is alive: no pop
+
+
+async def test_a_historical_or_first_batch_print_is_ignored():
+    h = Harness(spot_cfg(), fake_cls=Reconnecting)
+    stale = dict(SANE_TS, timestamp=1_700_000_002_000)
+    h.public.books = [dict(SANE_TS)] + [dict(stale) for _ in range(6)]
+    # first batch (snapshot) with a print outside the book; later a print OLDER than the book; one without ts
+    h.public.trades = [[_print(102.5)], [_print(102.5, ts_ms=1_699_999_999_000)], [_print(102.5, ts_ms=None)]]
+    await run(h, clock=True)
+    assert h.adapter.crossed_books == 0 and "BTC" not in h.adapter._suspect
 
 
 # ---- 4 / 5. learned data of older builds starts over once ------------------------------------------
