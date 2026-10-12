@@ -1339,6 +1339,8 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
                 d["funnel"]["shadow_opened"] = int(getattr(shadow, "opened", 0))
                 d["funnel"]["shadow_closed"] = int(getattr(shadow, "closed", 0))
                 d["funnel"]["shadow_skipped"] = int(sum((getattr(shadow, "skipped", {}) or {}).values()))
+                d["funnel"]["training_opened"] = int(getattr(shadow, "training_opened", 0))
+                d["funnel"]["training_closed"] = int(getattr(shadow, "training_closed", 0))
             return _json(d)
         except Exception:  # noqa: BLE001
             log.exception("diagnostics failed")

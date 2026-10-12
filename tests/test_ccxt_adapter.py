@@ -184,7 +184,9 @@ CREDS = ExchangeCredentials(name="bybit", api_key="k" * 16, api_secret="s" * 16)
 
 def spot_cfg(name: str = "kraken", **kw: Any) -> ExchangeConfig:
     kw.setdefault("book_depth", 10)
-    return ExchangeConfig(name=name, role=ExchangeRole.EXECUTION, taker_fee=0.004, maker_fee=0.0025, **kw)
+    kw.setdefault("taker_fee", 0.004)
+    kw.setdefault("maker_fee", 0.0025)
+    return ExchangeConfig(name=name, role=ExchangeRole.EXECUTION, **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -529,13 +531,15 @@ async def test_fees_from_market_cfg_and_private_fetch():
     assert h.private.trading_fee_calls == 1  # cached
     h.private.trading_fee = ccxt.ExchangeError("nope")
     f2 = await h.adapter.fees("ETH/USDC")
-    assert f2.taker == 0.002 and f2.maker == 0.0025  # market taker (string), cfg maker (market None)
+    # without an account fee the higher of config and the library's market fee (often outdated) is
+    # charged: NET is never shown on a fee lower than the venue's published one (hard rule 2)
+    assert f2.taker == 0.004 and f2.maker == 0.0025
     f3 = await h.adapter.fees("BTC/EUR")
     assert f3.taker == 0.004 and f3.maker == 0.0025  # cfg fallback
-    hp = Harness(spot_cfg())
+    hp = Harness(spot_cfg(taker_fee=0.0005, maker_fee=0.0001))
     hp.public.markets = dict(MARKETS)
     f4 = await hp.adapter.fees("BTC/USDT")
-    assert f4.taker == 0.00075 and f4.maker == 0.0005
+    assert f4.taker == 0.00075 and f4.maker == 0.0005  # the market fee is higher than the config here
 
 
 async def test_fetch_balances():

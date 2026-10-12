@@ -640,7 +640,13 @@ class Pipeline:
                 )
                 reason = "fees" if econ.gross_pct >= s.min_net_pct_show else "below_min_net"
                 self.diag.reject(reason, signal.asset, signal.target, signal.direction,
-                                 detail=f"gross {econ.gross_pct:+.2f}% net {econ.net_pct:+.2f}% catch-up x{signal.catchup_ratio:.2f}")
+                                 detail=f"lag {signal.lag_pct:.2f}% x catch-up {signal.catchup_ratio:.2f} -> "
+                                        f"gross {econ.gross_pct:+.2f}% - costs {econ.total_cost_pct:.2f}% = "
+                                        f"net {econ.net_pct:+.2f}%")
+                if s.ride_active() and s.shadow_trading and s.shadow_train_all_signals:
+                    # training: measure what entering this priced signal really earns (virtual only, never
+                    # an Opportunity) - otherwise a pair the model under-rates could never be measured
+                    await self._bus.publish(events.TRAINING_SIGNAL, {"signal": signal, "econ": econ})
                 return None
             if econ.executable_quote < s.min_trade_quote:
                 log.debug(

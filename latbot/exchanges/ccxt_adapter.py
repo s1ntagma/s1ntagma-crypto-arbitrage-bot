@@ -960,10 +960,13 @@ class CcxtAdapter(ExchangeAdapter):
         maker, taker = self.cfg.maker_fee, self.cfg.taker_fee
         market = (getattr(self.public, "markets", None) or {}).get(symbol) or {}
         m_taker, m_maker = _num(market.get("taker")), _num(market.get("maker"))
+        # without the account's own fee the higher of config and the library's market fee is charged:
+        # ccxt's defaults are often outdated (Kraken 0.26 % vs the published 0.40 %) and NET must never
+        # rest on a fee lower than the venue's real one (hard rule 2).  The account fee below wins.
         if m_taker is not None:
-            taker = m_taker
+            taker = max(taker, m_taker)
         if m_maker is not None:
-            maker = m_maker
+            maker = max(maker, m_maker)
         if self.private is not None and symbol not in self._fee_fetched and hasattr(self.private, "fetch_trading_fee"):
             self._fee_fetched.add(symbol)
             try:

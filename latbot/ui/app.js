@@ -23,7 +23,7 @@
     'min_quality_score', 'shadow_min_net_pct', 'max_leverage', 'pool_enabled', 'context_enabled', 'ws_assets',
     'simple_mode', 'simple_entry_deadline_s', 'simple_max_hold_s',
     'ride_enabled', 'ride_entry_max_age_s', 'ride_reversal_pct', 'ride_stall_s', 'ride_trail_arm_pct', 'ride_trail_pct',
-    'ride_stop_pct', 'ride_max_hold_s', 'shadow_balance_quote', 'shadow_unlimited',
+    'ride_stop_pct', 'ride_max_hold_s', 'shadow_balance_quote', 'shadow_unlimited', 'shadow_train_all_signals',
     'proven_gate_enabled', 'proven_min_trades', 'proven_min_p10',
     'autopilot', 'live_requires_ready', 'max_daily_loss_quote', 'max_exposure_per_exchange_quote', 'max_simultaneous_trades',
     'exchange_budget_quote'
@@ -1607,13 +1607,14 @@
   // ------------------------------------------------------------------ diagnostics (why no signals)
   var FUNNEL_ORDER = ['exchanges_connected', 'exchanges_enabled', 'assets_scanned', 'ticks_received', 'episodes_detected',
     'candidates', 'rejected_total', 'signals', 'opportunities', 'active_now', 'expired_today', 'alerts',
-    'shadow_opened', 'shadow_closed', 'shadow_skipped'];
+    'shadow_opened', 'shadow_closed', 'shadow_skipped', 'training_opened', 'training_closed'];
   var FUNNEL_LABELS = {
     exchanges_connected: 'Exchanges connected', exchanges_enabled: 'Exchanges enabled', assets_scanned: 'Assets scanned',
     ticks_received: 'Ticks received', episodes_detected: 'Moves (episodes) detected', candidates: 'Candidates checked',
     rejected_total: 'Candidates rejected', signals: 'Passed filters (signals)', opportunities: 'Approved opportunities',
     active_now: 'Active now', expired_today: 'Expired by TTL today', alerts: 'Telegram alerts sent',
-    shadow_opened: 'Shadow trades opened', shadow_closed: 'Shadow trades closed', shadow_skipped: 'Shadow skipped (no executable book)'
+    shadow_opened: 'Shadow trades opened', shadow_closed: 'Shadow trades closed', shadow_skipped: 'Shadow skipped (no executable book)',
+    training_opened: 'Training trades opened (rejected signals, virtual)', training_closed: 'Training trades closed'
   };
   var REASON_LABELS = {
     min_movers: 'Only one exchange moved (min_movers)', mover_volume: 'Mover 24h volume too low', mover_volume_unknown: 'Mover 24h volume unknown (no data)', target_no_data: 'Target has no fresh data',
@@ -1769,6 +1770,28 @@
             h('td', { class: 'num', text: fmtMoney(g.pnl_quote || 0, displayQuote(), { sign: true }) })));
         });
       });
+      var tr = s.training || {};
+      var tb = $('training-body');
+      clear(tb);
+      $('training-note').textContent = tr.closed
+        ? 'Signals the model rejected on costs, entered virtually to measure them: ' + tr.closed + ' closed, win rate ' +
+          rateOrDash(tr.win_rate) + ', real NET ' + pctOrDash(tr.avg_actual_net_pct) + ', the target gave ' +
+          pctOrDash(tr.avg_capture_pct) + ' of an average lag of ' + pctOrDash(tr.avg_lag_pct) +
+          '. These measurements teach the expected catch-up; they never become offers by themselves.'
+        : 'No training trades yet: every priced signal the model rejects is entered virtually here (ride mode).';
+      [['target', tr.by_target || {}], ['asset', tr.by_asset || {}]].forEach(function (pair) {
+        Object.keys(pair[1]).forEach(function (name) {
+          var g = pair[1][name];
+          tb.appendChild(h('tr', null,
+            h('td', { text: (pair[0] === 'target' ? exchangeLabel(name) : name) + ' (' + pair[0] + ')' }),
+            h('td', { class: 'num', text: String(g.closed) }),
+            h('td', { class: 'num', text: rateOrDash(g.win_rate) }),
+            h('td', { class: 'num', text: pctOrDash(g.avg_lag_pct) }),
+            h('td', { class: 'num', text: pctOrDash(g.avg_capture_pct) }),
+            h('td', { class: 'num', text: pctOrDash(g.avg_expected_net_pct) }),
+            h('td', { class: 'num ' + (num(g.avg_actual_net_pct) >= 0 ? 'pos' : 'neg'), text: pctOrDash(g.avg_actual_net_pct) })));
+        });
+      });
       var gb = $('grade-body');
       clear(gb);
       var grades = s.by_grade || {};
@@ -1793,7 +1816,7 @@
       rows.forEach(function (t) {
         body.appendChild(h('tr', null,
           h('td', { class: 'mono', text: fmtTime(t.opened_ts) }),
-          h('td', { text: t.asset + ' @ ' + exchangeLabel(t.target) }),
+          h('td', { text: t.asset + ' @ ' + exchangeLabel(t.target) + (t.training ? ' · training' : '') }),
           h('td', { class: 'num', text: fmtMoney(t.entry_price, t.quote) }),
           h('td', { class: 'num', text: t.exit_price == null ? 'open · ' + fmtMoney(t.last_exit_price, t.quote) : fmtMoney(t.exit_price, t.quote) }),
           h('td', { text: exchangeLabel(t.first_mover || '') + (t.lag_pct ? ' · lag ' + fmtPct(t.lag_pct) : '') }),

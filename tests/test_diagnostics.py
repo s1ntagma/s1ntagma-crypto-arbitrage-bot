@@ -66,7 +66,9 @@ async def test_net_below_show_threshold_is_a_counted_rejection():
     assert f["signals"] == 1 and f["opportunities"] == 0 and f["rejected"]["fees"] == 1  # gross 1.2 %, 1 % fee per leg
     assert f["rejected"]["below_min_net"] == 0
     why = env.pipeline.diagnostics()["why"]
-    assert any("комиссии и исполнение съели" in line and "BTC@kraken (gross +1.18% net -0.87% catch-up x0.60)" in line for line in why)
+    # the detail names the lag, the catch-up and the costs, so the owner sees what is missing
+    assert any("комиссии и исполнение съели" in line and "BTC@kraken (lag 2.00% x catch-up 0.60 -> gross +1.18%"
+               in line and "= net -0.87%)" in line for line in why)
     assert any("ни один не стал возможностью" in line for line in why)
 
 

@@ -312,6 +312,7 @@ class Settings:
     # Training: every opportunity with NET >= this is traded virtually (shadow), whatever its quality.
     shadow_min_net_pct: float = 0.1
     shadow_balance_quote: float = 1000.0  # virtual training balance: stakes come out of it, results go back in
+    shadow_train_all_signals: bool = True  # ride mode: virtually enter every priced signal the model rejects (training only, never offered)
     shadow_unlimited: bool = True  # training on unlimited virtual money: no free-balance check, best size per offer
     best_size_multipliers: list[float] = field(default_factory=lambda: [0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0])
     # PROVEN PAIRS (simple mode): only (asset, venue) pairs whose own virtual trades proved themselves are

@@ -664,6 +664,9 @@ class ReactionStats:
     lagging_count: int = 0
     lag_sizes_pct: list[float] = field(default_factory=list)
     catchup_ratios: list[float] = field(default_factory=list)
+    # realized ride captures of virtual trades: (target exit-side price move from entry to exit) / lag at
+    # entry - what a trade entered at the signal really caught (training and offered trades)
+    ride_capture_ratios: list[float] = field(default_factory=list)
     opp_durations_s: list[float] = field(default_factory=list)
     success_count: int = 0
     fail_count: int = 0

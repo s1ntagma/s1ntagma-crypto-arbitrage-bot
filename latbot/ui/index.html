@@ -245,6 +245,16 @@
         </div>
       </div>
       <div class="diag-block">
+        <h3 class="diag-title">TRAINING · every priced signal, entered virtually (never offered)</h3>
+        <p id="training-note" class="muted"></p>
+        <div class="table-wrap">
+          <table class="table" id="training-table">
+            <thead><tr><th>Group</th><th class="num">Closed</th><th class="num">Win rate</th><th class="num">Avg lag</th><th class="num">Avg capture</th><th class="num">Model NET</th><th class="num">Real NET</th></tr></thead>
+            <tbody id="training-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-block">
         <h3 class="diag-title">READY FOR REAL MONEY?</h3>
         <table class="table table-compact"><tbody id="ready-body"></tbody></table>
       </div>
@@ -396,6 +406,7 @@
         <label class="field"><span class="field-label">Training: virtual balance (stakes come out of it; New period restarts it)</span>
           <input type="number" name="shadow_balance_quote" step="any" min="10" inputmode="decimal"></label>
         <label class="check"><input type="checkbox" name="shadow_unlimited"> <span>Training on unlimited virtual money (each offer at its best size)</span></label>
+        <label class="check"><input type="checkbox" name="shadow_train_all_signals"> <span>Also train on signals the model rejects (virtual only, never offered)</span></label>
         <label class="check"><input type="checkbox" name="proven_gate_enabled"> <span>Offer only proven pairs (board, Telegram, AUTO); the rest keeps training</span></label>
         <label class="field"><span class="field-label">Proven: at least N virtual trades on the pair</span>
           <input type="number" name="proven_min_trades" step="any" min="5" inputmode="numeric"></label>

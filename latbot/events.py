@@ -20,6 +20,7 @@ TICKER = "ticker"  # Ticker
 HEALTH = "health"  # ExchangeHealth
 MOVE = "move"  # MoveEvent
 SIGNAL = "signal"  # LagSignal
+TRAINING_SIGNAL = "training.signal"  # {"signal": LagSignal, "econ": ExecutionEconomics}: priced, not offered
 OPP_NEW = "opp.new"  # Opportunity
 OPP_UPDATE = "opp.update"  # Opportunity
 OPP_STATE = "opp.state"  # {"opportunity": Opportunity, "from": str, "to": str, "reason": str}

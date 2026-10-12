@@ -24,6 +24,11 @@ _CATCHUP_FLAG = "catchup_unbiased_v2"
 _CLEAN_BOOKS_FLAG = "catchup_clean_books_v3"  # samples measured before crossed books were rejected
 
 
+RIDE_CAPTURE_MIN_SAMPLES = 5  # realized rides before they replace the episode measurements
+EPISODE_MIN_SAMPLES = 3
+RIDE_CAPTURE_MIN, RIDE_CAPTURE_MAX = -1.5, 2.0
+
+
 class StatsStore:
     """In-memory store of ReactionStats with optional db persistence."""
 
@@ -122,6 +127,14 @@ class StatsStore:
         self._append(rs.catchup_ratios, max(0.0, catchup_ratio))
         self._touch(rs)
 
+    def record_ride_capture(self, asset: str, exchange: str, ratio: float) -> None:
+        """Realized capture of a closed virtual ride (capture % / lag % at entry), clipped to
+        [RIDE_CAPTURE_MIN, RIDE_CAPTURE_MAX]: a ride can lose (target moved against) or earn more than
+        the lag (leader kept running).  Fed back into the expected catch-up (rule 10: measured)."""
+        rs = self.get(asset, exchange)
+        self._append(rs.ride_capture_ratios, min(RIDE_CAPTURE_MAX, max(RIDE_CAPTURE_MIN, float(ratio))))
+        self._touch(rs)
+
     def record_false_signal(self, asset: str, exchange: str) -> None:
         rs = self.get(asset, exchange)
         rs.false_signal_count += 1
@@ -198,11 +211,20 @@ class StatsStore:
         return median(rs.opp_durations_s) if rs else None
 
     def catchup_ratio(self, asset: str, exchange: str) -> float | None:
-        """Median learned catch-up ratio; None until 3 samples exist."""
+        """Learned catch-up ratio for the expected NET; None until enough samples exist.
+
+        Realized ride captures (what virtual trades entered at the signal caught) win once there are
+        ``RIDE_CAPTURE_MIN_SAMPLES``; otherwise the episode measurements (``EPISODE_MIN_SAMPLES``).
+        The MEAN is used: expected NET is linear in the capture, and the samples are bimodal (the target
+        follows fully or not at all) - a median would just pick the majority and hide the follow rate."""
         rs = self._existing(asset, exchange)
-        if rs is None or len(rs.catchup_ratios) < 3:
+        if rs is None:
             return None
-        return median(rs.catchup_ratios)
+        if len(rs.ride_capture_ratios) >= RIDE_CAPTURE_MIN_SAMPLES:
+            return sum(rs.ride_capture_ratios) / len(rs.ride_capture_ratios)
+        if len(rs.catchup_ratios) >= EPISODE_MIN_SAMPLES:
+            return sum(rs.catchup_ratios) / len(rs.catchup_ratios)
+        return None
 
     def first_mover_frequency(self, asset: str, exchange: str) -> float | None:
         rs = self._existing(asset, exchange)

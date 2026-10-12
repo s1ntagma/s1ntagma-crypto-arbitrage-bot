@@ -288,7 +288,7 @@ def build_context(
     proven = ProvenBook(settings, db=db)
     pipeline.proven = proven
     shadow = ShadowTrader(settings, bus, clock, db=db, diag=diag, metalabel=metalabel, market=pipeline.market_view,
-                          proven=proven)
+                          proven=proven, stats=stats)
     pipeline.sweep_listeners.append(shadow.tick)  # ride the leader: virtual positions checked every sweep
     pipeline.metalabel = metalabel
     listings: dict[str, dict[str, float | None]] = {}

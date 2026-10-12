@@ -16,6 +16,16 @@ quality score; each trade has three barriers - target reached (win), stop
 (time: win iff NET > 0) - and its outcome, quality score/grade and leveraged
 virtual P&L are recorded; closed trades feed ``engine.metalabel.MetaLabelStore``.
 
+Training on every priced signal (ride mode, ``shadow_train_all_signals``): a signal the model rejects
+on costs (``events.TRAINING_SIGNAL``) is still entered virtually, once per leader move, so the bot
+measures what it would really have earned - otherwise a pair the model under-rates could never be
+measured and nothing would ever be learned (0 offers -> 0 virtual trades).  Training trades are never
+Opportunities (no card, Telegram, AUTO), stay out of the offered record (Stats headline, virtual balance,
+READY) and are reported separately; their outcomes count for proven pairs and the meta-label table
+(real measured results of entering at the signal).  Every closed ride records its capture - the target's
+exit-side price move from entry to exit relative to the lag at entry - in StatsStore, which feeds the
+expected catch-up of the next signals.
+
 Results go to SQLite (``shadow_trades``) and feed the strategy statistics:
 expected NET vs what the market actually gave, per target exchange and asset.
 Shadow trades never touch balances, risk limits or the exchange.
@@ -23,6 +33,7 @@ Shadow trades never touch balances, risk limits or the exchange.
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -35,6 +46,8 @@ PERIOD_KEY = "stats_period_start_ts"  # kv: Stats count virtual trades opened fr
 # kv: set by the first start of the build that rejects crossed books - older virtual trades may have
 # bought at a stale ask and sold above it (fake profit), so Stats / PAIRS / READY start over once
 PERIOD_RESET_FLAG = "period_reset_crossed_books_v1"
+
+_TRAINED_MAX = 5000  # remembered (pair, leader move) trials: one move is one trial
 
 # expiry reasons that mean the last seen price is old (pipeline / OpportunityManager.sweep)
 _STALE_REASONS = frozenset({"target book stale", "no updates", "target book broken"})
@@ -81,6 +94,9 @@ class ShadowTrade:
     strategy: str = ""  # exit logic it was traded with (ride / simple / full): proven pairs count only their own
     proven_at_entry: bool = False  # the pair was proven when this trade was opened (readiness: proven-only win rate)
     pnl_leveraged_quote: float | None = None
+    training: bool = False  # entered on a signal the model rejected (never offered): measured, reported apart
+    entry_exit_price: float = 0.0  # exit-side VWAP at entry: the capture is measured from here (bid to bid)
+    capture_pct: float | None = None  # exit-side price move from entry to exit, toward the direction
 
     def net_at(self, exit_price: float) -> float:
         move = (exit_price / self.entry_price - 1.0) * 100.0 * self.direction
@@ -98,8 +114,10 @@ class ShadowTrader:
     """Subscribes to OPP_NEW / OPP_UPDATE / OPP_STATE; no network, no orders."""
 
     def __init__(self, settings: Any, bus: events.EventBus, clock: Any, db: Any | None = None, diag: Any | None = None,
-                 metalabel: Any | None = None, market: Any | None = None, proven: Any | None = None) -> None:
+                 metalabel: Any | None = None, market: Any | None = None, proven: Any | None = None,
+                 stats: Any | None = None) -> None:
         self._settings = settings
+        self._stats = stats  # StatsStore: realized ride captures teach the expected catch-up
         self._bus = bus
         self._clock = clock
         self._db = db
@@ -112,6 +130,9 @@ class ShadowTrader:
         self._closed: list[ShadowTrade] = []
         self.opened = 0
         self.closed = 0
+        self.training_opened = 0
+        self.training_closed = 0
+        self._trained: OrderedDict[tuple, None] = OrderedDict()  # (asset, target, direction, leader move start)
         self.no_data = 0  # closed without a fresh price (outcome unknown, not learned)
         self.skipped: dict[str, int] = {}
         self._period_start: float | None = self._load_period()
@@ -124,6 +145,7 @@ class ShadowTrader:
             bus.subscribe(events.OPP_NEW, self._on_new),
             bus.subscribe(events.OPP_UPDATE, self._on_update),
             bus.subscribe(events.OPP_STATE, self._on_state),
+            bus.subscribe(events.TRAINING_SIGNAL, self._on_training),
         ]
 
     @property
@@ -184,6 +206,7 @@ class ShadowTrader:
             entry_fee_pct=float(src["entry_fee_pct"]), exit_fee_pct=float(src["exit_fee_pct"]),
             execution_loss_pct=float(src["execution_loss_pct"]), expected_net_pct=float(src["net_pct"]),
             exit_target=float(src["exit_target"]), last_exit_price=float(src["exit_vwap_now"]), last_update_ts=now,
+            entry_exit_price=float(src["exit_vwap_now"]),
             strategy=current_strategy(self._settings), proven_at_entry=bool(proven.get("proven")),
             lag_pct=float(getattr(opp.signal, "lag_pct", 0.0) or 0.0),
             quality_score=_number(quality.get("score")), grade=str(quality.get("grade") or ""),
@@ -196,10 +219,61 @@ class ShadowTrader:
         t.max_net_pct = t.net_at(t.last_exit_price)
         self._open[opp.id] = t
         if self._ride_on():
-            self._ride[opp.id] = self._ride_position(t, opp)
+            self._ride[opp.id] = self._ride_position(t, float(opp.signal.first_move_pct), float(opp.signal.target_move_pct))
         self.opened += 1
         self._save(t)
         log.info("shadow open %s %s@%s entry %.8g expected net %+.2f%%", t.id, t.asset, t.target, t.entry_price, t.expected_net_pct)
+
+    def _on_training(self, payload: Any) -> None:
+        """A priced signal the model rejected: enter it virtually (ride), once per leader move."""
+        if not self.enabled or not self._ride_on() or not isinstance(payload, dict):
+            return
+        if not getattr(self._settings, "shadow_train_all_signals", True):
+            return
+        sig, e = payload.get("signal"), payload.get("econ")
+        if sig is None or e is None:
+            return
+        start = float(getattr(sig, "first_move_start_mono", 0.0) or 0.0)
+        if start <= 0:
+            return  # no leader move to tie the trial to
+        d = int(sig.direction)
+        key = (sig.asset, sig.target, d, round(start, 6))
+        if key in self._trained:
+            return  # one leader move is one trial
+        min_trade = float(getattr(self._settings, "min_trade_quote", 0.0) or 0.0)
+        if not (e.entry_vwap > 0 and e.exit_vwap_now > 0 and e.base_amount > 0):
+            self._skip("training: no executable book")
+            return
+        if e.executable_quote < min_trade:
+            self._skip("training: book below min trade size")
+            return
+        if any(o.asset == sig.asset and o.target == sig.target and o.direction == d for o in self._open.values()):
+            return  # this pair already rides (an offered or a training position): one move, one trial
+        self._trained[key] = None
+        while len(self._trained) > _TRAINED_MAX:
+            self._trained.popitem(last=False)
+        now = self._clock.wall()
+        started = now - max(0.0, self._clock.mono() - start)  # wall time of the leader move: unique per move
+        stop_pct = float(getattr(self._settings, "shadow_stop_pct", 1.0))
+        t = ShadowTrade(
+            id=f"train-{sig.asset}-{sig.target}-{'L' if d > 0 else 'S'}-{int(started * 1000)}",
+            asset=sig.asset, target=sig.target, symbol=sig.target_symbol, quote=sig.target_quote,
+            first_mover=sig.first_mover, direction=d, opened_ts=now, entry_price=float(e.entry_vwap),
+            base_amount=float(e.base_amount), capital_quote=float(e.executable_quote),
+            entry_fee_pct=float(e.entry_fee_pct), exit_fee_pct=float(e.exit_fee_pct),
+            execution_loss_pct=float(e.execution_loss_pct), expected_net_pct=float(e.net_pct),
+            exit_target=float(e.exit_target), last_exit_price=float(e.exit_vwap_now), last_update_ts=now,
+            entry_exit_price=float(e.exit_vwap_now), strategy=current_strategy(self._settings),
+            lag_pct=float(sig.lag_pct or 0.0), stop_pct=stop_pct,
+            stop_price=float(e.exit_vwap_now) * (1.0 - d * stop_pct / 100.0), training=True,
+        )
+        t.max_net_pct = t.net_at(t.last_exit_price)
+        self._open[t.id] = t
+        self._ride[t.id] = self._ride_position(t, float(sig.first_move_pct), float(sig.target_move_pct))
+        self.training_opened += 1
+        self._save(t)
+        log.info("training open %s %s@%s entry %.8g lag %.2f%% model net %+.2f%%",
+                 t.id, t.asset, t.target, t.entry_price, t.lag_pct, t.expected_net_pct)
 
     def _on_update(self, opp: Opportunity) -> None:
         t = self._open.get(opp.id)
@@ -261,12 +335,12 @@ class ShadowTrader:
             log.exception("market view failed for shadow %s", t.id)
             return None
 
-    def _ride_position(self, t: ShadowTrade, opp: Opportunity) -> RidePosition:
+    def _ride_position(self, t: ShadowTrade, first_move_pct: float, target_move_pct: float) -> RidePosition:
         d = t.direction
         pos = RidePosition(direction=d, entry_price=t.entry_price,
                            cost_pct=t.entry_fee_pct + t.exit_fee_pct + t.execution_loss_pct,
                            entry_mono=self._clock.mono(), last_fresh_mono=self._clock.mono(),
-                           first_move_pct=float(opp.signal.first_move_pct), target_move_pct=float(opp.signal.target_move_pct))
+                           first_move_pct=first_move_pct, target_move_pct=target_move_pct)
         view = self._view(t)
         if view:  # pre-move prices from the measured moves: lag = leader move - target move
             pos.set_anchors(view["leader_mid"], view["target_mid"])
@@ -315,7 +389,10 @@ class ShadowTrader:
         t.barrier = barrier
         self._closed.append(t)
         del self._closed[:-500]
-        self.closed += 1
+        if t.training:
+            self.training_closed += 1
+        else:
+            self.closed += 1
         if barrier == "no_data":
             self.no_data += 1
             self._save(t)
@@ -323,9 +400,10 @@ class ShadowTrader:
             return
         t.actual_net_pct = t.net_at(price)
         t.pnl_quote = t.capital_quote * t.actual_net_pct / 100.0
-        if self._period_start is None or t.opened_ts >= self._period_start:
-            self._period_pnl += t.pnl_quote
+        if not t.training and (self._period_start is None or t.opened_ts >= self._period_start):
+            self._period_pnl += t.pnl_quote  # the virtual balance holds offered trades only
         t.pnl_leveraged_quote = t.pnl_quote * max(1.0, t.leverage_max)
+        self._record_capture(t, price)
         self._save(t)
         self._learn(t)
         if self._proven is not None:
@@ -335,6 +413,20 @@ class ShadowTrader:
                 log.exception("proven record failed for shadow trade %s", t.id)
         log.info("shadow close %s %s@%s net %+.2f%% (expected %+.2f%%) - %s",
                  t.id, t.asset, t.target, t.actual_net_pct, t.expected_net_pct, reason)
+
+    def _record_capture(self, t: ShadowTrade, price: float) -> None:
+        """What the ride caught: the exit-side price move from entry to exit (bid to bid for a LONG - the
+        spread is already in entry and exit prices and must not be counted again), relative to the lag
+        at entry.  Only rides teach the ride catch-up (another exit logic catches something else)."""
+        if t.entry_exit_price <= 0 or price <= 0:
+            return
+        t.capture_pct = (price / t.entry_exit_price - 1.0) * 100.0 * t.direction
+        if self._stats is None or t.strategy != "ride" or t.lag_pct < 0.05:
+            return
+        try:
+            self._stats.record_ride_capture(t.asset, t.target, t.capture_pct / t.lag_pct)
+        except Exception:  # noqa: BLE001
+            log.exception("ride capture not recorded for shadow trade %s", t.id)
 
     def _learn(self, t: ShadowTrade) -> None:
         if self._metalabel is None:
@@ -423,11 +515,12 @@ class ShadowTrader:
                 log.exception("list_shadow failed")
         start = self._period_start
         return sum(float(r.get("pnl_quote") or 0.0) for r in rows
-                   if r.get("closed_ts") is not None and (start is None or float(r.get("opened_ts") or 0.0) >= start))
+                   if r.get("closed_ts") is not None and not r.get("training")
+                   and (start is None or float(r.get("opened_ts") or 0.0) >= start))
 
     def _free_balance(self) -> float:
         """Virtual balance now minus what the open virtual positions hold."""
-        held = sum(t.capital_quote for t in self._open.values())
+        held = sum(t.capital_quote for t in self._open.values() if not t.training)
         return self._balance_start() + self._period_pnl - held
 
     @property
@@ -454,15 +547,17 @@ class ShadowTrader:
     def summary(self, limit: int = 5000) -> dict[str, Any]:
         rows = self.trades(limit)
         start = self._period_start
-        cur = rows if start is None else [r for r in rows if float(r.get("opened_ts") or 0.0) >= start]
+        period = rows if start is None else [r for r in rows if float(r.get("opened_ts") or 0.0) >= start]
+        cur = [r for r in period if not r.get("training")]  # the offered record: headline, balance, READY
         out = summarize(cur)
+        out["training"] = summarize_training([r for r in period if r.get("training")])
         out.update(_balance_stats(cur, self._balance_start(), self._clock.wall()))
         counts = self._proven.counts() if self._proven is not None and hasattr(self._proven, "counts") else {}
         out["proven_pairs"] = counts
         out["readiness"] = _readiness(cur, counts, self._settings)
         out["skipped"] = dict(self.skipped)
         out["period_start_ts"] = start
-        out["all_time_closed"] = sum(1 for r in rows if r.get("closed_ts") is not None)
+        out["all_time_closed"] = sum(1 for r in rows if r.get("closed_ts") is not None and not r.get("training"))
         return out
 
 
@@ -587,6 +682,25 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def summarize_training(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Training trades (every priced signal the model rejected): what entering them really earned, and
+    how much of the lag the target really gave (capture vs lag) - per venue and asset."""
+    out = summarize(rows)
+    closed = [r for r in rows if r.get("closed_ts") is not None and r.get("actual_net_pct") is not None]
+
+    def capture(group: list[dict[str, Any]]) -> dict[str, Any]:
+        caps = [float(r["capture_pct"]) for r in group if r.get("capture_pct") is not None]
+        lags = [float(r.get("lag_pct") or 0.0) for r in group]
+        return {"avg_capture_pct": sum(caps) / len(caps) if caps else None,
+                "avg_lag_pct": sum(lags) / len(lags) if lags else None}
+
+    out.update(capture(closed))
+    for key, field_name in (("by_target", "target"), ("by_asset", "asset")):
+        for name, st in out.get(key, {}).items():
+            st.update(capture([r for r in closed if str(r.get(field_name) or "?") == name]))
+    return out
+
+
 def _number(v: Any) -> float | None:
     try:
         x = float(v)
@@ -600,4 +714,4 @@ def _positive(v: Any) -> float | None:
     return x if x is not None and x > 0 else None
 
 
-__all__ = ["ShadowTrade", "ShadowTrader", "summarize"]
+__all__ = ["ShadowTrade", "ShadowTrader", "summarize", "summarize_training"]
