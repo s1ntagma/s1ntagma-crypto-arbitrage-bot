@@ -46,7 +46,9 @@ from ..models import TERMINAL_STATES, Opportunity, OppState
 PERIOD_KEY = "stats_period_start_ts"  # kv: Stats count virtual trades opened from here on (history stays)
 # kv: set by the first start of the build that rejects crossed books - older virtual trades may have
 # bought at a stale ask and sold above it (fake profit), so Stats / PAIRS / READY start over once
-PERIOD_RESET_FLAG = "period_reset_crossed_books_v1"
+# v2: virtual trades of older builds were measured against the wrong leader (signal venues watched their
+# thin EUR / USDC markets) - Stats, PAIRS and READY start over once more
+PERIOD_RESET_FLAG = "period_reset_main_markets_v2"
 
 _TRAINED_MAX = 5000  # remembered (pair, leader move) trials: one move is one trial
 _RECORD_LIMIT = 100_000  # offered trades of a period read for Stats / READY / the virtual balance

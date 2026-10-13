@@ -133,6 +133,7 @@ def test_biased_catchup_ratios_are_dropped_once():
     rs.reaction_delays_s = [2.0, 3.0, 4.0]
     db.save_stats(rs)
     db.kv_set("catchup_clean_books_v3", True)  # only the v2 (survivor bias) cleanup is pending here
+    db.kv_set("catchup_main_markets_v4", True)
     st = StatsStore(Settings(), db)
     assert st.get("BTC", "kraken").catchup_ratios == [] and st.get("BTC", "kraken").reaction_delays_s == [2.0, 3.0, 4.0]
     st.record_catchup("BTC", "kraken", 0.0)

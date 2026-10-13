@@ -186,7 +186,8 @@ def spot_cfg(name: str = "kraken", **kw: Any) -> ExchangeConfig:
     kw.setdefault("book_depth", 10)
     kw.setdefault("taker_fee", 0.004)
     kw.setdefault("maker_fee", 0.0025)
-    return ExchangeConfig(name=name, role=ExchangeRole.EXECUTION, **kw)
+    kw.setdefault("role", ExchangeRole.EXECUTION)
+    return ExchangeConfig(name=name, **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -306,6 +307,18 @@ def test_resolve_assets_universe_without_start():
     h.adapter.public.markets = dict(MARKETS)
     res = h.adapter.resolve_assets(None)
     assert res == {"BTC": "BTC/EUR", "ETH": "ETH/USDC"}
+
+
+def test_signal_venues_resolve_their_main_usdt_market():
+    """A signal venue only says where the market moves: its deepest market must be watched.  EUR-first
+    picked Binance BTC/EUR (6 M a day) over BTC/USDT (1.27 B) and HBAR/USDC (1.9 M) over HBAR/USDT
+    (19 M), so a smaller venue's USDT book had more volume and became the leader (2026-10-13)."""
+    h = Harness(spot_cfg(name="binance", role=ExchangeRole.SIGNAL))
+    h.adapter.public.markets = dict(MARKETS)
+    assert h.adapter.resolve_assets(["BTC", "ETH"]) == {"BTC": "BTC/USDT", "ETH": "ETH/USDC"}
+    target = Harness(spot_cfg())  # the owner's venue keeps trading in EUR
+    target.adapter.public.markets = dict(MARKETS)
+    assert target.adapter.resolve_assets(["BTC"]) == {"BTC": "BTC/EUR"}
 
 
 # --------------------------------------------------------------------------- #

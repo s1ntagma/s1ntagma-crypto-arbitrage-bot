@@ -211,6 +211,10 @@ class Settings:
     # Quote preference per exchange market resolution.  Moves are compared in
     # percent, so EUR / USDC / USD / USDT quoted markets are all comparable.
     quote_assets: list[str] = field(default_factory=lambda: ["EUR", "USDC", "USD", "USDT"])
+    # Signal venues only say where the market moves: their deepest market is watched (Binance BTC/USDT
+    # trades 200x BTC/EUR; EUR-first made a smaller venue's USDT book the "leader").  Execution venues
+    # keep ``quote_assets`` (the owner's money is in EUR).
+    signal_quote_assets: list[str] = field(default_factory=lambda: ["USDT", "USDC", "USD", "EUR"])
     exchanges: list[ExchangeConfig] = field(default_factory=lambda: [ExchangeConfig(**asdict(e)) for e in DEFAULT_EXCHANGES])
     # ---- coverage: WS for the core watchlist, REST ticker polling for breadth --
     ws_assets: int = 25  # WebSocket streams per exchange: the whole Phase 3 pool (REST polling is 1-2 s slower)

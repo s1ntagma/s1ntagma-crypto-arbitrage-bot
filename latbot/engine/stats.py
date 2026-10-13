@@ -22,6 +22,9 @@ Key = tuple[str, str]  # (asset, exchange)
 
 _CATCHUP_FLAG = "catchup_unbiased_v2"
 _CLEAN_BOOKS_FLAG = "catchup_clean_books_v3"  # samples measured before crossed books were rejected
+# samples measured against the wrong leader: signal venues watched their thin EUR / USDC markets, so a
+# smaller venue's USDT book was the leader (Binance HBAR/USDC 1.9 M vs HBAR/USDT 19 M a day)
+_MAIN_MARKETS_FLAG = "catchup_main_markets_v4"
 
 
 RIDE_CAPTURE_MIN_SAMPLES = 5  # realized rides before they replace the episode measurements
@@ -50,20 +53,23 @@ class StatsStore:
     def _drop_biased_catchups(self) -> None:
         """Catch-up samples recorded by older builds are dropped once per fix; everything else stays:
         v2 - only targets that DID follow were recorded (survivor bias); v3 - target moves were measured
-        on crossed (broken) books, which moved the target's mid without a real trade."""
+        on crossed (broken) books, which moved the target's mid without a real trade; v4 - every sample
+        is relative to the leader, and the leader was a venue's thin EUR / USDC market."""
         kv_get, kv_set = getattr(self._db, "kv_get", None), getattr(self._db, "kv_set", None)
         if kv_get is None or kv_set is None:
             return
-        missing = [flag for flag in (_CATCHUP_FLAG, _CLEAN_BOOKS_FLAG) if not kv_get(flag)]
+        missing = [flag for flag in (_CATCHUP_FLAG, _CLEAN_BOOKS_FLAG, _MAIN_MARKETS_FLAG) if not kv_get(flag)]
         if not missing:
             return
         n = 0
         for rs in self._stats.values():
-            if _CLEAN_BOOKS_FLAG in missing:
+            if _CLEAN_BOOKS_FLAG in missing or _MAIN_MARKETS_FLAG in missing:
                 # every measurement taken from the target's mid (broken books moved it without a trade);
                 # the owner's real trades (manual_*, success / fail, realized returns) stay
                 n += len(rs.catchup_ratios) + len(rs.reaction_delays_s) + len(rs.opp_durations_s) + len(rs.lag_sizes_pct)
+                n += len(rs.ride_capture_ratios)
                 rs.catchup_ratios, rs.reaction_delays_s, rs.opp_durations_s, rs.lag_sizes_pct = [], [], [], []
+                rs.ride_capture_ratios = []
                 rs.caught_up_total = rs.caught_up_ok = rs.human_window_total = rs.human_window_ok = 0
                 rs.false_signal_count = rs.lagging_count = rs.first_mover_count = 0
                 self._touch(rs)

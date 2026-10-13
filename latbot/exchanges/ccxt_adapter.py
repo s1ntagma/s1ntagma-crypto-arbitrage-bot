@@ -405,11 +405,14 @@ class CcxtAdapter(ExchangeAdapter):
         """Resolve assets -> market symbols (``None`` = the whole universe).
 
         Rule: ``market['base'] == asset``, active, matching ``cfg.market_type``
-        (spot; or swap + linear), quote in ``settings.quote_assets`` - the best
+        (spot; or swap + linear), quote in ``settings.quote_assets`` (signal venues:
+        ``settings.signal_quote_assets``, their deepest market first) - the best
         preference index wins.  Unresolvable assets are logged once.
         """
         markets: dict[str, dict[str, Any]] = getattr(self.public, "markets", None) or {}
-        quotes = [q.upper() for q in self.settings.quote_assets]
+        signal = self.cfg.role == ExchangeRole.SIGNAL
+        prefs = getattr(self.settings, "signal_quote_assets", None) if signal else None
+        quotes = [q.upper() for q in (prefs or self.settings.quote_assets)]
         by_base: dict[str, list[dict[str, Any]]] = {}
         for m in markets.values():
             if not isinstance(m, dict) or not m.get("symbol"):

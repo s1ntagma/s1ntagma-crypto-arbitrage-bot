@@ -197,3 +197,23 @@ def test_ride_capture_is_clipped():
     st.record_ride_capture("BTC", "kraken", 9.0)
     st.record_ride_capture("BTC", "kraken", -9.0)
     assert st.get("BTC", "kraken").ride_capture_ratios == [2.0, -1.5]
+
+
+# ---- learned data measured against the wrong leader starts over once (2026-10-13) --------------------
+def test_leader_relative_samples_of_older_builds_are_dropped_once():
+    clock = SimClock()
+    db = Database(":memory:", clock=clock)
+    s = Settings(simple_mode=True)
+    st = StatsStore(s, db)
+    for _ in range(5):
+        st.record_catchup("HBAR", "kraken", 0.0)
+        st.record_ride_capture("HBAR", "kraken", 0.0)
+    st.get("HBAR", "kraken").manual_wins = 2  # the owner's real trades stay
+    st.save()
+    db.kv_delete("catchup_main_markets_v4")  # recorded by a build that watched the wrong leader
+    fresh = StatsStore(s, db)
+    rs = fresh.get("HBAR", "kraken")
+    assert rs.catchup_ratios == [] and rs.ride_capture_ratios == [] and rs.manual_wins == 2
+    fresh.record_ride_capture("HBAR", "kraken", 1.0)
+    fresh.save()
+    assert StatsStore(s, db).get("HBAR", "kraken").ride_capture_ratios == [1.0]  # only once
