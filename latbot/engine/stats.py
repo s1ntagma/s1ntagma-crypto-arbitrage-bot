@@ -213,14 +213,16 @@ class StatsStore:
     def catchup_ratio(self, asset: str, exchange: str) -> float | None:
         """Learned catch-up ratio for the expected NET; None until enough samples exist.
 
-        Realized ride captures (what virtual trades entered at the signal caught) win once there are
-        ``RIDE_CAPTURE_MIN_SAMPLES``; otherwise the episode measurements (``EPISODE_MIN_SAMPLES``).
+        In ride mode realized ride captures (what virtual trades entered at the signal caught) win once
+        there are ``RIDE_CAPTURE_MIN_SAMPLES``; otherwise the episode measurements (``EPISODE_MIN_SAMPLES``).
         The MEAN is used: expected NET is linear in the capture, and the samples are bimodal (the target
         follows fully or not at all) - a median would just pick the majority and hide the follow rate."""
         rs = self._existing(asset, exchange)
         if rs is None:
             return None
-        if len(rs.ride_capture_ratios) >= RIDE_CAPTURE_MIN_SAMPLES:
+        ride = getattr(self._settings, "ride_active", None)
+        if callable(ride) and ride() and len(rs.ride_capture_ratios) >= RIDE_CAPTURE_MIN_SAMPLES:
+            # what a ride caught teaches the ride exit only; another exit logic catches something else
             return sum(rs.ride_capture_ratios) / len(rs.ride_capture_ratios)
         if len(rs.catchup_ratios) >= EPISODE_MIN_SAMPLES:
             return sum(rs.catchup_ratios) / len(rs.catchup_ratios)

@@ -120,7 +120,10 @@ class ProvenBook:
         if fn is None:
             return
         try:
-            rows = fn(_LOAD_LIMIT)
+            try:
+                rows = fn(_LOAD_LIMIT, training=False)
+            except TypeError:  # a store without the filter
+                rows = fn(_LOAD_LIMIT)
         except Exception:  # noqa: BLE001
             log.exception("proven pairs: shadow history not loaded")
             return
@@ -131,6 +134,8 @@ class ProvenBook:
         """One closed virtual trade (ShadowTrade.to_dict()).  Unknown outcome / no strategy tag -> ignored."""
         if not isinstance(trade, dict) or trade.get("closed_ts") is None:
             return False
+        if trade.get("training"):
+            return False  # the gate decides about offers: it is judged on offered trades only
         net = _num(trade.get("actual_net_pct"))
         strategy = str(trade.get("strategy") or "")
         asset, target = str(trade.get("asset") or ""), str(trade.get("target") or "")

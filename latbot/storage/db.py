@@ -233,7 +233,20 @@ class Database:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=OFF")
         self._conn.executescript(_SCHEMA)
+        self._migrate_shadow_training()
         log.info("database ready at %s (journal=%s)", self.path, self.journal_mode)
+
+    def _migrate_shadow_training(self) -> None:
+        """``shadow_trades.training`` (0/1): offered and training trades are queried apart, so thousands
+        of training rows never push the offered record (Stats, READY, virtual balance) out of a window."""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(shadow_trades)").fetchall()}
+        if "training" not in cols:
+            self._conn.execute("ALTER TABLE shadow_trades ADD COLUMN training INTEGER NOT NULL DEFAULT 0")
+            for r in self._conn.execute("SELECT id, json FROM shadow_trades").fetchall():
+                d = self._load(r["json"])
+                if isinstance(d, dict) and d.get("training"):
+                    self._conn.execute("UPDATE shadow_trades SET training = 1 WHERE id = ?", (r["id"],))
+        self._conn.execute("CREATE INDEX IF NOT EXISTS ix_shadow_training ON shadow_trades(training, opened_ts)")
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -463,15 +476,37 @@ class Database:
     def save_shadow(self, row: dict[str, Any]) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT INTO shadow_trades (id, opened_ts, closed_ts, json) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET opened_ts=excluded.opened_ts, closed_ts=excluded.closed_ts, json=excluded.json",
-                (str(row["id"]), row.get("opened_ts"), row.get("closed_ts"), json.dumps(row, ensure_ascii=False, default=str)),
+                "INSERT INTO shadow_trades (id, opened_ts, closed_ts, training, json) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET opened_ts=excluded.opened_ts, closed_ts=excluded.closed_ts, "
+                "training=excluded.training, json=excluded.json",
+                (str(row["id"]), row.get("opened_ts"), row.get("closed_ts"), 1 if row.get("training") else 0,
+                 json.dumps(row, ensure_ascii=False, default=str)),
             )
 
-    def list_shadow(self, limit: int = 200) -> list[dict[str, Any]]:
+    @staticmethod
+    def _shadow_where(training: bool | None, since_ts: float | None, open_only: bool,
+                      closed: bool | None = None) -> tuple[str, list[Any]]:
+        where, args = [], []
+        if training is not None:
+            where.append("training = ?")
+            args.append(1 if training else 0)
+        if since_ts is not None:
+            where.append("opened_ts >= ?")
+            args.append(float(since_ts))
+        if open_only or closed is False:
+            where.append("closed_ts IS NULL")
+        elif closed:
+            where.append("closed_ts IS NOT NULL")
+        return (" WHERE " + " AND ".join(where)) if where else "", args
+
+    def list_shadow(self, limit: int = 200, *, training: bool | None = None, since_ts: float | None = None,
+                    open_only: bool = False) -> list[dict[str, Any]]:
+        """Newest first.  ``training``: only training (True) / only offered (False) trades; ``since_ts``:
+        opened from then on; ``open_only``: positions not closed yet."""
+        where, args = self._shadow_where(training, since_ts, open_only)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT json FROM shadow_trades ORDER BY opened_ts DESC LIMIT ?", (int(limit),)
+                f"SELECT json FROM shadow_trades{where} ORDER BY opened_ts DESC LIMIT ?", (*args, int(limit))
             ).fetchall()
         out = []
         for r in rows:
@@ -479,6 +514,11 @@ class Database:
             if isinstance(d, dict):
                 out.append(d)
         return out
+
+    def count_shadow(self, *, training: bool | None = None, closed: bool | None = None) -> int:
+        where, args = self._shadow_where(training, None, False, closed)
+        with self._lock:
+            return int(self._conn.execute(f"SELECT COUNT(*) FROM shadow_trades{where}", args).fetchone()[0])
 
     # ---- Phase 3: context + learning ----------------------------------------
     def _json_rows(self, sql: str, args: tuple[Any, ...]) -> list[dict[str, Any]]:

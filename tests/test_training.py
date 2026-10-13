@@ -15,6 +15,8 @@ from latbot.config import Settings
 from latbot.engine.proven import ProvenBook
 from latbot.engine.shadow import ShadowTrader
 from latbot.engine.stats import StatsStore
+from latbot.clock import SimClock
+from latbot.storage.db import Database
 from test_ride import step
 from test_simple_mode import simple_env
 
@@ -69,7 +71,9 @@ async def test_a_training_trade_rides_and_teaches_the_catch_up_from_its_capture(
     assert row["capture_pct"] == pytest.approx((row["exit_price"] / row["entry_exit_price"] - 1) * 100)
     assert row["capture_pct"] > 1.5
     ratios = env.stats.get("BTC", "kraken").ride_capture_ratios
-    assert ratios == [pytest.approx(row["capture_pct"] / row["lag_pct"])]
+    # the leader ran on, so the same move was offered too: that offered ride records its own capture
+    assert any(r == pytest.approx(row["capture_pct"] / row["lag_pct"]) for r in ratios)
+    assert len(ratios) == 1 + sh.opened
 
 
 async def test_training_results_stay_out_of_the_offered_record_and_the_virtual_balance():
@@ -84,13 +88,69 @@ async def test_training_results_stay_out_of_the_offered_record_and_the_virtual_b
     assert "kraken" in s["training"]["by_target"]
 
 
-async def test_training_results_count_for_proven_pairs():
+async def test_training_results_do_not_count_for_proven_pairs():
     env, sh = training_env(with_proven=True)
     await env.warm_up()
     await env.push("binance", 101.0)
     await step(env, {"binance": 100.5, "kucoin": 100.0, "kraken": 100.0})
-    [pair] = [p for p in env.proven.pairs() if p["target"] == "kraken"]
-    assert pair["n"] == 1  # a measured outcome of entering at the signal, like an offered one
+    assert training_rows(sh)[0]["open"] is False
+    # the proven gate decides about offers: it is judged on offered trades only (review 2026-10-13)
+    assert [p for p in env.proven.pairs() if p["target"] == "kraken"] == []
+
+
+async def test_an_offer_on_the_same_move_still_gets_its_offered_virtual_trade():
+    env, sh = training_env()
+    await env.warm_up()
+    await env.push("binance", 101.0)  # small lag: rejected on costs -> training ride
+    await step(env, {"binance": 102.5, "kucoin": 100.0, "kraken": 100.0})  # the lag grew: offered
+    assert len(env.opps.active()) == 1
+    assert sh.opened == 1 and sh.training_opened == 1  # the training ride never blocks the offer's trade
+    assert "position already riding on this pair" not in sh.skipped
+
+
+async def test_training_skips_are_counted_once_per_move_and_apart_from_offers():
+    env, sh = training_env(min_trade_quote=1e9)  # no book supports the minimum: every trial is skipped
+    await env.warm_up()
+    await env.push("binance", 101.0)
+    for _ in range(3):
+        await step(env, {"binance": 101.1, "kucoin": 100.0, "kraken": 100.0})
+    assert sh.training_skipped == {"book below min trade size": 1}
+    assert sh.skipped == {}
+
+
+def test_training_rows_never_crowd_offered_trades_out_of_the_record():
+    clock = SimClock()
+    db = Database(":memory:", clock=clock)
+    sh = ShadowTrader(Settings(), events.EventBus(), clock, db=db)
+    t0 = clock.wall()
+    for i in range(10):  # the period's offered trades, older than the training flood
+        db.save_shadow({"id": f"o{i}", "asset": "BTC", "target": "kraken", "opened_ts": t0 + i, "closed_ts": t0 + i + 1,
+                        "actual_net_pct": -1.0, "pnl_quote": -1.0, "expected_net_pct": 0.2, "training": False})
+    for i in range(5100):
+        db.save_shadow({"id": f"t{i}", "asset": "BTC", "target": "kraken", "opened_ts": t0 + 100 + i,
+                        "closed_ts": t0 + 101 + i, "actual_net_pct": 0.1, "pnl_quote": 0.1, "training": True})
+    s = sh.summary()
+    assert s["closed"] == 10 and s["avg_actual_net_pct"] == pytest.approx(-1.0)
+    assert {c["key"]: c["value"] for c in s["readiness"]["checks"]}["trades"] == 10
+    assert s["all_time_closed"] == 10
+    restarted = ShadowTrader(Settings(), events.EventBus(), clock, db=db)
+    assert restarted.summary()["balance_now"] == pytest.approx(restarted.summary()["balance_start"] - 10.0)
+
+
+def test_old_shadow_tables_get_the_training_column(tmp_path):
+    import json
+    import sqlite3
+
+    path = tmp_path / "old.sqlite3"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE shadow_trades (id TEXT PRIMARY KEY, opened_ts REAL, closed_ts REAL, json TEXT NOT NULL)")
+    con.execute("INSERT INTO shadow_trades VALUES ('a', 1, 2, ?)", (json.dumps({"id": "a", "opened_ts": 1, "training": True}),))
+    con.execute("INSERT INTO shadow_trades VALUES ('b', 1, 2, ?)", (json.dumps({"id": "b", "opened_ts": 1}),))
+    con.commit()
+    con.close()
+    db = Database(str(path))
+    assert [r["id"] for r in db.list_shadow(10, training=True)] == ["a"]
+    assert [r["id"] for r in db.list_shadow(10, training=False)] == ["b"]
 
 
 async def test_measured_captures_turn_an_under_rated_pair_into_an_offer():
@@ -111,7 +171,7 @@ async def test_no_training_when_switched_off():
 
 # ---- the catch-up estimator ------------------------------------------------------------------------
 def test_catch_up_prefers_ride_captures_and_uses_the_mean():
-    st = StatsStore(Settings())
+    st = StatsStore(Settings(simple_mode=True, ride_enabled=True))
     assert st.catchup_ratio("BTC", "kraken") is None
     for r in (0.0, 0.0, 0.9):  # bimodal episode samples: the median (0) hides a 30 % follow rate
         st.record_catchup("BTC", "kraken", r)
@@ -121,6 +181,15 @@ def test_catch_up_prefers_ride_captures_and_uses_the_mean():
     assert st.catchup_ratio("BTC", "kraken") == pytest.approx(0.3)  # 4 rides are not enough yet
     st.record_ride_capture("BTC", "kraken", 1.0)
     assert st.catchup_ratio("BTC", "kraken") == pytest.approx((1.0 + 1.2 + 0.8 - 0.5 + 1.0) / 5)
+
+
+def test_ride_captures_teach_only_the_ride_exit():
+    st = StatsStore(Settings(simple_mode=True, ride_enabled=False))  # another exit logic catches something else
+    for r in (0.0, 0.0, 0.9):
+        st.record_catchup("BTC", "kraken", r)
+    for _ in range(5):
+        st.record_ride_capture("BTC", "kraken", 2.0)
+    assert st.catchup_ratio("BTC", "kraken") == pytest.approx(0.3)
 
 
 def test_ride_capture_is_clipped():

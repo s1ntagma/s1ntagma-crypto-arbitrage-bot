@@ -20,9 +20,10 @@ Training on every priced signal (ride mode, ``shadow_train_all_signals``): a sig
 on costs (``events.TRAINING_SIGNAL``) is still entered virtually, once per leader move, so the bot
 measures what it would really have earned - otherwise a pair the model under-rates could never be
 measured and nothing would ever be learned (0 offers -> 0 virtual trades).  Training trades are never
-Opportunities (no card, Telegram, AUTO), stay out of the offered record (Stats headline, virtual balance,
-READY) and are reported separately; their outcomes count for proven pairs and the meta-label table
-(real measured results of entering at the signal).  Every closed ride records its capture - the target's
+Opportunities (no card, Telegram, AUTO), never block the virtual trade of an offer, stay out of the
+offered record (Stats headline, virtual balance, READY) and out of proven pairs (the gate is judged on the
+offers it gates), and are reported separately (stored with ``training = 1``, queried apart, so they never
+push offered trades out of a window).  Every closed ride records its capture - the target's
 exit-side price move from entry to exit relative to the lag at entry - in StatsStore, which feeds the
 expected catch-up of the next signals.
 
@@ -48,6 +49,7 @@ PERIOD_KEY = "stats_period_start_ts"  # kv: Stats count virtual trades opened fr
 PERIOD_RESET_FLAG = "period_reset_crossed_books_v1"
 
 _TRAINED_MAX = 5000  # remembered (pair, leader move) trials: one move is one trial
+_RECORD_LIMIT = 100_000  # offered trades of a period read for Stats / READY / the virtual balance
 
 # expiry reasons that mean the last seen price is old (pipeline / OpportunityManager.sweep)
 _STALE_REASONS = frozenset({"target book stale", "no updates", "target book broken"})
@@ -133,6 +135,8 @@ class ShadowTrader:
         self.training_opened = 0
         self.training_closed = 0
         self._trained: OrderedDict[tuple, None] = OrderedDict()  # (asset, target, direction, leader move start)
+        self.training_skipped: dict[str, int] = {}  # once per leader move, apart from the offers' skips
+        self._train_skips: OrderedDict[tuple, None] = OrderedDict()
         self.no_data = 0  # closed without a fresh price (outcome unknown, not learned)
         self.skipped: dict[str, int] = {}
         self._period_start: float | None = self._load_period()
@@ -177,8 +181,9 @@ class ShadowTrader:
         if float(e.net_pct) < float(getattr(self._settings, "shadow_min_net_pct", 0.1)):
             self._skip("NET below training threshold")
             return
-        if self._ride_on() and any(o.asset == opp.asset and o.target == opp.target_exchange and o.direction == int(opp.direction)
-                                   for o in self._open.values()):
+        if self._ride_on() and any(not o.training and o.asset == opp.asset and o.target == opp.target_exchange
+                                   and o.direction == int(opp.direction) for o in self._open.values()):
+            # a training ride on the same move never blocks the offer: the offered record must hold every offer
             self._skip("position already riding on this pair")  # one market move is one trial, as live
             return
         size = _best_size(opp)
@@ -242,10 +247,10 @@ class ShadowTrader:
             return  # one leader move is one trial
         min_trade = float(getattr(self._settings, "min_trade_quote", 0.0) or 0.0)
         if not (e.entry_vwap > 0 and e.exit_vwap_now > 0 and e.base_amount > 0):
-            self._skip("training: no executable book")
+            self._skip_training(key, "no executable book")
             return
         if e.executable_quote < min_trade:
-            self._skip("training: book below min trade size")
+            self._skip_training(key, "book below min trade size")
             return
         if any(o.asset == sig.asset and o.target == sig.target and o.direction == d for o in self._open.values()):
             return  # this pair already rides (an offered or a training position): one move, one trial
@@ -377,6 +382,15 @@ class ShadowTrader:
                 self._close(t, price, d.text, "stop" if d.code == "stop" else "time")
 
     # ---- bookkeeping -------------------------------------------------------
+    def _skip_training(self, key: tuple, reason: str) -> None:
+        """Counted once per leader move (the signal is re-evaluated on every book tick)."""
+        if (key, reason) in self._train_skips:
+            return
+        self._train_skips[(key, reason)] = None
+        while len(self._train_skips) > _TRAINED_MAX:
+            self._train_skips.popitem(last=False)
+        self.training_skipped[reason] = self.training_skipped.get(reason, 0) + 1
+
     def _skip(self, reason: str) -> None:
         self.skipped[reason] = self.skipped.get(reason, 0) + 1
         log.debug("shadow skipped: %s", reason)
@@ -406,7 +420,7 @@ class ShadowTrader:
         self._record_capture(t, price)
         self._save(t)
         self._learn(t)
-        if self._proven is not None:
+        if self._proven is not None and not t.training:
             try:
                 self._proven.record(t.to_dict())
             except Exception:  # noqa: BLE001
@@ -449,6 +463,30 @@ class ShadowTrader:
             log.exception("shadow trade %s not saved", t.id)
 
     # ---- queries -----------------------------------------------------------
+    def _db_rows(self, limit: int, *, training: bool | None = None, since: float | None = None,
+                 open_only: bool = False) -> list[dict[str, Any]]:
+        """Stored trades, filtered in SQL when the store can (training apart from offered), else here."""
+        if self._db is None or not hasattr(self._db, "list_shadow"):
+            return []
+        try:
+            try:
+                return list(self._db.list_shadow(limit, training=training, since_ts=since, open_only=open_only))
+            except TypeError:  # a store without filters
+                rows = self._db.list_shadow(limit)
+        except Exception:  # noqa: BLE001
+            log.exception("list_shadow failed")
+            return []
+        return [r for r in rows if _matches(r, training, since, open_only)]
+
+    def _rows(self, limit: int, *, training: bool | None = None, since: float | None = None) -> list[dict[str, Any]]:
+        rows = {str(d.get("id")): d for d in self._db_rows(limit, training=training, since=since)}
+        for t in [*self._closed, *self._open.values()]:
+            d = t.to_dict()
+            if _matches(d, training, since, False):
+                rows[t.id] = d
+        out = sorted(rows.values(), key=lambda d: float(d.get("opened_ts") or 0.0), reverse=True)
+        return out[: max(0, int(limit))]
+
     def trades(self, limit: int = 200) -> list[dict[str, Any]]:
         rows: dict[str, dict[str, Any]] = {}
         if self._db is not None and hasattr(self._db, "list_shadow"):
@@ -485,14 +523,9 @@ class ShadowTrader:
     def _close_orphans(self) -> None:
         """Virtual positions left open by a previous run cannot be resumed (their prices and leader state
         are gone): they are closed as "no data" - never guessed into a result."""
-        fn = getattr(self._db, "list_shadow", None) if self._db is not None else None
-        if fn is None or not hasattr(self._db, "save_shadow"):
+        if self._db is None or not hasattr(self._db, "save_shadow"):
             return
-        try:
-            rows = fn(5000)
-        except Exception:  # noqa: BLE001
-            log.exception("list_shadow failed")
-            return
+        rows = self._db_rows(_RECORD_LIMIT, open_only=True)
         now = self._clock.wall()
         for r in rows:
             if r.get("closed_ts") is None:
@@ -507,13 +540,8 @@ class ShadowTrader:
         return float(getattr(self._settings, "shadow_balance_quote", 1000.0) or 0.0)
 
     def _load_period_pnl(self) -> float:
-        rows = []
-        if self._db is not None and hasattr(self._db, "list_shadow"):
-            try:
-                rows = self._db.list_shadow(5000)
-            except Exception:  # noqa: BLE001
-                log.exception("list_shadow failed")
         start = self._period_start
+        rows = self._db_rows(_RECORD_LIMIT, training=False, since=start)
         return sum(float(r.get("pnl_quote") or 0.0) for r in rows
                    if r.get("closed_ts") is not None and not r.get("training")
                    and (start is None or float(r.get("opened_ts") or 0.0) >= start))
@@ -545,21 +573,36 @@ class ShadowTrader:
         return now
 
     def summary(self, limit: int = 5000) -> dict[str, Any]:
-        rows = self.trades(limit)
         start = self._period_start
-        period = rows if start is None else [r for r in rows if float(r.get("opened_ts") or 0.0) >= start]
-        cur = [r for r in period if not r.get("training")]  # the offered record: headline, balance, READY
+        # the offered record (headline, balance, READY) holds the whole period, whatever the training volume
+        cur = self._rows(max(int(limit), _RECORD_LIMIT), training=False, since=start)
         out = summarize(cur)
-        out["training"] = summarize_training([r for r in period if r.get("training")])
+        out["training"] = summarize_training(self._rows(int(limit), training=True, since=start))
+        out["training"]["skipped"] = dict(self.training_skipped)
         out.update(_balance_stats(cur, self._balance_start(), self._clock.wall()))
         counts = self._proven.counts() if self._proven is not None and hasattr(self._proven, "counts") else {}
         out["proven_pairs"] = counts
         out["readiness"] = _readiness(cur, counts, self._settings)
         out["skipped"] = dict(self.skipped)
         out["period_start_ts"] = start
-        out["all_time_closed"] = sum(1 for r in rows if r.get("closed_ts") is not None and not r.get("training"))
+        out["all_time_closed"] = self._count_offered_closed()
         return out
 
+
+    def _count_offered_closed(self) -> int:
+        count = getattr(self._db, "count_shadow", None) if self._db is not None else None
+        stored = 0
+        if callable(count):
+            try:
+                stored = int(count(training=False, closed=True))
+            except Exception:  # noqa: BLE001
+                log.exception("count_shadow failed")
+                stored = 0
+        else:
+            stored = sum(1 for r in self._db_rows(_RECORD_LIMIT, training=False) if r.get("closed_ts") is not None)
+        unsaved = 0 if self._db is not None and hasattr(self._db, "save_shadow") else \
+            sum(1 for t in self._closed if not t.training)
+        return stored + unsaved
 
     def readiness(self) -> dict[str, Any]:
         """The Stats READY checklist of the current period (LIVE AUTO waits for it)."""
@@ -699,6 +742,14 @@ def summarize_training(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for name, st in out.get(key, {}).items():
             st.update(capture([r for r in closed if str(r.get(field_name) or "?") == name]))
     return out
+
+
+def _matches(row: dict[str, Any], training: bool | None, since: float | None, open_only: bool) -> bool:
+    if training is not None and bool(row.get("training")) != training:
+        return False
+    if since is not None and float(row.get("opened_ts") or 0.0) < since:
+        return False
+    return not (open_only and row.get("closed_ts") is not None)
 
 
 def _number(v: Any) -> float | None:
