@@ -4,7 +4,6 @@ description: Expert interior designer with deep knowledge of space planning, col
   layout optimization, lighting calculations, color palette selection for interiors, furniture placement, style consultation. Activate on "interior design", "room layout", "lighting design", "furniture
   placement", "space planning", "Munsell color". NOT for exterior/landscape design, architectural structure, web/UI design (use web-design-expert), brand color theory (use color-theory-palette-harmony-expert),
   or building codes/permits.
-allowed-tools: Read,Write,Edit,mcp__stability-ai__stability-ai-generate-image
 metadata:
   category: Design & Creative
   pairs-with:
