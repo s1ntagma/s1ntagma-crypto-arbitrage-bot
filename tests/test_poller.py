@@ -322,7 +322,7 @@ class _StubState:
     def __init__(self) -> None:
         self.tickers: list[tuple[str, str, bool]] = []
 
-    def on_ticker(self, ticker: Any, *, append_mid: bool = True, outlier_guard: bool = True) -> None:
+    def on_ticker(self, ticker: Any, *, append_mid: bool = True, outlier_guard: bool = True, stream: bool = True) -> None:
         self.tickers.append((ticker.exchange, ticker.asset, append_mid))
 
 
@@ -456,3 +456,48 @@ async def test_poll_round_does_not_wait_for_rest_confirmations(tmp_path: Path) -
     assert sorted(o.asset for o in env.ctx.opps.active()) == sorted(assets)
     assert 1 <= max_in_flight <= 2  # bounded per exchange
     env.ctx.db.close()
+
+
+# ---- a streamed asset whose WebSocket went silent (2026-11-06: 7067 candidates, all "leader not moved") -----
+async def test_a_silent_stream_gets_its_prices_from_rest(tmp_path: Path) -> None:
+    """The leader's stream died without an error: REST still refreshed its volume and liveness, but its
+    prices were dropped as "streamed", so the leader could never move.  A silent stream is not a stream."""
+    env = Env(tmp_path)
+    for name in SYMBOLS:
+        await env.fakes[name].start(["BTC"])  # every venue counts as streaming BTC, none publishes
+    env.books({"binance": 100.0, "kucoin": 100.0, "kraken": 100.0})
+    await env.poller.poll_once()
+    env.clock.advance(env.ctx.settings.ws_silent_s + 1.0)
+    env.books({"binance": 100.0, "kucoin": 100.0, "kraken": 100.0})
+    await env.poller.poll_once()
+    env.clock.advance(2.0)
+    env.books({"binance": 100.0, "kucoin": 100.0, "kraken": 100.0})
+    await env.poller.poll_once()
+    assert len(env.ctx.state.mid_series("binance", "BTC")) >= 2  # REST prices land again
+    env.ctx.db.close()
+
+
+def test_the_leader_must_have_recent_prices() -> None:
+    from latbot.clock import SimClock
+    from latbot.engine.mover import MoveDetector
+    from latbot.engine.stats import StatsStore
+    from latbot.market.state import MarketState
+    from latbot.models import Ticker, Timestamps
+
+    s = make_settings(Path("."), simple_mode=True)
+    clock = SimClock()
+    state = MarketState(s, clock)
+    det = MoveDetector(s, state, StatsStore(s), clock, EventBus())
+
+    def tick(ex: str, vol: float, append: bool) -> None:
+        t = Ticker(exchange=ex, symbol="BTC/USDT", bid=99.99, ask=100.01, last=100.0, asset="BTC", quote_volume=vol,
+                   ts=Timestamps(recv_ts=clock.wall(), recv_mono=clock.mono()))
+        state.on_ticker(t, append_mid=append, outlier_guard=False, stream=append)
+
+    tick("binance", 5e8, append=True)
+    tick("kucoin", 1e8, append=True)
+    assert det._leader("BTC") == "binance"
+    clock.advance(s.ws_silent_s + 1.0)
+    tick("binance", 5e8, append=False)  # volume and liveness only: no price for 11 s
+    tick("kucoin", 1e8, append=True)
+    assert det._leader("BTC") == "kucoin"  # a venue without prices cannot lead

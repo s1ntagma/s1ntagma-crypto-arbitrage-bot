@@ -220,6 +220,9 @@ class Settings:
     ws_assets: int = 25  # WebSocket streams per exchange: the whole Phase 3 pool (REST polling is 1-2 s slower)
     ticker_poll_enabled: bool = True  # fetch_tickers on every exchange for ALL common assets
     ticker_poll_interval_s: float = 2.0
+    # a streamed asset whose WebSocket delivered nothing for this long gets its prices from REST polling;
+    # a signal venue without a price point that recent cannot be the leader (a silent stream is no stream)
+    ws_silent_s: float = 10.0
     # re-subscribe every WebSocket book stream this often (a fresh snapshot: a silent reconnect cannot
     # keep stale levels in the library's cache); 0 = off
     ws_book_resubscribe_s: float = 300.0

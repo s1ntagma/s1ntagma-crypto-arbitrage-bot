@@ -458,9 +458,16 @@ class MoveDetector:
         """Simple mode: the signal venue with the largest 24h quote volume for ``asset`` (None while
         no signal venue reported a volume - no guess)."""
         best, best_vol = None, 0.0
+        now = self._clock.mono()
+        silent_s = float(getattr(self._settings, "ws_silent_s", 10.0))
+        last_price = getattr(self._state, "last_price_mono", None)
         for e in self._settings.exchanges:
             if not e.enabled or e.role != ExchangeRole.SIGNAL:
                 continue
+            if callable(last_price):
+                lp = last_price(e.name, asset)
+                if lp is None or now - lp > silent_s:
+                    continue  # no recent price: it cannot have moved, so it cannot lead
             vol = self._state.volume24h(e.name, asset)
             if vol is not None and vol > best_vol:
                 best, best_vol = e.name, vol

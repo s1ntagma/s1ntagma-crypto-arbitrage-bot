@@ -47,6 +47,7 @@ class MarketState:
         self._last_append_mono: dict[Key, float] = {}  # throttle anchor per stream
         self._pending_tick: dict[Key, tuple[float, float]] = {}  # held outlier ticker tick per stream
         self._last_data_mono: dict[Key, float] = {}  # last book OR ticker recv_mono
+        self._stream_mono: dict[Key, float] = {}  # last WebSocket book / ticker recv_mono (not REST polls)
         self._broken: set[Key] = set()  # book streams whose cache broke (crossed / stale levels): no price until a sane book
         self._volume24h: dict[Key, float] = {}
         self._health: dict[str, ExchangeHealth] = {}
@@ -118,6 +119,8 @@ class MarketState:
         self._books[key] = book
         self._register(book.exchange, asset)
         mono = book.ts.recv_mono
+        if mono >= self._stream_mono.get(key, float("-inf")):
+            self._stream_mono[key] = mono
         prev = self._last_data_mono.get(key)
         if prev is None or mono >= prev:
             self._last_data_mono[key] = mono
@@ -125,7 +128,8 @@ class MarketState:
         if mid:
             self._append_mid(key, mono, mid)
 
-    def on_ticker(self, ticker: Ticker, *, append_mid: bool = True, outlier_guard: bool = True) -> None:
+    def on_ticker(self, ticker: Ticker, *, append_mid: bool = True, outlier_guard: bool = True,
+                  stream: bool = True) -> None:
         """Store the ticker, its 24h volume and (``append_mid``) its mid.
 
         ``outlier_guard=False`` is for REST-polled tickers: one sample per poll
@@ -147,6 +151,8 @@ class MarketState:
         prev = self._last_data_mono.get(key)
         if prev is None or mono >= prev:
             self._last_data_mono[key] = mono
+        if stream and mono >= self._stream_mono.get(key, float("-inf")):
+            self._stream_mono[key] = mono
         mid: float | None = None
         if ticker.is_crossed:
             mid = None  # bid >= ask: a data error - liveness and volume count, the price does not
@@ -210,6 +216,16 @@ class MarketState:
     # ------------------------------------------------------------------ #
     # queries
     # ------------------------------------------------------------------ #
+    def stream_live(self, exchange: str, asset: str, now_mono: float, max_s: float) -> bool:
+        """The venue's WebSocket delivered a book or ticker for ``asset`` within ``max_s``."""
+        last = self._stream_mono.get((exchange, asset))
+        return last is not None and now_mono - last <= max_s
+
+    def last_price_mono(self, exchange: str, asset: str) -> float | None:
+        """recv_mono of the newest point of the price series (None: no price yet)."""
+        series = self._series.get((exchange, asset))
+        return series[-1][0] if series else None
+
     def book(self, exchange: str, asset: str) -> OrderBook | None:
         return self._books.get((exchange, asset))
 

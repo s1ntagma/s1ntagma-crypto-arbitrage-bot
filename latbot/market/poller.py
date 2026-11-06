@@ -241,13 +241,17 @@ class TickerPoller:
             if not tickers:
                 continue
             streamed = self._streamed_assets(adapter)
+            silent_s = float(getattr(self._settings, "ws_silent_s", 10.0))
+            live_fn = getattr(self._state, "stream_live", None)
+            now_mono = self._clock.mono()
             for asset, ticker in tickers.items():
                 if self._assets is not None and asset not in self._assets:
                     continue
                 count += 1
-                is_streamed = asset in streamed
+                # a stream that delivered nothing for ws_silent_s is no stream: REST prices fill in
+                is_streamed = asset in streamed and (not callable(live_fn) or live_fn(name, asset, now_mono, silent_s))
                 try:
-                    self._state.on_ticker(ticker, append_mid=not is_streamed, outlier_guard=False)
+                    self._state.on_ticker(ticker, append_mid=not is_streamed, outlier_guard=False, stream=False)
                 except Exception:  # noqa: BLE001
                     log.exception("state.on_ticker failed for %s %s", name, asset)
                     continue
