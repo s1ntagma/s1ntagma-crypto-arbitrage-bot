@@ -31,12 +31,14 @@ async def test_add_streams_respects_max_ws_subscriptions():
 
 
 def test_old_default_ws_assets_is_raised_custom_value_kept():
-    assert Settings.from_dict({"config_version": 3, "ws_assets": 10}).ws_assets == 25
+    # v4 raised the old default 10 to 25, v7 (top-100 coins) raises the default to 50; a custom value stays
+    assert Settings.from_dict({"config_version": 3, "ws_assets": 10}).ws_assets == 50
+    assert Settings.from_dict({"config_version": 6, "ws_assets": 25}).ws_assets == 50
     assert Settings.from_dict({"config_version": 3, "ws_assets": 6}).ws_assets == 6
     assert Settings().ws_assets == 25
     s = Settings(ws_assets=500)
     s.validate()
-    assert s.ws_assets == 50
+    assert s.ws_assets == 100
 
 
 async def test_stream_pool_offers_each_new_asset_once():

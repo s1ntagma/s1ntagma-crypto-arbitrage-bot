@@ -337,7 +337,12 @@ def build_context(
         try:
             from .basis.runner import BasisRunner
 
-            basis = BasisRunner(settings, clock, db=db)
+            def basis_assets() -> list[str]:
+                if pool is not None and getattr(settings, "pool_enabled", True):
+                    return list(pool.assets())
+                return list(settings.watchlist)
+
+            basis = BasisRunner(settings, clock, db=db, asset_source=basis_assets)
         except Exception:  # noqa: BLE001
             log.exception("basis scanner not created")
 
@@ -796,7 +801,7 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
         if ctx.context is not None:
             helpers.append(asyncio.create_task(ctx.context.run(stop), name="latbot-context"))
         if ctx.basis is not None:  # research scanner: its own connections, never an order
-            helpers.append(asyncio.create_task(_guarded("basis start", ctx.basis.start(), timeout_s=120.0),
+            helpers.append(asyncio.create_task(_guarded("basis start", ctx.basis.start(), timeout_s=300.0),
                                                name="latbot-basis"))
         try:
             await ctx.bus.publish(events.DASHBOARD, ctx.pipeline.dashboard())

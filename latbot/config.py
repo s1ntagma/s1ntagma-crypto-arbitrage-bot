@@ -184,7 +184,19 @@ DEFAULT_EXCHANGES: list[ExchangeConfig] = [
 # Runtime settings (public, user-tunable)
 # --------------------------------------------------------------------------- #
 # Bumped when a saved config.json needs a one-time upgrade (see Settings._migrate).
-CONFIG_VERSION = 6
+CONFIG_VERSION = 7
+
+# owner (2026-11-08): "топ-50 - топ-100 монет в мире" - only coins that are not a tradable coin of their own
+# are left out (stablecoins, wrapped / bridged / staked receipts, tokenized gold / stocks, fan tokens)
+TOP_EXCLUDE_CATEGORIES: list[str] = [
+    "stablecoins", "usd-stablecoin", "eur-stablecoin", "fiat-backed-stablecoin", "crypto-backed-stablecoin",
+    "algorithmic-stablecoin", "yield-bearing-stablecoins", "synthetic-dollar", "bridged-stablecoins",
+    "wrapped-tokens", "liquid-staking-tokens", "liquid-staked-eth", "liquid-staked-sol",
+    "liquid-restaking-tokens", "liquid-restaked-eth", "bridged-tokens", "bridged-wbtc", "bridged-weth",
+    "bridged-usdc", "bridged-usdt", "tokenized-gold", "gold", "tokenized-commodities", "tokenized-silver",
+    "commodity-backed-stablecoin", "fan-token", "tokenized-products", "tokenized-stock", "tokenized-treasuries",
+]
+TOP_N = 100
 
 
 @dataclass
@@ -219,7 +231,8 @@ class Settings:
     # Per venue: the spot market and the linear perpetual of the same asset and quote (USDT / USD).
     basis_enabled: bool = False  # library default off (tests); load_settings turns it on for the owner
     basis_venues: list[str] = field(default_factory=lambda: ["okx", "bybit", "htx", "kraken"])
-    basis_assets: list[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "DOGE"])
+    basis_assets: list[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "DOGE"])  # [] = the pool
+    basis_top_n: int = 100  # with basis_assets empty: the first N coins of the pool (market-cap order)
     basis_notional_quote: float = 1000.0  # virtual size of each leg (quote currency)
     basis_mode: str = "both"  # what opens a pair: fut_upper | spot_lower | any | both
     basis_fut_upper_pct: float = 0.15  # perp best bid >= rolling mean perp mid * (1 + this %)
@@ -390,6 +403,8 @@ class Settings:
     # narrow pool (universe/pool.py): objective data + measured stability, no meme / hype / erratic coins
     pool_enabled: bool = True
     pool_max_assets: int = 25
+    pool_stability_filters: bool = True  # False: the top coins by market cap as they are
+    pool_exclude_categories: list | None = None  # None: the pool's default (memes excluded too)
     pool_min_market_cap_usd: float = 1e9
     pool_min_volume_24h_usd: float = 2e7  # global 24h turnover (CoinGecko); the target venue's own >= min_target_volume_quote
     pool_max_abs_change_24h_pct: float = 15.0  # hype pump / dump today
@@ -472,6 +487,12 @@ class Settings:
             if float(data.get("min_target_volume_quote", 100_000.0)) == 100_000.0:
                 data["min_target_volume_quote"] = 500_000.0
             data["min_net_pct_show"] = 0.1
+        if version < 7:
+            # owner: the whole bot on the top-100 coins by market cap (not a handful of "predictable" ones)
+            top = _top100_settings()
+            if int(data.get("ws_assets", 25) or 25) not in (10, 25):
+                top.pop("ws_assets")  # a value the owner chose himself stays
+            data.update(top)
         if version < 6:
             # owner: "Spot-Futures Arbitrage Scanner" - research module on (virtual only)
             data["basis_enabled"] = True
@@ -551,7 +572,7 @@ class Settings:
                          ("ride_lag_closed_pct", 0.0), ("ride_stall_s", 0.5), ("ride_trail_arm_pct", 0.0),
                          ("ride_trail_pct", 0.01), ("ride_max_hold_s", 5.0), ("ride_stale_s", 2.0)):
             setattr(self, name, max(lo, float(getattr(self, name))))
-        self.ws_assets = max(1, min(50, int(self.ws_assets)))
+        self.ws_assets = max(1, min(100, int(self.ws_assets)))
         self.ws_book_resubscribe_s = max(0.0, float(self.ws_book_resubscribe_s))
         self.exchange_budget_quote = _budgets(self.exchange_budget_quote, self.exchanges, strict=False)
         for f in fields(self):  # a hand-edited config.json may hold "false" / "0": never truthy strings
@@ -655,6 +676,17 @@ def _exchange_from_dict(x: dict[str, Any]) -> ExchangeConfig:
 # --------------------------------------------------------------------------- #
 # Persistence
 # --------------------------------------------------------------------------- #
+def _top100_settings() -> dict[str, Any]:
+    """The owner's universe: the top-100 coins by market cap for the whole bot (latency + basis)."""
+    return {
+        "pool_max_assets": TOP_N, "pool_stability_filters": False, "pool_exclude_categories": list(TOP_EXCLUDE_CATEGORIES),
+        # ~25 of the top 100 are stablecoins / tokenized assets: 100 TRADABLE coins reach about rank 140
+        "pool_min_market_cap_usd": 1e8, "pool_min_volume_24h_usd": 5e6,
+        "pool_max_abs_change_24h_pct": 100.0, "pool_max_abs_change_7d_pct": 1000.0,
+        "ws_assets": 50, "basis_assets": [], "basis_top_n": TOP_N,
+    }
+
+
 def load_settings(path: str | os.PathLike[str] = "config.json") -> Settings:
     p = Path(path)
     if p.exists():
@@ -666,7 +698,7 @@ def load_settings(path: str | os.PathLike[str] = "config.json") -> Settings:
             return s
         except Exception as exc:  # noqa: BLE001
             log.error("config.json invalid (%s); using defaults", exc)
-    s = Settings(simple_mode=True, basis_enabled=True)  # fresh install: the owner's simple mode + basis scanner
+    s = Settings(simple_mode=True, basis_enabled=True, **_top100_settings())  # fresh install: the owner's choices
     _apply_env_overrides(s)
     return s
 

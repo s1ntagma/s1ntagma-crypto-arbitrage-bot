@@ -88,6 +88,7 @@ DEFAULT_LIVE_CATEGORIES: tuple[str, ...] = (
 POOL_DEFAULTS: dict[str, Any] = {
     "pool_enabled": True,
     "pool_max_assets": 25,  # <= 0: no cap
+    "pool_stability_filters": True,  # False: the top coins by market cap as they are (no stability / funding / spike steps)
     "pool_min_market_cap_usd": 1e9,
     "pool_min_volume_24h_usd": 2e7,  # global CoinGecko volume (target turnover is checked per signal)
     "pool_max_abs_change_24h_pct": 15.0,
@@ -648,7 +649,10 @@ class AssetPool(PollingCollector):
             return _Eval(pa=pa, fails=fails, notes=notes, pre_ok=False)  # already out: no stability noise
 
         # (4) stability
-        if self._stability_fn is not None and getattr(self, "_skip_stability", False):
+        filters = bool(self._s("pool_stability_filters"))
+        if not filters:
+            notes.append("стабильность не проверяется: берутся топ-монеты по капитализации как есть")
+        elif self._stability_fn is not None and getattr(self, "_skip_stability", False):
             notes.append("стабильность: источник пока не дал данных ни по одной монете - шаг временно пропущен")
         elif self._stability_fn is not None:
             st, age, origin = self._stability(asset, now)
@@ -666,7 +670,7 @@ class AssetPool(PollingCollector):
                 if origin == "cache":
                     notes.append(f"стабильность из кэша (замер {_age(age)} назад)")
                 fails += self._stability_fails(asset, st)
-        if self._funding_interval_fn is not None:
+        if filters and self._funding_interval_fn is not None:
             iv = None
             try:
                 iv = _num(self._funding_interval_fn(asset))
@@ -681,7 +685,7 @@ class AssetPool(PollingCollector):
                     fails.append(f"фандинг каждые {iv:g} ч (< {min_iv:g} ч): биржа считает монету волатильной")
 
         # bars_fn (P3.1 compat): 1-minute spikes
-        if self._bars_fn is not None:
+        if filters and self._bars_fn is not None:
             closes: list[float] = []
             try:
                 closes = list(self._bars_fn(asset) or [])

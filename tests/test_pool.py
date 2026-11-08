@@ -556,3 +556,14 @@ def test_stability_source_down_does_not_empty_the_pool(tmp_path):
     pool2 = AssetPool(Settings(), SimClock(), None, cache_path=tmp_path / "q.json", stability_fn=measured.get)
     pool2.reevaluate()
     assert "SOL" not in pool2.assets()  # once the source answers, the step applies again
+
+
+async def test_top_coins_mode_skips_stability_funding_and_spike_steps():
+    """Owner (2026-11-08): the whole bot on the top-100 coins by market cap - no stability filter."""
+    stab = {"XRP": {"days": 30, "btc_corr": 0.31, "hour_jumps": 25, "max_7d_move_pct": 150}}
+    iv = {"SOL": 4.0}
+    pool = make_pool(make_settings(pool_stability_filters=False), http=FakeHttp(), api_key="k",
+                     listings_fn=lambda: LISTINGS, stability_fn=stab.get, funding_interval_fn=iv.get)
+    await pool.poll_once()
+    assert pool.contains("SOL") and pool.contains("XRP")  # no stability data / jumpy / 4 h funding: all in
+    assert any("топ-монеты по капитализации" in r for r in pool.get("SOL").reasons)

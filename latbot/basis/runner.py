@@ -21,6 +21,7 @@ from .scanner import BasisScanner
 log = logging.getLogger(__name__)
 
 _TICK_S = 0.25
+_ASSETS_REFRESH_S = 60.0  # the pool answers from its cache first, the full top-N a little later
 # venue -> (spot ccxt id, perp ccxt id, spot taker, perp taker, quote).  Both legs use the SAME quote (no FX
 # inside the basis): Kraken Futures perps settle in USD, so Kraken spot is BTC/USD, not BTC/USDT.
 # Fees are replaced by the venue's own (adapter.fees) when known.
@@ -54,8 +55,9 @@ def leg_configs(venue: str) -> dict[str, ExchangeConfig] | None:
 
 class BasisRunner:
     def __init__(self, settings: Settings, clock: Any, db: Any | None = None, *,
-                 leg_factory: LegFactory | None = None) -> None:
+                 leg_factory: LegFactory | None = None, asset_source: Callable[[], list[str]] | None = None) -> None:
         self._settings = settings
+        self._asset_source = asset_source  # the bot's pool (market-cap order) when basis_assets is empty
         self._clock = clock
         self.bus = EventBus()  # private: these books never reach the latency pipeline
         self.scanner = BasisScanner(settings, clock, db=db)
@@ -63,6 +65,7 @@ class BasisRunner:
         self.legs: dict[str, dict[str, Any]] = {}  # venue -> {"spot": adapter, "perp": adapter}
         self._route: dict[str, tuple[str, str]] = {}  # adapter name -> (venue, leg)
         self._tasks: list[asyncio.Task] = []
+        self._known: set[str] = set()  # assets already offered to the legs
         self._unsub = self.bus.subscribe(events.BOOK, self._on_book)
         for venue in dict.fromkeys(str(v).strip().lower() for v in settings.basis_venues):
             cfgs = leg_configs(venue)
@@ -84,28 +87,86 @@ class BasisRunner:
 
         venue = cfg.name.split(".", 1)[0]
         quote = VENUES[venue][4]
-        # each leg resolves exactly the venue's quote, so both legs share it
-        legs_settings = dataclasses.replace(self._settings, signal_quote_assets=[quote], quote_assets=[quote])
+        # each leg resolves exactly the venue's quote, so both legs share it; the stream budget covers basis_top_n
+        top_n = int(getattr(self._settings, "basis_top_n", 100) or 100)
+        legs_settings = dataclasses.replace(self._settings, signal_quote_assets=[quote], quote_assets=[quote],
+                                            ws_assets=max(int(self._settings.ws_assets), top_n))
         return CcxtAdapter(cfg, self.bus, self._clock, legs_settings, None)
 
     @property
     def assets(self) -> list[str]:
-        return list(dict.fromkeys(str(a).strip().upper() for a in self._settings.basis_assets if str(a).strip()))
+        """``basis_assets`` when set, else the first ``basis_top_n`` coins of the bot's pool."""
+        explicit = [str(a).strip().upper() for a in (self._settings.basis_assets or []) if str(a).strip()]
+        if explicit:
+            return list(dict.fromkeys(explicit))
+        source: list[str] = []
+        if self._asset_source is not None:
+            try:
+                source = [str(a).upper() for a in (self._asset_source() or [])]
+            except Exception:  # noqa: BLE001
+                log.exception("basis: asset source failed")
+        n = max(1, int(getattr(self._settings, "basis_top_n", 100) or 100))
+        return list(dict.fromkeys(source))[:n]
 
     # ------------------------------------------------------------------ lifecycle
-    async def start(self) -> None:
+    async def start(self, wait_s: float = 120.0) -> None:
         assets = self.assets
+        waited = 0.0
+        while not assets and self._asset_source is not None and waited < wait_s:
+            await asyncio.sleep(2.0)  # the pool answers a little after start (CoinGecko / cache)
+            waited += 2.0
+            assets = self.assets
+        if not assets:
+            log.warning("basis: no assets (basis_assets empty and the pool gave none); scanner idle")
+        else:
+            log.info("basis: %d assets (%s%s)", len(assets), ", ".join(assets[:10]), ", ..." if len(assets) > 10 else "")
         await asyncio.gather(*(self._start_venue(v, legs, assets) for v, legs in self.legs.items()),
                              return_exceptions=True)
         self._tasks = [asyncio.create_task(self._tick_loop(), name="basis-tick"),
-                       asyncio.create_task(self._funding_loop(), name="basis-funding")]
+                       asyncio.create_task(self._funding_loop(), name="basis-funding"),
+                       asyncio.create_task(self._assets_loop(), name="basis-assets")]
 
     async def _start_venue(self, venue: str, legs: dict[str, Any], assets: list[str]) -> None:
+        self._known.update(assets)
         for leg, adapter in legs.items():
             try:
                 await adapter.start(assets, ws_assets=len(assets))
             except Exception as exc:  # noqa: BLE001
                 log.warning("basis: %s did not start: %s: %s", adapter.name, type(exc).__name__, str(exc)[:160])
+        await self._register(venue, legs, assets)
+        log.info("basis: %s ready (%s)", venue, ", ".join(p["asset"] for p in self.scanner.pairs() if p["venue"] == venue))
+
+    async def refresh_assets_once(self) -> int:
+        """Offer assets that entered the pool after start to every venue; running streams are kept.
+        Returns the number of new assets offered."""
+        new = [a for a in self.assets if a not in self._known]
+        if not new:
+            return 0
+        self._known.update(new)
+        for venue, legs in self.legs.items():
+            for adapter in legs.values():
+                try:
+                    if getattr(adapter, "streamed_assets", lambda: [])():
+                        await adapter.add_streams(new)
+                    else:  # did not stream yet (start failed / empty pool): start with everything known
+                        await adapter.start(sorted(self._known), ws_assets=len(self._known))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("basis: %s new streams failed: %s: %s", adapter.name, type(exc).__name__, str(exc)[:160])
+            await self._register(venue, legs, new)
+        log.info("basis: +%d assets (%s)", len(new), ", ".join(new[:10]))
+        return len(new)
+
+    async def _assets_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_ASSETS_REFRESH_S)
+            try:
+                await self.refresh_assets_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("basis asset refresh failed")
+
+    async def _register(self, venue: str, legs: dict[str, Any], assets: list[str]) -> None:
         spot, perp = legs["spot"], legs["perp"]
         for asset in assets:
             ss, ps = _symbol(spot, asset), _symbol(perp, asset)
@@ -118,7 +179,6 @@ class BasisRunner:
                         self.scanner.set_fee(venue, asset, leg, fees.taker)
                     except Exception as exc:  # noqa: BLE001
                         log.debug("basis: fees %s %s: %s", adapter.name, sym, exc)
-        log.info("basis: %s ready (%s)", venue, ", ".join(p["asset"] for p in self.scanner.pairs() if p["venue"] == venue))
 
     async def stop(self) -> None:
         for t in self._tasks:

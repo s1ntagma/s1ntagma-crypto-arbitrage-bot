@@ -271,6 +271,14 @@ class FakeLeg:
     async def start(self, assets, ws_assets=None):
         self.started = list(assets)
 
+    def streamed_assets(self):
+        return sorted(self.started)
+
+    async def add_streams(self, assets):
+        new = [a for a in assets if a not in self.started]
+        self.started += new
+        return len(new)
+
     async def stop(self):
         pass
 
@@ -310,6 +318,20 @@ async def test_runner_routes_private_books_scales_contracts_and_polls_funding():
     assert r.scanner._pairs[("okx", "BTC")].funding_rate == pytest.approx(0.0002)
 
 
+async def test_runner_picks_up_assets_that_enter_the_pool_later():
+    clock = SimClock()
+    pool = ["BTC"]  # the cached fallback answers first, CoinGecko's top 100 a few seconds later
+    r = BasisRunner(settings(basis_venues=["okx"], basis_assets=[], basis_top_n=3), clock,
+                    leg_factory=lambda cfg, creds: FakeLeg(cfg, None, clock), asset_source=lambda: pool)
+    await r._start_venue("okx", r.legs["okx"], r.assets)
+    assert [p["asset"] for p in r.scanner.pairs()] == ["BTC"]
+    pool[:] = ["BTC", "ETH", "SOL", "XRP"]
+    assert await r.refresh_assets_once() == 2  # ETH, SOL (top 3)
+    assert sorted(p["asset"] for p in r.scanner.pairs()) == ["BTC", "ETH", "SOL"]
+    assert r.legs["okx"]["perp"].started == ["BTC", "ETH", "SOL"]
+    assert await r.refresh_assets_once() == 0  # nothing new
+
+
 def test_leg_configs_are_public_and_pin_one_quote():
     cfgs = leg_configs("kraken")
     assert cfgs["spot"].ccxt_name == "kraken" and cfgs["perp"].ccxt_name == "krakenfutures"
@@ -327,3 +349,21 @@ def test_api_reports_the_basis_scanner():
 
     app = create_app(Ctx())  # type: ignore[arg-type]
     assert TestClient(app).get("/api/basis").json()["enabled"] is False
+
+
+def test_assets_come_from_the_pool_when_none_are_listed():
+    clock = SimClock()
+    ranked = [f"C{i}" for i in range(150)]
+    r = BasisRunner(settings(basis_venues=[], basis_assets=[], basis_top_n=100), clock, asset_source=lambda: ranked)
+    assert r.assets == ranked[:100]
+    r2 = BasisRunner(settings(basis_venues=[], basis_assets=["btc", "ETH"]), clock, asset_source=lambda: ranked)
+    assert r2.assets == ["BTC", "ETH"]  # an explicit list wins
+
+
+def test_owner_config_moves_to_the_top_100():
+    from latbot.config import Settings as S
+
+    s = S.from_dict({"config_version": 6, "pool_max_assets": 25, "basis_assets": ["BTC"]})
+    assert s.pool_max_assets == 100 and s.pool_stability_filters is False and s.basis_assets == []
+    assert s.basis_top_n == 100 and s.ws_assets == 50
+    assert "meme-token" not in s.pool_exclude_categories and "stablecoins" in s.pool_exclude_categories
