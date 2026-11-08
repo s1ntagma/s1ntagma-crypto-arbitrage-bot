@@ -260,6 +260,12 @@ class Settings:
     carry_confirm_polls: int = 2  # ... on this many polls in a row (entries need as many positive polls)
     carry_max_hold_h: float = 336.0
     carry_max_positions: int = 5
+    carry_leverage: float = 2.0  # perp margin = notional / leverage; capital = spot + margin
+    carry_maint_margin: float = 0.005  # maintenance margin rate (liquidation price of the short)
+    carry_liq_guard_pct: float = 5.0  # close when the perp price is this close (%) to the liquidation price
+    carry_history_n: int = 21  # settled funding rates from the exchange behind the rate estimate (7 days at 8 h)
+    carry_min_positive_share: float = 0.8  # entry: at least this share of them positive
+    carry_exit_horizon_h: float = 24.0  # exit: only when holding this long at the turned rate costs more than leaving
     exchanges: list[ExchangeConfig] = field(default_factory=lambda: [ExchangeConfig(**asdict(e)) for e in DEFAULT_EXCHANGES])
     # ---- coverage: WS for the core watchlist, REST ticker polling for breadth --
     ws_assets: int = 25  # WebSocket streams per exchange: the whole Phase 3 pool (REST polling is 1-2 s slower)

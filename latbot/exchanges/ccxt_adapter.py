@@ -975,6 +975,19 @@ class CcxtAdapter(ExchangeAdapter):
         r = await self._public_call(self.public.fetch_funding_rate, symbol) or {}
         return _parse_funding(r)
 
+    async def fetch_funding_history(self, symbol: str, limit: int = 21) -> list[tuple[float, float]] | None:
+        """Settled funding of a perpetual: [(ts wall s, rate)], oldest first; ``None`` without the call."""
+        if not (getattr(self.public, "has", None) or {}).get("fetchFundingRateHistory"):
+            return None
+        symbol, _ = self._symbol_arg(symbol)
+        rows = await self._public_call(self.public.fetch_funding_rate_history, symbol, None, int(limit)) or []
+        out = []
+        for r in rows:
+            ts, rate = _num((r or {}).get("timestamp")), _num((r or {}).get("fundingRate"))
+            if ts and rate is not None:
+                out.append((ts / 1000.0, rate))
+        return sorted(out)[-int(limit):]
+
     async def fetch_funding_rates(self, symbols: list[str]) -> dict[str, dict[str, float | None]] | None:
         """Funding rates of many perpetuals in one public call: {symbol: fetch_funding_rate's dict}.
         ``None`` when the venue has no batch call (the caller asks per symbol)."""

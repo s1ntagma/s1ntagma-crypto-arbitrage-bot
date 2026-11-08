@@ -107,9 +107,11 @@ def test_funding_accrues_to_the_short_and_a_turned_rate_closes_the_position():
     t = c.carry()[0]
     assert t["funding_quote"] == pytest.approx(0.0005 * 5.0 * 100.05, rel=1e-3)
     c.poll({"BTC": -0.0001})
-    c.run(0.1)
-    assert c.carry()[0]["status"] == "open"  # one negative poll: not yet
     c.poll({"BTC": -0.0001})
+    c.run(0.5)
+    # slightly negative: 3 payments of 0.01 % (0.03 %) cost less than leaving (2 fees + spread): hold
+    assert c.carry()[0]["status"] == "open" and "holding" in c.sc.pairs()[0]["carry_hold_note"]
+    c.poll({"BTC": -0.002})  # deeper: the last two polls now cost more than leaving
     c.run(0.5)
     t = c.carry()[0]
     assert t["status"] == "closed" and "funding" in t["exit_reason"]
@@ -159,6 +161,7 @@ def test_a_restart_resumes_an_open_carry_position():
     [t] = [t for t in again.trades() if t["trigger"] == "carry"]
     assert t["status"] == "open" and t["funding_unknown"]  # funding while the bot was down is not counted
     assert again.stats()["carry"]["open"] == 1
+    assert t["liq_price"] is not None and t["capital_quote"] > 0
 
 
 def test_carry_off_opens_nothing_and_basis_signals_are_unaffected():
@@ -224,3 +227,102 @@ async def test_funding_is_polled_in_one_batch_per_venue_when_the_venue_has_one()
     assert single == ["ETH/USDT:USDT"]  # okx: BTC came in the batch, ETH asked alone
     assert r.scanner._pairs[("okx", "BTC")].funding_interval_h == 4.0
     assert r.scanner._pairs[("mexc", "ETH")].funding_rate == pytest.approx(0.0002)
+
+
+
+def opened(**over):
+    c = Carry(**over)
+    c.poll({"BTC": 0.0005})
+    c.poll({"BTC": 0.0005})
+    c.run(0.5)
+    return c
+
+
+def test_capital_is_spot_plus_margin_and_the_apr_is_on_capital():
+    c = opened(carry_leverage=2.0)
+    t = c.carry()[0]
+    assert t["capital_quote"] == pytest.approx(5.0 * 100.01 + 5.0 * 100.04 / 2)
+    assert t["liq_price"] == pytest.approx(100.04 * (1 + 0.5 - 0.005))
+    assert c.sc.stats()["carry"]["open_capital_quote"] == pytest.approx(t["capital_quote"])
+
+
+def test_the_liquidation_guard_closes_the_pair_before_the_short_is_liquidated():
+    c = opened(carry_leverage=5.0, carry_liq_guard_pct=5.0)  # liq ~ +19.5 %
+    c.clock.advance(1.0)
+    c.push(spot=(115.99, 116.01), perp=(116.04, 116.06))  # ~3 % to liquidation
+    c.sc.tick()
+    c.run(0.5)
+    t = c.carry()[0]
+    assert t["status"] == "closed" and t["exit_reason"].startswith("liquidation guard") and not t["liquidated"]
+    assert c.sc.stats()["carry"]["guard_exits"] == 1
+
+
+def test_a_jump_through_the_liquidation_price_loses_the_margin_and_closes_the_spot():
+    c = opened(carry_leverage=5.0, carry_liq_guard_pct=0.0)
+    c.clock.advance(1.0)
+    c.push(spot=(129.99, 130.01), perp=(130.04, 130.06))
+    c.sc.tick()
+    c.clock.advance(0.5)
+    c.push(spot=(129.99, 130.01), perp=(130.04, 130.06))
+    c.sc.tick()
+    t = c.carry()[0]
+    assert t["liquidated"] and t["status"] == "closed" and t["exit_reason"] == "liquidated"
+    margin = 5.0 * 100.04 / 5.0
+    # the short lost its whole margin, the spot gained (sold at the bid): net = spot gain - margin - fees
+    spot_gain = 5.0 * (129.99 - 100.01)
+    assert t["net_quote"] == pytest.approx(spot_gain - margin - t["fees_quote"] + t["funding_quote"], rel=1e-6)
+    assert c.sc.stats()["carry"]["liquidations"] == 1
+
+
+def test_the_rate_estimate_uses_the_settled_history_and_a_spike_does_not_carry_the_edge():
+    c = Carry()
+    c.sc.set_funding_history("okx", "BTC", [(1_000.0 + i * 28_800, 0.0001) for i in range(21)])
+    c.poll({"BTC": 0.003})  # a spike now
+    p = c.sc.pairs()[0]
+    assert p["carry_rate_est"] == pytest.approx(0.0001) and p["carry_rate_source"] == "history"
+
+
+def test_coins_whose_funding_flips_often_are_not_confirmed():
+    c = Carry()
+    c.sc.set_funding_history("okx", "BTC", [(1_000.0 + i * 28_800, 0.002 if i % 2 else -0.0001) for i in range(20)])
+    c.poll({"BTC": 0.002})
+    c.poll({"BTC": 0.002})
+    assert c.carry() == [] and c.sc.pairs()[0]["carry_confirmed"] is False
+
+
+def test_the_real_funding_interval_comes_from_the_history_when_the_venue_does_not_say():
+    c = Carry()
+    c.sc.set_funding_history("okx", "BTC", [(1_000.0 + i * 3_600, 0.0001) for i in range(10)])
+    assert c.sc._pairs[("okx", "BTC")].funding_interval_h == 1.0
+    c.sc.set_funding("okx", "BTC", 0.0001, 8.0)  # the venue's own word wins
+    c.sc.set_funding_history("okx", "BTC", [(1_000.0 + i * 3_600, 0.0001) for i in range(10)])
+    assert c.sc._pairs[("okx", "BTC")].funding_interval_h == 8.0
+
+
+def test_polled_rates_survive_a_restart():
+    clock = SimClock()
+    db = Database(":memory:", clock=clock)
+    c = Carry(db=db, clock=clock)
+    c.poll({"BTC": 0.0005})
+    again = Carry(db=db, clock=clock)
+    assert list(again.sc._pairs[("okx", "BTC")].funding_samples) == [0.0005]
+    again.poll({"BTC": 0.0005})  # the second positive poll confirms at once
+    assert [t["asset"] for t in again.carry()] == ["BTC"]
+
+
+async def test_the_runner_loads_the_settled_funding_history_of_every_pair():
+    from latbot.basis.runner import BasisRunner
+    from test_basis import FakeLeg
+
+    clock = SimClock()
+
+    class Hist(FakeLeg):
+        async def fetch_funding_history(self, symbol, limit=21):
+            return [(1_000.0 + i * 14_400, 0.0002) for i in range(limit)]
+
+    r = BasisRunner(settings(basis_venues=["okx"], basis_assets=["BTC"]), clock,
+                    leg_factory=lambda cfg, creds: Hist(cfg, None, clock))
+    await r._start_venue("okx", r.legs["okx"], ["BTC"])
+    assert await r.poll_history_once() == 1
+    p = r.scanner._pairs[("okx", "BTC")]
+    assert len(p.funding_history) == 21 and p.funding_interval_h == 4.0

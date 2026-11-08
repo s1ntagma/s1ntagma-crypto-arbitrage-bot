@@ -1623,11 +1623,13 @@
       var cs = s.carry || {};
       kvRows($('carry-stats'), [
         ['Positions open / closed / incidents', (cs.open || 0) + ' / ' + (cs.closed || 0) + ' / ' + (cs.incidents || 0)],
-        ['Open notional', usd(cs.open_notional_quote)],
+        ['Open notional / capital (spot + margin at ' + (cs.leverage || '?') + 'x)', usd(cs.open_notional_quote) + ' / ' + usd(cs.open_capital_quote)],
+        ['Liquidations / guard exits', (cs.liquidations || 0) + ' / ' + (cs.guard_exits || 0)],
+        ['Closest to liquidation (open)', cs.min_liq_buffer_pct == null ? '—' : num(cs.min_liq_buffer_pct).toFixed(1) + '%'],
         ['Funding collected (open positions)', usd(cs.funding_quote) + ' (' + usd(cs.funding_open_quote) + ')'],
-        ['Funding APR on open positions', cs.funding_apr_open_pct == null ? '—' : num(cs.funding_apr_open_pct).toFixed(1) + '%'],
+        ['Funding APR on capital (open)', cs.funding_apr_open_pct == null ? '—' : num(cs.funding_apr_open_pct).toFixed(1) + '%'],
         ['Closed: fees / net', usd(-(cs.fees_quote || 0)) + ' / ' + usd(cs.net_quote)],
-        ['Realized APR (net, closed)', cs.realized_apr_pct == null ? '—' : num(cs.realized_apr_pct).toFixed(1) + '%'],
+        ['Realized APR on capital (net, closed)', cs.realized_apr_pct == null ? '—' : num(cs.realized_apr_pct).toFixed(1) + '%'],
         ['Funding unknown (restart gaps)', String(cs.funding_unknown || 0)]
       ]);
       var cfg = d.settings || {};
@@ -1646,7 +1648,10 @@
           h('td', { class: 'num', text: p.fees_pct == null ? '—' : num(p.fees_pct).toFixed(3) + '%' }),
           h('td', { class: 'num', text: p.funding_rate == null ? '—' : pct4(num(p.funding_rate) * 100) + ' / ' + (p.funding_interval_h || '?') + 'h' }),
           h('td', { class: 'num ' + (num(p.potential_net_pct) >= 0 ? 'pos' : 'neg'), text: pct4(p.potential_net_pct) }),
-          h('td', { class: 'num ' + (num(p.carry_edge_pct) >= 0 ? 'pos' : 'neg'), title: p.carry_reject || p.carry_note || (p.carry_confirmed ? 'rate confirmed' : 'rate not confirmed yet'),
+          h('td', { class: 'num ' + (num(p.carry_edge_pct) >= 0 ? 'pos' : 'neg'), title: [p.carry_reject || p.carry_note || (p.carry_confirmed ? 'rate confirmed' : 'rate not confirmed yet'),
+              p.carry_rate_est == null ? '' : 'rate used ' + pct4(num(p.carry_rate_est) * 100) + ' (' + p.carry_rate_source + ')',
+              p.funding_positive_share == null ? '' : 'positive ' + Math.round(num(p.funding_positive_share) * 100) + '% of settlements',
+              'interval ' + (p.funding_interval_source || 'default'), p.carry_hold_note || ''].filter(Boolean).join(' · '),
             text: p.carry_edge_pct == null ? '—' : pct4(p.carry_edge_pct) + (p.carry_confirmed ? '' : ' ?') }),
           h('td', { class: 'num', text: p.skew_ms == null ? '—' : Math.round(num(p.skew_ms)) + ' ms' }),
           h('td', { text: conds }),
@@ -1654,7 +1659,8 @@
       });
       var tb = $('basis-trades'); clear(tb);
       (d.trades || []).forEach(function (t) {
-        var notes = [t.incident, t.exit_reason, t.funding_unknown ? 'funding unknown' : '', t.unwind_unknown ? 'unwind price unknown' : '']
+        var notes = [t.incident, t.exit_reason, t.funding_unknown ? 'funding unknown' : '', t.unwind_unknown ? 'unwind price unknown' : '',
+          t.liq_buffer_pct == null ? '' : 'closest to liquidation ' + num(t.liq_buffer_pct).toFixed(1) + '%']
           .filter(Boolean).join(' · ');
         tb.appendChild(h('tr', null,
           h('td', { class: 'mono', text: fmtTime(t.signal_ts) }), h('td', { text: t.asset + ' @ ' + t.venue }),

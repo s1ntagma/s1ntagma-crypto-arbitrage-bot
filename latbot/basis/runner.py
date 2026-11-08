@@ -22,7 +22,8 @@ from .scanner import BasisScanner
 log = logging.getLogger(__name__)
 
 _TICK_S = 0.25
-_ASSETS_REFRESH_S = 60.0  # the pool answers from its cache first, the full top-N a little later
+_ASSETS_REFRESH_S = 60.0
+_HISTORY_REFRESH_S = 4 * 3600.0  # settled funding history of every pair (carry rate estimate, interval)  # the pool answers from its cache first, the full top-N a little later
 # venue -> (spot ccxt id, perp ccxt id, spot taker, perp taker, quote).  Both legs use the SAME quote (no FX
 # inside the basis): Kraken Futures perps settle in USD, so Kraken spot is BTC/USD, not BTC/USDT.
 # Fees are replaced by the venue's own (adapter.fees) when known.
@@ -131,7 +132,8 @@ class BasisRunner:
                              return_exceptions=True)
         self._tasks = [asyncio.create_task(self._tick_loop(), name="basis-tick"),
                        asyncio.create_task(self._funding_loop(), name="basis-funding"),
-                       asyncio.create_task(self._assets_loop(), name="basis-assets")]
+                       asyncio.create_task(self._assets_loop(), name="basis-assets"),
+                       asyncio.create_task(self._history_loop(), name="basis-funding-history")]
 
     async def _start_venue(self, venue: str, legs: dict[str, Any], assets: list[str]) -> None:
         self._known.update(assets)
@@ -255,6 +257,39 @@ class BasisRunner:
             n += 1
         return n
 
+    async def poll_history_once(self) -> int:
+        """Settled funding history of every pair (all venues at once, one pair after another per venue)."""
+        async def venue_history(venue: str, perp: Any) -> int:
+            fetch = getattr(perp, "fetch_funding_history", None)
+            if fetch is None:
+                return 0
+            n = 0
+            for p in [p for p in self.scanner.pairs() if p["venue"] == venue and p.get("quote_ok")]:
+                try:
+                    rows = await fetch(p["perp_symbol"], int(getattr(self._settings, "carry_history_n", 21) or 21))
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("basis: funding history %s %s: %s", venue, p["perp_symbol"], exc)
+                    continue
+                if rows:
+                    self.scanner.set_funding_history(venue, p["asset"], rows)
+                    n += 1
+            return n
+
+        counts = await asyncio.gather(*(venue_history(v, legs["perp"]) for v, legs in self.legs.items()),
+                                      return_exceptions=True)
+        return sum(c for c in counts if isinstance(c, int))
+
+    async def _history_loop(self) -> None:
+        while True:
+            try:
+                n = await self.poll_history_once()
+                log.info("basis: funding history of %d pairs", n)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("basis funding history failed")
+            await asyncio.sleep(_HISTORY_REFRESH_S)
+
     async def _funding_loop(self) -> None:
         while True:
             try:
@@ -281,7 +316,9 @@ class BasisRunner:
                 "basis_ref_window_s", "basis_exit_basis_pct", "basis_min_convergence_pct", "basis_max_hold_s", "basis_latency_ms",
                 "basis_max_skew_ms", "basis_max_age_ms", "basis_max_slippage_pct", "carry_enabled",
                 "carry_notional_quote", "carry_horizon_h", "carry_min_edge_pct", "carry_exit_rate",
-                "carry_confirm_polls", "carry_max_hold_h", "carry_max_positions")},
+                "carry_confirm_polls", "carry_max_hold_h", "carry_max_positions", "carry_leverage",
+                "carry_maint_margin", "carry_liq_guard_pct", "carry_history_n", "carry_min_positive_share",
+                "carry_exit_horizon_h")},
         }
 
 
