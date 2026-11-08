@@ -43,6 +43,8 @@ from .exit_policy import RideConfig, RidePosition, decide
 from .proven import current_strategy
 from ..models import TERMINAL_STATES, Opportunity, OppState
 
+COUNTERS_KEY = "shadow_counters"  # kv: opened / closed / training / skip counts survive a restart
+_COUNTERS_SAVE_S = 5.0
 PERIOD_KEY = "stats_period_start_ts"  # kv: Stats count virtual trades opened from here on (history stays)
 # kv: set by the first start of the build that rejects crossed books - older virtual trades may have
 # bought at a stale ask and sold above it (fake profit), so Stats / PAIRS / READY start over once
@@ -141,6 +143,8 @@ class ShadowTrader:
         self._train_skips: OrderedDict[tuple, None] = OrderedDict()
         self.no_data = 0  # closed without a fresh price (outcome unknown, not learned)
         self.skipped: dict[str, int] = {}
+        self._counters_dirty_mono: float | None = None
+        self._load_counters()
         self._period_start: float | None = self._load_period()
         self._period_pnl = self._load_period_pnl()  # virtual balance = start + this
         self._close_orphans()
@@ -158,7 +162,47 @@ class ShadowTrader:
     def enabled(self) -> bool:
         return bool(getattr(self._settings, "shadow_trading", True))
 
+    def _load_counters(self) -> None:
+        kv_get = getattr(self._db, "kv_get", None) if self._db is not None else None
+        if kv_get is None:
+            return
+        try:
+            saved = dict(kv_get(COUNTERS_KEY) or {})
+        except Exception:  # noqa: BLE001
+            log.exception("shadow counters not loaded")
+            return
+        for k in ("opened", "closed", "training_opened", "training_closed", "no_data"):
+            try:
+                setattr(self, k, int(saved.get(k, 0) or 0))
+            except (TypeError, ValueError):
+                pass
+        for k in ("skipped", "training_skipped"):
+            v = saved.get(k)
+            if isinstance(v, dict):
+                getattr(self, k).update({str(r): int(n) for r, n in v.items() if isinstance(n, (int, float))})
+
+    def _save_counters(self, force: bool = True) -> None:
+        """Immediately on open / close; skips (frequent) at most every few seconds."""
+        now = self._clock.mono()
+        if not force:
+            if self._counters_dirty_mono is None:
+                self._counters_dirty_mono = now
+            if now - self._counters_dirty_mono < _COUNTERS_SAVE_S:
+                return
+        self._counters_dirty_mono = None
+        kv_set = getattr(self._db, "kv_set", None) if self._db is not None else None
+        if kv_set is None:
+            return
+        try:
+            kv_set(COUNTERS_KEY, {"opened": self.opened, "closed": self.closed, "training_opened": self.training_opened,
+                                  "training_closed": self.training_closed, "no_data": self.no_data,
+                                  "skipped": dict(self.skipped), "training_skipped": dict(self.training_skipped)})
+        except Exception:  # noqa: BLE001
+            log.exception("shadow counters not saved")
+
     def stop(self) -> None:
+        if self._counters_dirty_mono is not None:
+            self._save_counters()
         for u in self._unsubs:
             try:
                 u()
@@ -229,6 +273,7 @@ class ShadowTrader:
             self._ride[opp.id] = self._ride_position(t, float(opp.signal.first_move_pct), float(opp.signal.target_move_pct))
         self.opened += 1
         self._save(t)
+        self._save_counters()
         log.info("shadow open %s %s@%s entry %.8g expected net %+.2f%%", t.id, t.asset, t.target, t.entry_price, t.expected_net_pct)
 
     def _on_training(self, payload: Any) -> None:
@@ -279,6 +324,7 @@ class ShadowTrader:
         self._ride[t.id] = self._ride_position(t, float(sig.first_move_pct), float(sig.target_move_pct))
         self.training_opened += 1
         self._save(t)
+        self._save_counters()
         log.info("training open %s %s@%s entry %.8g lag %.2f%% model net %+.2f%%",
                  t.id, t.asset, t.target, t.entry_price, t.lag_pct, t.expected_net_pct)
 
@@ -392,9 +438,11 @@ class ShadowTrader:
         while len(self._train_skips) > _TRAINED_MAX:
             self._train_skips.popitem(last=False)
         self.training_skipped[reason] = self.training_skipped.get(reason, 0) + 1
+        self._save_counters(force=False)
 
     def _skip(self, reason: str) -> None:
         self.skipped[reason] = self.skipped.get(reason, 0) + 1
+        self._save_counters(force=False)
         log.debug("shadow skipped: %s", reason)
 
     def _close(self, t: ShadowTrade, price: float, reason: str, barrier: str = "time") -> None:
@@ -411,6 +459,8 @@ class ShadowTrader:
             self.closed += 1
         if barrier == "no_data":
             self.no_data += 1
+        self._save_counters()
+        if barrier == "no_data":
             self._save(t)
             log.info("shadow close %s %s@%s without a fresh price (not learned) - %s", t.id, t.asset, t.target, reason)
             return

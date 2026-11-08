@@ -248,6 +248,36 @@ def _data_dir(settings: Settings) -> Path:
     return Path("data")
 
 
+def _program_dir() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _adopt_install() -> list[str]:
+    from .storage.home import adopt_previous_install
+
+    try:
+        return adopt_previous_install(_program_dir())
+    except Exception:  # noqa: BLE001 - never block the start
+        return []
+
+
+def _persistent_store(settings: Settings) -> None:
+    """The default database lives outside the program folder, so a new build (a new folder) and every
+    restart keep the trades and statistics; the first start imports the previous install's history."""
+    from .storage.home import DB_NAME, DEFAULT_DB, adopt_previous_data, data_home
+
+    store = data_home()
+    if not settings.db_path or Path(settings.db_path) not in (Path(DEFAULT_DB), store / DB_NAME):
+        return  # a custom path (or :memory:) is the owner's choice
+    try:
+        adopt_previous_data(store, _program_dir())
+        store.mkdir(parents=True, exist_ok=True)
+        settings.db_path = str(store / DB_NAME)
+        log.info("data folder (trades, statistics): %s", store)
+    except Exception:  # noqa: BLE001
+        log.exception("data folder %s not usable; keeping %s", store, settings.db_path)
+
+
 def _load_poller_class() -> Any | None:
     """``latbot.market.poller.TickerPoller`` when the module exists (Phase 2.3)."""
     try:
@@ -858,6 +888,11 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
             await _guarded("recorder stop", ctx.recorder.stop())
         if ctx.basis is not None:
             await _guarded("basis stop", ctx.basis.stop())
+        if getattr(ctx, "shadow", None) is not None and hasattr(ctx.shadow, "stop"):
+            try:
+                ctx.shadow.stop()  # flushes the counters
+            except Exception:  # noqa: BLE001
+                log.exception("shadow stop failed")
         await _guarded("pipeline stop", ctx.pipeline.stop())
         stops = [_guarded(f"{a.name} stop", a.stop(), timeout_s=_SERVER_STOP_S) for a, _ in _adapters_to_start(ctx)]
         if stops:
@@ -1026,9 +1061,15 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     _prepare_platform()
     config_path = Path(args.config)
+    adopted: list[str] = []
+    if args.config == "config.json" and args.env == ".env":
+        adopted = _adopt_install()  # a new build folder: config.json / .env of the previous install
     secrets = load_secrets(args.env)
     settings = load_settings(config_path)
     setup_logging(settings.log_dir, settings.log_level)
+    if adopted:
+        log.info("taken from the previous install: %s", ", ".join(adopted))
+    _persistent_store(settings)
     if not config_path.exists():
         try:
             config_path.parent.mkdir(parents=True, exist_ok=True)

@@ -47,6 +47,9 @@ if "%NEED_PIP%"=="1" (
   copy /y requirements.txt .deps_ok >nul
 )
 
+rem ---- 3a. a new version folder: take config.json and .env of the previous one ----
+%PY% -m latbot.storage.home
+
 rem ---- 3. .env with the Telegram token --------------------------
 if not exist .env (
   copy /y .env.example .env >nul
