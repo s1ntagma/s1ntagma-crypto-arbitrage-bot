@@ -1604,18 +1604,19 @@
       if (!r.ok) { toast('Basis: ' + r.error, 'err'); return; }
       var d = r.data || {};
       $('basis-note').textContent = d.enabled
-        ? 'Venues: ' + (d.venues || []).join(', ') + ' · assets: ' + (d.assets || []).join(', ') +
+        ? 'Venues: ' + (d.venues || []).join(', ') + ' · ' + (d.assets || []).length + ' assets (' +
+          (d.assets || []).slice(0, 10).join(', ') + ((d.assets || []).length > 10 ? ', …' : '') + ')' +
           '. Long spot + short perp of the same coin and quote; every number is on the real book sides, after fees. No orders are sent.'
         : 'The basis scanner is off (basis_enabled = false in config.json).';
       var s = d.stats || {};
       kvRows($('basis-stats'), [
-        ['Signals (fut upper / spot lower / both)', (s.signals_total || 0) + ' (' + (s.signals_fut_upper || 0) + ' / ' + (s.signals_spot_lower || 0) + ' / ' + (s.signals_both || 0) + ')'],
+        ['Signals: total (fut upper / spot lower / both)', (s.signals_total || 0) + ' (' + (s.signals_fut_upper || 0) + ' / ' + (s.signals_spot_lower || 0) + ' / ' + (s.signals_both || 0) + ')'],
         ['Mode', s.mode || '—'],
-        ['Virtual pairs executed (hedged)', String(s.pairs_executed || 0) + ' · open ' + (s.pairs_open || 0) + ' · closed ' + (s.pairs_closed || 0)],
-        ['Incomplete executions', String(s.incomplete || 0) + ' (one leg only ' + (s.one_leg || 0) + ', no fill ' + (s.no_fill || 0) + ')'],
+        ['Virtual pairs: executed / open / closed', (s.pairs_executed || 0) + ' / ' + (s.pairs_open || 0) + ' / ' + (s.pairs_closed || 0)],
+        ['Incomplete: total / one leg / no fill', (s.incomplete || 0) + ' / ' + (s.one_leg || 0) + ' / ' + (s.no_fill || 0)],
         ['Avg basis at entry / exit', pct4(s.avg_entry_basis_pct) + ' / ' + pct4(s.avg_exit_basis_pct)],
         ['Gross P&L', usd(s.gross_pnl_quote)], ['Fees', usd(-(s.fees_quote || 0))], ['Funding', usd(s.funding_quote)],
-        ['Net P&L (incl. incidents ' + usd(s.incident_pnl_quote) + ')', usd(s.net_pnl_quote)],
+        ['Net P&L', usd(s.net_pnl_quote)], ['of it incidents', usd(s.incident_pnl_quote)],
         ['Max adverse basis move', pct4(s.max_adverse_basis_pct)],
         ['Funding unknown (flagged)', String(s.funding_unknown || 0)],
         ['Rejected moments: stale / timestamps apart', (s.stale_evals || 0) + ' / ' + (s.skew_evals || 0)]
@@ -1623,10 +1624,10 @@
       var cs = s.carry || {};
       kvRows($('carry-stats'), [
         ['Positions open / closed / incidents', (cs.open || 0) + ' / ' + (cs.closed || 0) + ' / ' + (cs.incidents || 0)],
-        ['Open notional / capital (spot + margin at ' + (cs.leverage || '?') + 'x)', usd(cs.open_notional_quote) + ' / ' + usd(cs.open_capital_quote)],
+        ['Open notional / capital (spot + margin ' + (cs.leverage || '?') + 'x)', usd(cs.open_notional_quote) + ' / ' + usd(cs.open_capital_quote)],
         ['Liquidations / guard exits', (cs.liquidations || 0) + ' / ' + (cs.guard_exits || 0)],
         ['Closest to liquidation (open)', cs.min_liq_buffer_pct == null ? '—' : num(cs.min_liq_buffer_pct).toFixed(1) + '%'],
-        ['Funding collected (open positions)', usd(cs.funding_quote) + ' (' + usd(cs.funding_open_quote) + ')'],
+        ['Funding collected: total / open positions', usd(cs.funding_quote) + ' / ' + usd(cs.funding_open_quote)],
         ['Funding APR on capital (open)', cs.funding_apr_open_pct == null ? '—' : num(cs.funding_apr_open_pct).toFixed(1) + '%'],
         ['Closed: fees / net', usd(-(cs.fees_quote || 0)) + ' / ' + usd(cs.net_quote)],
         ['Realized APR on capital (net, closed)', cs.realized_apr_pct == null ? '—' : num(cs.realized_apr_pct).toFixed(1) + '%'],
