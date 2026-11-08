@@ -184,7 +184,9 @@ DEFAULT_EXCHANGES: list[ExchangeConfig] = [
 # Runtime settings (public, user-tunable)
 # --------------------------------------------------------------------------- #
 # Bumped when a saved config.json needs a one-time upgrade (see Settings._migrate).
-CONFIG_VERSION = 7
+CONFIG_VERSION = 8
+BASIS_TOP_VENUES = ("binance", "okx", "bybit", "mexc", "gate", "bitget")
+_OLD_BASIS_VENUES = ["okx", "bybit", "htx", "kraken"]
 
 # owner (2026-11-08): "топ-50 - топ-100 монет в мире" - only coins that are not a tradable coin of their own
 # are left out (stablecoins, wrapped / bridged / staked receipts, tokenized gold / stocks, fan tokens)
@@ -230,7 +232,9 @@ class Settings:
     # ---- SPOT-FUTURES BASIS SCANNER (research module: virtual pairs only, never an order) -----------
     # Per venue: the spot market and the linear perpetual of the same asset and quote (USDT / USD).
     basis_enabled: bool = False  # library default off (tests); load_settings turns it on for the owner
-    basis_venues: list[str] = field(default_factory=lambda: ["okx", "bybit", "htx", "kraken"])
+    # the most traded spot + perp venues (TokenInsight Q3 2026: volume and open interest); htx and kraken
+    # stay available but are not default (spot taker 0.2 % / 0.4 % eats a carry)
+    basis_venues: list[str] = field(default_factory=lambda: list(BASIS_TOP_VENUES))
     basis_assets: list[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "DOGE"])  # [] = the pool
     basis_top_n: int = 100  # with basis_assets empty: the first N coins of the pool (market-cap order)
     basis_notional_quote: float = 1000.0  # virtual size of each leg (quote currency)
@@ -496,6 +500,10 @@ class Settings:
             if float(data.get("min_target_volume_quote", 100_000.0)) == 100_000.0:
                 data["min_target_volume_quote"] = 500_000.0
             data["min_net_pct_show"] = 0.1
+        if version < 8:
+            # owner: basis / funding carry on the venues that trade the most (an edited list stays)
+            if [str(v).lower() for v in (data.get("basis_venues") or _OLD_BASIS_VENUES)] == _OLD_BASIS_VENUES:
+                data["basis_venues"] = list(BASIS_TOP_VENUES)
         if version < 7:
             # owner: the whole bot on the top-100 coins by market cap (not a handful of "predictable" ones)
             top = _top100_settings()

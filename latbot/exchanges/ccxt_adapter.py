@@ -144,6 +144,13 @@ def is_rest_only(instance: Any) -> bool:
     return not callable(getattr(instance, "watch_order_book", None))
 
 
+def _parse_funding(r: dict[str, Any]) -> dict[str, float | None]:
+    interval = str(r.get("interval") or "")
+    hours = _num(interval[:-1]) if interval.endswith("h") else None
+    nxt = _num(r.get("fundingTimestamp"))
+    return {"rate": _num(r.get("fundingRate")), "interval_h": hours, "next_ts": nxt / 1000.0 if nxt else None}
+
+
 def _num(v: Any) -> float | None:
     """float(v) for ints/floats/numeric strings, else None (no bools)."""
     if v is None or isinstance(v, bool):
@@ -966,10 +973,20 @@ class CcxtAdapter(ExchangeAdapter):
         """Public funding rate of a perpetual: {rate (fraction per interval), interval_h, next_ts (wall s)}."""
         symbol, _ = self._symbol_arg(symbol)
         r = await self._public_call(self.public.fetch_funding_rate, symbol) or {}
-        interval = str(r.get("interval") or "")
-        hours = _num(interval[:-1]) if interval.endswith("h") else None
-        nxt = _num(r.get("fundingTimestamp"))
-        return {"rate": _num(r.get("fundingRate")), "interval_h": hours, "next_ts": nxt / 1000.0 if nxt else None}
+        return _parse_funding(r)
+
+    async def fetch_funding_rates(self, symbols: list[str]) -> dict[str, dict[str, float | None]] | None:
+        """Funding rates of many perpetuals in one public call: {symbol: fetch_funding_rate's dict}.
+        ``None`` when the venue has no batch call (the caller asks per symbol)."""
+        if not (getattr(self.public, "has", None) or {}).get("fetchFundingRates"):
+            return None
+        wanted = [self._symbol_arg(sym)[0] for sym in symbols]
+        res = await self._public_call(self.public.fetch_funding_rates, wanted) or {}
+        out: dict[str, dict[str, float | None]] = {}
+        for sym, r in dict(res).items():
+            if isinstance(r, dict):
+                out[str(r.get("symbol") or sym)] = _parse_funding(r)
+        return out
 
     async def fees(self, symbol: str) -> Fees:
         symbol, _ = self._symbol_arg(symbol)

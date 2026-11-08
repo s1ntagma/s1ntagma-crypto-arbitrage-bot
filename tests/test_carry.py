@@ -186,3 +186,41 @@ def test_an_approved_pair_enters_only_on_fresh_books_and_revalidates_the_edge():
     c.sc.set_funding("okx", "BTC", 0.00001, 8.0, c.clock.wall() + 3600.0)  # edge gone before the next book
     c.push()
     assert c.carry() == [] and "fell" in c.sc.pairs()[0]["carry_reject"]
+
+
+def test_default_venues_are_the_most_traded_and_known_to_the_runner():
+    from latbot.basis.runner import VENUES, leg_configs
+    from latbot.config import Settings as S
+
+    top = ["binance", "okx", "bybit", "mexc", "gate", "bitget"]
+    assert S().basis_venues == top
+    assert all(leg_configs(v) is not None for v in top + ["htx", "kraken"])
+    assert leg_configs("binance")["perp"].market_type == "swap" and VENUES["mexc"][4] == "USDT"
+    # an owner on the old default list moves to the new one; a list he edited himself stays
+    assert S.from_dict({"config_version": 7, "basis_venues": ["okx", "bybit", "htx", "kraken"]}).basis_venues == top
+    assert S.from_dict({"config_version": 7, "basis_venues": ["htx"]}).basis_venues == ["htx"]
+
+
+async def test_funding_is_polled_in_one_batch_per_venue_when_the_venue_has_one():
+    from latbot.basis.runner import BasisRunner
+    from test_basis import FakeLeg
+
+    clock = SimClock()
+    single: list[str] = []
+
+    class Batch(FakeLeg):
+        async def fetch_funding_rates(self, symbols):
+            return {s: {"rate": 0.0003, "interval_h": 4.0, "next_ts": None} for s in symbols if s.startswith("BTC")}
+
+        async def fetch_funding_rate(self, symbol):
+            single.append(symbol)
+            return {"rate": 0.0001, "interval_h": 8.0, "next_ts": None}
+
+    r = BasisRunner(settings(basis_venues=["okx", "mexc"], basis_assets=["BTC", "ETH"]), clock,
+                    leg_factory=lambda cfg, creds: (Batch if cfg.name.startswith("okx") else FakeLeg)(cfg, None, clock))
+    for v, legs in r.legs.items():
+        await r._start_venue(v, legs, ["BTC", "ETH"])
+    assert await r.poll_funding_once() == 4
+    assert single == ["ETH/USDT:USDT"]  # okx: BTC came in the batch, ETH asked alone
+    assert r.scanner._pairs[("okx", "BTC")].funding_interval_h == 4.0
+    assert r.scanner._pairs[("mexc", "ETH")].funding_rate == pytest.approx(0.0002)

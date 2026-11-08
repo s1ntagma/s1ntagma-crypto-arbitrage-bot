@@ -26,8 +26,14 @@ _ASSETS_REFRESH_S = 60.0  # the pool answers from its cache first, the full top-
 # venue -> (spot ccxt id, perp ccxt id, spot taker, perp taker, quote).  Both legs use the SAME quote (no FX
 # inside the basis): Kraken Futures perps settle in USD, so Kraken spot is BTC/USD, not BTC/USDT.
 # Fees are replaced by the venue's own (adapter.fees) when known.
+# Default taker fees are the published base tier (conservative: the higher of this and the library's
+# market fee is charged, the account's own fee wins when keys are set).
 VENUES: dict[str, tuple[str, str, float, float, str]] = {
+    "binance": ("binance", "binance", 0.001, 0.0005, "USDT"),
     "okx": ("okx", "okx", 0.001, 0.0005, "USDT"),
+    "mexc": ("mexc", "mexc", 0.0005, 0.0002, "USDT"),
+    "gate": ("gate", "gate", 0.002, 0.0005, "USDT"),
+    "bitget": ("bitget", "bitget", 0.001, 0.0006, "USDT"),
     "bybit": ("bybit", "bybit", 0.001, 0.00055, "USDT"),
     "htx": ("htx", "htx", 0.002, 0.0005, "USDT"),
     "kraken": ("kraken", "krakenfutures", 0.004, 0.0005, "USD"),
@@ -214,26 +220,39 @@ class BasisRunner:
             await asyncio.sleep(_TICK_S)
 
     async def poll_funding_once(self) -> int:
+        """Funding of every pair: all venues at once, one batch call per venue where it has one."""
+        counts = await asyncio.gather(*(self._poll_venue_funding(v, legs["perp"]) for v, legs in self.legs.items()),
+                                      return_exceptions=True)
+        n = sum(c for c in counts if isinstance(c, int))
+        try:
+            self.scanner.carry_review()  # funding carry decides on fresh rates
+        except Exception:  # noqa: BLE001
+            log.exception("basis: carry review failed")
+        return n
+
+    async def _poll_venue_funding(self, venue: str, perp: Any) -> int:
+        fetch = getattr(perp, "fetch_funding_rate", None)
+        pairs = [p for p in self.scanner.pairs() if p["venue"] == venue and p.get("quote_ok")]
+        if fetch is None or not pairs:
+            return 0
+        batch: dict[str, Any] = {}
+        many = getattr(perp, "fetch_funding_rates", None)
+        if many is not None:
+            try:
+                batch = await many([p["perp_symbol"] for p in pairs]) or {}
+            except Exception as exc:  # noqa: BLE001
+                log.debug("basis: funding batch %s: %s", venue, exc)
         n = 0
-        for venue, legs in self.legs.items():
-            perp = legs["perp"]
-            fetch = getattr(perp, "fetch_funding_rate", None)
-            if fetch is None:
-                continue
-            for p in self.scanner.pairs():
-                if p["venue"] != venue or not p.get("quote_ok"):
-                    continue
+        for p in pairs:
+            r = batch.get(p["perp_symbol"])
+            if r is None:
                 try:
                     r = await fetch(p["perp_symbol"])
                 except Exception as exc:  # noqa: BLE001
                     log.debug("basis: funding %s %s: %s", venue, p["perp_symbol"], exc)
                     continue
-                self.scanner.set_funding(venue, p["asset"], r.get("rate"), r.get("interval_h"), r.get("next_ts"))
-                n += 1
-        try:
-            self.scanner.carry_review()  # funding carry decides on fresh rates
-        except Exception:  # noqa: BLE001
-            log.exception("basis: carry review failed")
+            self.scanner.set_funding(venue, p["asset"], r.get("rate"), r.get("interval_h"), r.get("next_ts"))
+            n += 1
         return n
 
     async def _funding_loop(self) -> None:
