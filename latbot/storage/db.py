@@ -70,6 +70,14 @@ CREATE TABLE IF NOT EXISTS shadow_trades (
 );
 CREATE INDEX IF NOT EXISTS ix_shadow_opened ON shadow_trades(opened_ts);
 
+CREATE TABLE IF NOT EXISTS basis_trades (
+    id TEXT PRIMARY KEY,
+    opened_ts REAL,
+    closed_ts REAL,
+    json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_basis_signal ON basis_trades(opened_ts);
+
 CREATE TABLE IF NOT EXISTS trade_notes (
     trade_id TEXT PRIMARY KEY,
     note TEXT NOT NULL,
@@ -514,6 +522,19 @@ class Database:
             if isinstance(d, dict):
                 out.append(d)
         return out
+
+    # ---- spot-futures basis scanner (virtual pairs) ---------------------------
+    def save_basis_trade(self, row: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO basis_trades (id, opened_ts, closed_ts, json) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET opened_ts=excluded.opened_ts, closed_ts=excluded.closed_ts, json=excluded.json",
+                (str(row["id"]), row.get("signal_ts"), row.get("closed_ts"), json.dumps(row, ensure_ascii=False, default=str)),
+            )
+
+    def list_basis_trades(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Newest first."""
+        return self._json_rows("SELECT json FROM basis_trades ORDER BY opened_ts DESC LIMIT ?", (int(limit),))
 
     def count_shadow(self, *, training: bool | None = None, closed: bool | None = None) -> int:
         where, args = self._shadow_where(training, None, False, closed)

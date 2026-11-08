@@ -1276,6 +1276,18 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
             log.exception("shadow listing failed")
             return _error(500, "shadow listing failed")
 
+    @app.get("/api/basis")
+    async def api_basis(history: int = Query(300, ge=1, le=3600)) -> JSONResponse:
+        """Spot-futures basis scanner: pairs, conditions, virtual pairs and statistics (research, no orders)."""
+        basis = getattr(ctx, "basis", None)
+        if basis is None:
+            return _json({"enabled": False, "pairs": [], "stats": {}, "trades": [], "history": {}})
+        try:
+            return _json(basis.snapshot(history))
+        except Exception:  # noqa: BLE001
+            log.exception("basis snapshot failed")
+            return _error(500, "basis snapshot failed")
+
     @app.post("/api/stats/period")
     async def api_stats_new_period() -> JSONResponse:
         """Stats count virtual trades from now on (history stays in the DB)."""

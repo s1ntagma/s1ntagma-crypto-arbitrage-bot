@@ -955,6 +955,22 @@ class CcxtAdapter(ExchangeAdapter):
                 out[str(asset)] = Balance(asset=str(asset), free=f, total=t)
         return out
 
+    def contract_size(self, symbol: str) -> float:
+        """Base amount of one contract (perp order books count contracts); 1 for spot."""
+        symbol, _ = self._symbol_arg(symbol)
+        market = (getattr(self.public, "markets", None) or {}).get(symbol) or {}
+        size = _num(market.get("contractSize"))
+        return size if size and size > 0 else 1.0
+
+    async def fetch_funding_rate(self, symbol: str) -> dict[str, float | None]:
+        """Public funding rate of a perpetual: {rate (fraction per interval), interval_h, next_ts (wall s)}."""
+        symbol, _ = self._symbol_arg(symbol)
+        r = await self._public_call(self.public.fetch_funding_rate, symbol) or {}
+        interval = str(r.get("interval") or "")
+        hours = _num(interval[:-1]) if interval.endswith("h") else None
+        nxt = _num(r.get("fundingTimestamp"))
+        return {"rate": _num(r.get("fundingRate")), "interval_h": hours, "next_ts": nxt / 1000.0 if nxt else None}
+
     async def fees(self, symbol: str) -> Fees:
         symbol, _ = self._symbol_arg(symbol)
         cached = self._fees_cache.get(symbol)

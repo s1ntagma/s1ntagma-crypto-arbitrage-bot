@@ -1588,11 +1588,72 @@
     placeStrips(name);
     if (name === 'opps') setTimeout(function () { refreshChart(true); }, 0);
     document.querySelectorAll('.tab').forEach(function (b) { b.setAttribute('aria-selected', b.dataset.tab === name ? 'true' : 'false'); });
-    ['opps', 'market', 'trades', 'stats', 'diag'].forEach(function (n) { $('tab-' + n).classList.toggle('hidden', n !== name); });
+    ['opps', 'market', 'trades', 'stats', 'diag', 'basis'].forEach(function (n) { $('tab-' + n).classList.toggle('hidden', n !== name); });
     if (name === 'market') loadMarket();
     if (name === 'trades' && !state.tradesLoaded) loadTrades();
     if (name === 'stats' && !state.statsLoaded) loadStats();
     if (name === 'diag') loadDiag();
+    if (name === 'basis') loadBasis();
+  }
+
+  // ------------------------------------------------------------------ spot-futures basis (research)
+  function pct4(v) { return v == null || !isFinite(num(v)) ? '—' : (num(v) >= 0 ? '+' : '') + num(v).toFixed(4) + '%'; }
+  function usd(v) { return v == null ? '—' : (num(v) >= 0 ? '+' : '') + num(v).toFixed(2); }
+  function loadBasis() {
+    return api('GET', '/api/basis?history=60').then(function (r) {
+      if (!r.ok) { toast('Basis: ' + r.error, 'err'); return; }
+      var d = r.data || {};
+      $('basis-note').textContent = d.enabled
+        ? 'Venues: ' + (d.venues || []).join(', ') + ' · assets: ' + (d.assets || []).join(', ') +
+          '. Long spot + short perp of the same coin and quote; every number is on the real book sides, after fees. No orders are sent.'
+        : 'The basis scanner is off (basis_enabled = false in config.json).';
+      var s = d.stats || {};
+      kvRows($('basis-stats'), [
+        ['Signals (fut upper / spot lower / both)', (s.signals_total || 0) + ' (' + (s.signals_fut_upper || 0) + ' / ' + (s.signals_spot_lower || 0) + ' / ' + (s.signals_both || 0) + ')'],
+        ['Mode', s.mode || '—'],
+        ['Virtual pairs executed (hedged)', String(s.pairs_executed || 0) + ' · open ' + (s.pairs_open || 0) + ' · closed ' + (s.pairs_closed || 0)],
+        ['Incomplete executions', String(s.incomplete || 0) + ' (one leg only ' + (s.one_leg || 0) + ', no fill ' + (s.no_fill || 0) + ')'],
+        ['Avg basis at entry / exit', pct4(s.avg_entry_basis_pct) + ' / ' + pct4(s.avg_exit_basis_pct)],
+        ['Gross P&L', usd(s.gross_pnl_quote)], ['Fees', usd(-(s.fees_quote || 0))], ['Funding', usd(s.funding_quote)],
+        ['Net P&L (incl. incidents ' + usd(s.incident_pnl_quote) + ')', usd(s.net_pnl_quote)],
+        ['Max adverse basis move', pct4(s.max_adverse_basis_pct)],
+        ['Funding unknown (flagged)', String(s.funding_unknown || 0)],
+        ['Rejected moments: stale / timestamps apart', (s.stale_evals || 0) + ' / ' + (s.skew_evals || 0)]
+      ]);
+      var cfg = d.settings || {};
+      kvRows($('basis-settings'), Object.keys(cfg).map(function (k) { return [k.replace('basis_', ''), String(cfg[k])]; }));
+      var pb = $('basis-pairs'); clear(pb);
+      (d.pairs || []).forEach(function (p) {
+        var c = p.conditions || {};
+        var conds = ['fut_upper', 'spot_lower', 'both'].filter(function (k) { return c[k]; }).join(', ') || '—';
+        pb.appendChild(h('tr', null,
+          h('td', { text: p.venue }), h('td', { text: p.asset }),
+          h('td', { class: 'num', text: p.spot_mid == null ? '—' : String(+num(p.spot_mid).toPrecision(8)) }),
+          h('td', { class: 'num', text: p.perp_mid == null ? '—' : String(+num(p.perp_mid).toPrecision(8)) }),
+          h('td', { class: 'num', text: pct4(p.basis_pct) }),
+          h('td', { class: 'num', text: pct4(p.entry_basis_pct) }),
+          h('td', { class: 'num', text: pct4(p.exit_basis_pct) }),
+          h('td', { class: 'num', text: p.fees_pct == null ? '—' : num(p.fees_pct).toFixed(3) + '%' }),
+          h('td', { class: 'num', text: p.funding_rate == null ? '—' : pct4(num(p.funding_rate) * 100) + ' / ' + (p.funding_interval_h || '?') + 'h' }),
+          h('td', { class: 'num ' + (num(p.potential_net_pct) >= 0 ? 'pos' : 'neg'), text: pct4(p.potential_net_pct) }),
+          h('td', { class: 'num', text: p.skew_ms == null ? '—' : Math.round(num(p.skew_ms)) + ' ms' }),
+          h('td', { text: conds }),
+          h('td', { class: 'wrap muted', text: p.ok ? 'ok' : (p.reason || p.note || 'waiting for data') })));
+      });
+      var tb = $('basis-trades'); clear(tb);
+      (d.trades || []).forEach(function (t) {
+        var notes = [t.incident, t.exit_reason, t.funding_unknown ? 'funding unknown' : '', t.unwind_unknown ? 'unwind price unknown' : '']
+          .filter(Boolean).join(' · ');
+        tb.appendChild(h('tr', null,
+          h('td', { class: 'mono', text: fmtTime(t.signal_ts) }), h('td', { text: t.asset + ' @ ' + t.venue }),
+          h('td', { text: t.trigger }), h('td', { text: t.status + (t.partial ? ' (partial)' : '') }),
+          h('td', { class: 'num', text: pct4(t.entry_basis_pct) }), h('td', { class: 'num', text: pct4(t.exit_basis_pct) }),
+          h('td', { class: 'num', text: pct4(t.max_adverse_pct) }), h('td', { class: 'num', text: usd(t.gross_quote) }),
+          h('td', { class: 'num', text: usd(-(t.fees_quote || 0)) }), h('td', { class: 'num', text: usd(t.funding_quote) }),
+          h('td', { class: 'num ' + (num(t.net_quote) >= 0 ? 'pos' : 'neg'), text: usd(t.net_quote) }),
+          h('td', { class: 'wrap muted', text: notes })));
+      });
+    });
   }
 
   function loadTrades() {
@@ -2878,6 +2939,7 @@
       if (target && target.scrollIntoView) target.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' });
     });
     $('hero-diag').addEventListener('click', function () { setTab('diag'); window.scrollTo(0, 0); });
+    $('basis-refresh').addEventListener('click', function () { loadBasis(); });
     document.querySelector('.brand').addEventListener('click', function (ev) {
       ev.preventDefault();
       setTab('opps');

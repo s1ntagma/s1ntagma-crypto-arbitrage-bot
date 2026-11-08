@@ -130,6 +130,7 @@ class AppContext:
     http: Any = None
     listings: dict[str, dict[str, float | None]] = field(default_factory=dict)
     autopilot: Autopilot | None = None  # AUTO without a click (Settings.autopilot)
+    basis: Any = None  # basis.runner.BasisRunner: spot-futures research scanner (virtual only)
     server: Any = None  # uvicorn Server while serving
     server_port: int | None = None  # bound port (port=0 -> OS assigned)
     stop_reason: str = ""
@@ -331,9 +332,19 @@ def build_context(
         except Exception:  # noqa: BLE001
             log.exception("ticker poller not created; WebSocket coverage only")
 
+    basis = None
+    if getattr(settings, "basis_enabled", False):
+        try:
+            from .basis.runner import BasisRunner
+
+            basis = BasisRunner(settings, clock, db=db)
+        except Exception:  # noqa: BLE001
+            log.exception("basis scanner not created")
+
     ctx = AppContext(
         settings=settings,
         autopilot=autopilot,
+        basis=basis,
         secrets=secrets,
         bus=bus,
         clock=clock,
@@ -784,6 +795,9 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
             helpers.append(asyncio.create_task(_follow_pool(ctx, stop), name="latbot-pool-follow"))
         if ctx.context is not None:
             helpers.append(asyncio.create_task(ctx.context.run(stop), name="latbot-context"))
+        if ctx.basis is not None:  # research scanner: its own connections, never an order
+            helpers.append(asyncio.create_task(_guarded("basis start", ctx.basis.start(), timeout_s=120.0),
+                                               name="latbot-basis"))
         try:
             await ctx.bus.publish(events.DASHBOARD, ctx.pipeline.dashboard())
         except Exception:  # noqa: BLE001
@@ -837,6 +851,8 @@ async def run_app(ctx: AppContext, seconds: float | None = None, *, serve: bool 
             await _guarded("ticker poller stop", _maybe_await(ctx.poller.stop()))
         if ctx.recorder is not None:
             await _guarded("recorder stop", ctx.recorder.stop())
+        if ctx.basis is not None:
+            await _guarded("basis stop", ctx.basis.stop())
         await _guarded("pipeline stop", ctx.pipeline.stop())
         stops = [_guarded(f"{a.name} stop", a.stop(), timeout_s=_SERVER_STOP_S) for a, _ in _adapters_to_start(ctx)]
         if stops:

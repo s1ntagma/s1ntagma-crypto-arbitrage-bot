@@ -184,7 +184,7 @@ DEFAULT_EXCHANGES: list[ExchangeConfig] = [
 # Runtime settings (public, user-tunable)
 # --------------------------------------------------------------------------- #
 # Bumped when a saved config.json needs a one-time upgrade (see Settings._migrate).
-CONFIG_VERSION = 5
+CONFIG_VERSION = 6
 
 
 @dataclass
@@ -215,6 +215,25 @@ class Settings:
     # trades 200x BTC/EUR; EUR-first made a smaller venue's USDT book the "leader").  Execution venues
     # keep ``quote_assets`` (the owner's money is in EUR).
     signal_quote_assets: list[str] = field(default_factory=lambda: ["USDT", "USDC", "USD", "EUR"])
+    # ---- SPOT-FUTURES BASIS SCANNER (research module: virtual pairs only, never an order) -----------
+    # Per venue: the spot market and the linear perpetual of the same asset and quote (USDT / USD).
+    basis_enabled: bool = False  # library default off (tests); load_settings turns it on for the owner
+    basis_venues: list[str] = field(default_factory=lambda: ["okx", "bybit", "htx", "kraken"])
+    basis_assets: list[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "DOGE"])
+    basis_notional_quote: float = 1000.0  # virtual size of each leg (quote currency)
+    basis_mode: str = "both"  # what opens a pair: fut_upper | spot_lower | any | both
+    basis_fut_upper_pct: float = 0.15  # perp best bid >= rolling mean perp mid * (1 + this %)
+    basis_spot_lower_pct: float = 0.15  # spot best ask <= rolling mean spot mid * (1 - this %)
+    basis_ref_window_s: float = 300.0  # rolling window of the reference means
+    basis_exit_basis_pct: float = 0.02  # close when the executable exit basis falls to this %
+    basis_min_convergence_pct: float = 0.05  # ... and at least this far below the entry basis
+    basis_max_hold_s: float = 3600.0
+    basis_latency_ms: float = 300.0  # signal -> fill delay of each leg in the simulation
+    basis_max_skew_ms: float = 500.0  # the two books must be this close in time
+    basis_max_age_ms: float = 2000.0  # and this fresh
+    basis_max_slippage_pct: float = 0.3  # a simulated market order walks the book at most this far
+    basis_funding_poll_s: float = 300.0
+    basis_history_s: float = 3600.0
     exchanges: list[ExchangeConfig] = field(default_factory=lambda: [ExchangeConfig(**asdict(e)) for e in DEFAULT_EXCHANGES])
     # ---- coverage: WS for the core watchlist, REST ticker polling for breadth --
     ws_assets: int = 25  # WebSocket streams per exchange: the whole Phase 3 pool (REST polling is 1-2 s slower)
@@ -453,6 +472,9 @@ class Settings:
             if float(data.get("min_target_volume_quote", 100_000.0)) == 100_000.0:
                 data["min_target_volume_quote"] = 500_000.0
             data["min_net_pct_show"] = 0.1
+        if version < 6:
+            # owner: "Spot-Futures Arbitrage Scanner" - research module on (virtual only)
+            data["basis_enabled"] = True
         if version < 5:
             # owner: "логика должна быть максимально простая" - simple mode on once (a later choice stays)
             data["simple_mode"] = True
@@ -644,7 +666,7 @@ def load_settings(path: str | os.PathLike[str] = "config.json") -> Settings:
             return s
         except Exception as exc:  # noqa: BLE001
             log.error("config.json invalid (%s); using defaults", exc)
-    s = Settings(simple_mode=True)  # fresh install: the owner's simple mode
+    s = Settings(simple_mode=True, basis_enabled=True)  # fresh install: the owner's simple mode + basis scanner
     _apply_env_overrides(s)
     return s
 
