@@ -78,6 +78,15 @@ CREATE TABLE IF NOT EXISTS basis_trades (
 );
 CREATE INDEX IF NOT EXISTS ix_basis_signal ON basis_trades(opened_ts);
 
+CREATE TABLE IF NOT EXISTS funding_samples (
+    ts REAL NOT NULL,
+    venue TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    rate REAL NOT NULL,
+    interval_h REAL
+);
+CREATE INDEX IF NOT EXISTS ix_funding_samples ON funding_samples(venue, asset, ts);
+
 CREATE TABLE IF NOT EXISTS trade_notes (
     trade_id TEXT PRIMARY KEY,
     note TEXT NOT NULL,
@@ -531,6 +540,18 @@ class Database:
                 "ON CONFLICT(id) DO UPDATE SET opened_ts=excluded.opened_ts, closed_ts=excluded.closed_ts, json=excluded.json",
                 (str(row["id"]), row.get("signal_ts"), row.get("closed_ts"), json.dumps(row, ensure_ascii=False, default=str)),
             )
+
+    def save_funding_sample(self, ts: float, venue: str, asset: str, rate: float, interval_h: float | None) -> None:
+        with self._lock:
+            self._conn.execute("INSERT INTO funding_samples (ts, venue, asset, rate, interval_h) VALUES (?, ?, ?, ?, ?)",
+                               (float(ts), str(venue), str(asset), float(rate), interval_h))
+
+    def list_funding_samples(self, venue: str, asset: str, since_ts: float = 0.0) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts, rate, interval_h FROM funding_samples WHERE venue=? AND asset=? AND ts>=? ORDER BY ts",
+                (str(venue), str(asset), float(since_ts))).fetchall()
+        return [{"ts": r[0], "rate": r[1], "interval_h": r[2]} for r in rows]
 
     def list_basis_trades(self, limit: int = 200) -> list[dict[str, Any]]:
         """Newest first."""

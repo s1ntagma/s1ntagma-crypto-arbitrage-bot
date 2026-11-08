@@ -1620,6 +1620,16 @@
         ['Funding unknown (flagged)', String(s.funding_unknown || 0)],
         ['Rejected moments: stale / timestamps apart', (s.stale_evals || 0) + ' / ' + (s.skew_evals || 0)]
       ]);
+      var cs = s.carry || {};
+      kvRows($('carry-stats'), [
+        ['Positions open / closed / incidents', (cs.open || 0) + ' / ' + (cs.closed || 0) + ' / ' + (cs.incidents || 0)],
+        ['Open notional', usd(cs.open_notional_quote)],
+        ['Funding collected (open positions)', usd(cs.funding_quote) + ' (' + usd(cs.funding_open_quote) + ')'],
+        ['Funding APR on open positions', cs.funding_apr_open_pct == null ? '—' : num(cs.funding_apr_open_pct).toFixed(1) + '%'],
+        ['Closed: fees / net', usd(-(cs.fees_quote || 0)) + ' / ' + usd(cs.net_quote)],
+        ['Realized APR (net, closed)', cs.realized_apr_pct == null ? '—' : num(cs.realized_apr_pct).toFixed(1) + '%'],
+        ['Funding unknown (restart gaps)', String(cs.funding_unknown || 0)]
+      ]);
       var cfg = d.settings || {};
       kvRows($('basis-settings'), Object.keys(cfg).map(function (k) { return [k.replace('basis_', ''), String(cfg[k])]; }));
       var pb = $('basis-pairs'); clear(pb);
@@ -1636,6 +1646,8 @@
           h('td', { class: 'num', text: p.fees_pct == null ? '—' : num(p.fees_pct).toFixed(3) + '%' }),
           h('td', { class: 'num', text: p.funding_rate == null ? '—' : pct4(num(p.funding_rate) * 100) + ' / ' + (p.funding_interval_h || '?') + 'h' }),
           h('td', { class: 'num ' + (num(p.potential_net_pct) >= 0 ? 'pos' : 'neg'), text: pct4(p.potential_net_pct) }),
+          h('td', { class: 'num ' + (num(p.carry_edge_pct) >= 0 ? 'pos' : 'neg'), title: p.carry_reject || p.carry_note || (p.carry_confirmed ? 'rate confirmed' : 'rate not confirmed yet'),
+            text: p.carry_edge_pct == null ? '—' : pct4(p.carry_edge_pct) + (p.carry_confirmed ? '' : ' ?') }),
           h('td', { class: 'num', text: p.skew_ms == null ? '—' : Math.round(num(p.skew_ms)) + ' ms' }),
           h('td', { text: conds }),
           h('td', { class: 'wrap muted', text: p.ok ? 'ok' : (p.reason || p.note || 'waiting for data') })));

@@ -32,6 +32,16 @@ one leg filled is a ``one_leg`` incident - recorded, unwound, never counted as a
 retried until both legs are flat.  Funding: the short perp receives ``rate * notional`` at every funding
 time it holds through when the rate is positive (pays when negative); an unknown rate is flagged, never
 guessed.  Fees: taker on every fill.  The largest adverse basis move while open is recorded.
+
+Funding carry (``carry_*``, trigger ``carry``): the same long spot + short perp, held for days while
+funding pays the short.  ``carry_review`` runs after every funding poll and approves the best pairs; an approved
+pair enters on its next fresh books, revalidated there (never on a stale snapshot).  Edge = funding over
+``carry_horizon_h`` at the current rate - 4 taker fees - the cost of crossing both books now (exit basis -
+entry basis for ``carry_notional_quote``).  Entry: the last ``carry_confirm_polls`` rates all positive and
+edge >= ``carry_min_edge_pct``; at most ``carry_max_positions`` open, highest edge first.  Exit: the last
+``carry_confirm_polls`` rates all below ``carry_exit_rate``, or ``carry_max_hold_h``.  The basis exit rules
+do not apply.  An open carry position survives a restart (funding while the process was down is not
+counted and the position is flagged ``funding_unknown``).
 """
 from __future__ import annotations
 
@@ -55,6 +65,8 @@ _COUNTERS_SAVE_S = 5.0
 _SAMPLE_S = 1.0
 _TRADES_KEEP = 2000
 _EPS = 1e-12
+CARRY = "carry"
+_FUNDING_KEEP = 24
 
 
 def _f(settings: Any, name: str, default: float) -> float:
@@ -134,6 +146,8 @@ class _Pair:
     last_sample_mono: float = float("-inf")
     cond: dict[str, bool] = field(default_factory=lambda: {c: False for c in CONDITIONS})
     status: dict[str, Any] = field(default_factory=dict)
+    funding_samples: deque = field(default_factory=lambda: deque(maxlen=_FUNDING_KEEP))  # polled rates
+    carry: dict[str, Any] = field(default_factory=dict)  # last carry evaluation
 
 
 class BasisScanner:
@@ -149,7 +163,7 @@ class BasisScanner:
         self._counters_dirty_mono: float | None = None
         self.counters: dict[str, int] = {
             "signals_fut_upper": 0, "signals_spot_lower": 0, "signals_both": 0, "signals_while_open": 0,
-            "entries": 0, "stale_evals": 0, "skew_evals": 0, "evaluations": 0,
+            "entries": 0, "stale_evals": 0, "skew_evals": 0, "evaluations": 0, "carry_entries": 0,
         }
         self._load()
 
@@ -183,10 +197,17 @@ class BasisScanner:
                     next_ts: float | None = None) -> None:
         p = self._pair(venue, asset)
         p.funding_rate = None if rate is None else float(rate)
+        p.funding_samples.append(p.funding_rate)  # None too: an unknown rate breaks a confirmation run
         if interval_h and interval_h > 0:
             p.funding_interval_h = float(interval_h)
         if next_ts:
             p.funding_next_ts = float(next_ts)
+        save = getattr(self._db, "save_funding_sample", None) if self._db is not None else None
+        if save is not None and p.funding_rate is not None:
+            try:
+                save(self._clock.wall(), venue, p.asset, p.funding_rate, p.funding_interval_h)
+            except Exception:  # noqa: BLE001
+                log.exception("funding sample not saved")
 
     def on_book(self, venue: str, leg: str, book: OrderBook) -> None:
         """The latest ``leg`` book (sizes already in base units) of ``venue``; evaluates the pair."""
@@ -296,6 +317,7 @@ class BasisScanner:
             "skew_ms": abs(s.ts.recv_mono - f.ts.recv_mono) * 1000.0,
             "fut_upper_bound": up, "spot_lower_bound": low, "conditions": dict(cond),
         }
+        self._carry_on_fresh(p, now)
         if now - p.last_sample_mono >= _SAMPLE_S:
             p.last_sample_mono = now
             p.history.append((self._clock.wall(), now, s.mid, f.mid, basis_pct, entry, exit_))
@@ -309,12 +331,96 @@ class BasisScanner:
         trigger = self._trigger(fired)
         if trigger is None:
             return
-        if any(t.venue == p.venue and t.asset == p.asset and t.status in _ACTIVE for t in self._trades):
+        if self._active(p, carry=False):
             self.counters["signals_while_open"] += 1
             return
         if qty <= 0:
             return
         self._open(p, trigger, qty, entry, now)
+
+    def _active(self, p: _Pair, *, carry: bool) -> bool:
+        return any(t.venue == p.venue and t.asset == p.asset and t.status in _ACTIVE
+                   and (t.trigger == CARRY) == carry for t in self._trades)
+
+    # ------------------------------------------------------------------ funding carry
+    def _carry_edge(self, p: _Pair) -> tuple[float | None, float, float | None]:
+        """(edge %, qty, entry basis) of a carry entry on the current (already checked fresh) books."""
+        if p.funding_rate is None:
+            return None, 0.0, None
+        mid = p.books["spot"].mid
+        qty = self._s("carry_notional_quote", 1000.0) / mid if mid else 0.0
+        entry, exit_ = self._exec_basis(p, qty)
+        if entry is None or exit_ is None:
+            return None, qty, None
+        periods = self._s("carry_horizon_h", 72.0) / max(p.funding_interval_h, 1e-9)
+        funding_pct = p.funding_rate * 100.0 * periods
+        return funding_pct - self._fees_pct(p) - (exit_ - entry), qty, entry
+
+    def _last_rates(self, p: _Pair) -> list[float | None] | None:
+        n = max(1, int(self._s("carry_confirm_polls", 2)))
+        rates = list(p.funding_samples)[-n:]
+        return rates if len(rates) == n else None
+
+    def _carry_open_n(self) -> int:
+        return sum(1 for t in self._trades if t.trigger == CARRY and t.status in _ACTIVE)
+
+    def _carry_on_fresh(self, p: _Pair, now: float) -> None:
+        """Every fresh evaluation: the live edge; an approved pair enters here, revalidated on these books."""
+        if not bool(getattr(self._settings, "carry_enabled", False)):
+            return
+        edge, qty, entry = self._carry_edge(p)
+        p.carry.update({"carry_edge_pct": edge, "carry_edge_mono": now,
+                        "carry_note": "" if edge is not None else
+                        ("funding rate unknown" if p.funding_rate is None else "book too thin for the size")})
+        if not p.carry.get("carry_approved") or edge is None or qty <= 0:
+            return
+        if edge < self._s("carry_min_edge_pct", 0.10):
+            p.carry["carry_approved"] = False  # revalidation on the latest book failed (hard rule 4)
+            p.carry["carry_reject"] = f"edge fell to {edge:.3f}% before entry"
+            return
+        if self._active(p, carry=True) or self._carry_open_n() >= int(self._s("carry_max_positions", 5)):
+            p.carry["carry_approved"] = False
+            return
+        p.carry["carry_approved"] = False
+        self._open(p, CARRY, qty, entry, now)
+        self.counters["carry_entries"] += 1
+        self._mark_counters(now)
+
+    def carry_review(self, now: float | None = None) -> int:
+        """After every funding poll: exits on a turned rate, and approval of the best entries (highest
+        live edge first, within ``carry_max_positions``).  An approved pair enters on its next fresh books.
+        Returns the number of pairs approved."""
+        if not bool(getattr(self._settings, "carry_enabled", False)):
+            return 0
+        now = self._clock.mono() if now is None else now
+        exit_rate = self._s("carry_exit_rate", 0.0)
+        for t in self._trades:
+            if t.trigger != CARRY or t.status != "open" or t.due:
+                continue
+            p = self._pairs.get((t.venue, t.asset))
+            rates = self._last_rates(p) if p is not None else None
+            if rates and all(r is not None and r < exit_rate for r in rates):
+                self._schedule_exit(t, now, f"funding below {exit_rate:g} on {len(rates)} polls ({rates[-1]:+.6f})")
+                self._save(t)
+        max_age = max(60.0, self._s("basis_funding_poll_s", 300.0))
+        candidates = []
+        for p in self._pairs.values():
+            rates = self._last_rates(p)
+            confirmed = bool(rates) and all(r is not None and r > 0 for r in rates)
+            p.carry["carry_confirmed"] = confirmed
+            p.carry["carry_approved"] = False
+            p.carry["carry_reject"] = ""
+            edge = p.carry.get("carry_edge_pct")
+            fresh_edge = edge is not None and now - p.carry.get("carry_edge_mono", float("-inf")) <= max_age
+            if not p.quote_ok or not confirmed or not fresh_edge or self._active(p, carry=True):
+                continue
+            if edge >= self._s("carry_min_edge_pct", 0.10):
+                candidates.append((edge, p))
+        room = max(0, int(self._s("carry_max_positions", 5)) - self._carry_open_n())
+        chosen = sorted(candidates, key=lambda c: c[0], reverse=True)[:room]
+        for _, p in chosen:
+            p.carry["carry_approved"] = True
+        return len(chosen)
 
     def _trigger(self, fired: list[str]) -> str | None:
         mode = self.mode
@@ -332,7 +438,8 @@ class BasisScanner:
         t.done = {leg: False for leg in LEGS}
         self._trades.append(t)
         del self._trades[:-_TRADES_KEEP]
-        self.counters["entries"] += 1
+        if trigger != CARRY:  # carry entries are counted by carry_review
+            self.counters["entries"] += 1
         self._save(t)
 
     def tick(self, now: float | None = None) -> None:
@@ -469,6 +576,11 @@ class BasisScanner:
 
     def _maybe_exit(self, t: BasisTrade, p: _Pair, now: float) -> None:
         b_s, b_f = self._leg_book(p, "spot", now), self._leg_book(p, "perp", now)
+        if t.trigger == CARRY:  # funding exits come from carry_review; only the max hold here (wall clock:
+            # the position may have survived a restart, monotonic time did not)
+            if self._clock.wall() - t.signal_ts >= self._s("carry_max_hold_h", 336.0) * 3600.0:
+                self._schedule_exit(t, now, "max hold")
+            return
         held = now - t.signal_mono
         reason = ""
         if held >= self._s("basis_max_hold_s", 3600.0):
@@ -596,7 +708,16 @@ class BasisScanner:
                 t = BasisTrade(**{k: v for k, v in r.items() if k in known})
             except TypeError:
                 continue
-            if t.status in _ACTIVE:
+            if t.trigger == CARRY and t.status in ("open", "closing"):
+                # a carry position lives for days: it resumes; funding while the process was down is not known
+                t.funding_unknown = True
+                if t.status == "closing":
+                    t.due = {leg: float("-inf") for leg in LEGS if (t.spot_qty if leg == "spot" else t.perp_qty) > _EPS}
+                    t.done = {leg: leg not in t.due for leg in LEGS}
+                else:
+                    t.due, t.done = {}, {}
+                self._save(t)
+            elif t.status in _ACTIVE:
                 # a simulated position of a previous run cannot be resumed: outcome unknown, never guessed
                 t.status = "abandoned"
                 t.closed_ts = self._clock.wall()
@@ -614,7 +735,8 @@ class BasisScanner:
         for p in sorted(self._pairs.values(), key=lambda x: (x.venue, x.asset)):
             out.append({"venue": p.venue, "asset": p.asset, "spot_symbol": p.spot_symbol,
                         "perp_symbol": p.perp_symbol, "quote_ok": p.quote_ok, "note": p.note,
-                        "taker": dict(p.taker), **p.status})
+                        "taker": dict(p.taker), **p.status, **p.carry,
+                        "funding_samples": [r for r in p.funding_samples][-6:]})
         return out
 
     def history(self, venue: str, asset: str, limit: int = 600) -> list[dict[str, Any]]:
@@ -626,7 +748,7 @@ class BasisScanner:
                  "exit_basis_pct": h[6]} for h in rows]
 
     def stats(self) -> dict[str, Any]:
-        trades = self._trades
+        trades = [t for t in self._trades if t.trigger != CARRY]  # carry has its own block
         hedged = [t for t in trades if t.entry_basis_pct is not None and t.status != "abandoned"]
         closed = [t for t in hedged if t.status == "closed"]
         incidents = [t for t in trades if t.status in ("one_leg", "no_fill")]
@@ -659,6 +781,34 @@ class BasisScanner:
             "avg_max_adverse_basis_pct": avg(t.max_adverse_pct for t in closed),
             "stale_evals": c["stale_evals"], "skew_evals": c["skew_evals"], "evaluations": c["evaluations"],
             "mode": self.mode,
+            "carry": self._carry_stats(),
+        }
+
+    def _carry_stats(self) -> dict[str, Any]:
+        ts = [t for t in self._trades if t.trigger == CARRY]
+        hedged = [t for t in ts if t.entry_basis_pct is not None and t.status != "abandoned"]
+        live = [t for t in hedged if t.status in ("open", "closing")]
+        closed = [t for t in hedged if t.status == "closed"]
+        incidents = [t for t in ts if t.status in ("one_leg", "no_fill")]
+        now = self._clock.wall()
+
+        def notional(t: BasisTrade) -> float:
+            return t.target_qty * (t.entry_spot_vwap or 0.0)
+
+        def apr(rows: list[BasisTrade], value) -> float | None:
+            years = sum(notional(t) * max(0.0, ((t.closed_ts or now) - (t.opened_ts or now))) for t in rows) / 31_536_000.0
+            return sum(value(t) for t in rows) / years * 100.0 if years > 0 else None
+
+        return {
+            "entries": self.counters.get("carry_entries", 0), "open": len(live), "closed": len(closed),
+            "incidents": len(incidents), "funding_unknown": sum(1 for t in hedged if t.funding_unknown),
+            "funding_quote": sum(t.funding_quote for t in hedged),
+            "funding_open_quote": sum(t.funding_quote for t in live),
+            "fees_quote": sum(t.fees_quote for t in closed + incidents),
+            "net_quote": sum(t.net_quote or 0.0 for t in closed + incidents),
+            "open_notional_quote": sum(notional(t) for t in live),
+            "realized_apr_pct": apr(closed, lambda t: t.net_quote or 0.0),
+            "funding_apr_open_pct": apr(live, lambda t: t.funding_quote),
         }
 
 

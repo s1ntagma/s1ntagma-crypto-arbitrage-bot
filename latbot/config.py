@@ -247,6 +247,15 @@ class Settings:
     basis_max_slippage_pct: float = 0.3  # a simulated market order walks the book at most this far
     basis_funding_poll_s: float = 300.0
     basis_history_s: float = 3600.0
+    # funding carry (virtual, inside the basis scanner): long spot + short perp while funding pays the short
+    carry_enabled: bool = True
+    carry_notional_quote: float = 1000.0  # virtual size of each leg (quote currency)
+    carry_horizon_h: float = 72.0  # the edge counts funding over this many hours at the current rate
+    carry_min_edge_pct: float = 0.10  # enter when funding over the horizon beats fees + crossing cost by this
+    carry_exit_rate: float = 0.0  # close when the rate (fraction per interval) is below this ...
+    carry_confirm_polls: int = 2  # ... on this many polls in a row (entries need as many positive polls)
+    carry_max_hold_h: float = 336.0
+    carry_max_positions: int = 5
     exchanges: list[ExchangeConfig] = field(default_factory=lambda: [ExchangeConfig(**asdict(e)) for e in DEFAULT_EXCHANGES])
     # ---- coverage: WS for the core watchlist, REST ticker polling for breadth --
     ws_assets: int = 25  # WebSocket streams per exchange: the whole Phase 3 pool (REST polling is 1-2 s slower)

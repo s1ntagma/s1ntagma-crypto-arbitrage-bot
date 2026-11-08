@@ -2,7 +2,8 @@
 PRIVATE event bus - the latency bot's pipeline, poller and diagnostics never see these books.
 
 Perp books count contracts: their sizes are scaled to base units (``contract_size``) before the scanner
-sees them.  Funding rates are polled every ``basis_funding_poll_s``; the simulator ticks 4 times a second.
+sees them.  Funding rates are polled every ``basis_funding_poll_s`` (then the funding carry reviews its positions);
+the simulator ticks 4 times a second.
 Research only: the runner never calls ``place_order``.
 """
 from __future__ import annotations
@@ -229,6 +230,10 @@ class BasisRunner:
                     continue
                 self.scanner.set_funding(venue, p["asset"], r.get("rate"), r.get("interval_h"), r.get("next_ts"))
                 n += 1
+        try:
+            self.scanner.carry_review()  # funding carry decides on fresh rates
+        except Exception:  # noqa: BLE001
+            log.exception("basis: carry review failed")
         return n
 
     async def _funding_loop(self) -> None:
@@ -255,7 +260,9 @@ class BasisRunner:
             "settings": {k: getattr(self._settings, k) for k in (
                 "basis_mode", "basis_notional_quote", "basis_fut_upper_pct", "basis_spot_lower_pct",
                 "basis_ref_window_s", "basis_exit_basis_pct", "basis_min_convergence_pct", "basis_max_hold_s", "basis_latency_ms",
-                "basis_max_skew_ms", "basis_max_age_ms", "basis_max_slippage_pct")},
+                "basis_max_skew_ms", "basis_max_age_ms", "basis_max_slippage_pct", "carry_enabled",
+                "carry_notional_quote", "carry_horizon_h", "carry_min_edge_pct", "carry_exit_rate",
+                "carry_confirm_polls", "carry_max_hold_h", "carry_max_positions")},
         }
 
 
