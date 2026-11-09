@@ -1636,6 +1636,38 @@
         ['Realized APR on capital (net, closed)', cs.realized_apr_pct == null ? '—' : num(cs.realized_apr_pct).toFixed(1) + '%'],
         ['Funding unknown (restart gaps)', String(cs.funding_unknown || 0)]
       ]);
+      var mo = d.momentum || {}, ms = mo.stats || {};
+      var pctx = function (v, n) { return v == null ? '—' : (num(v) * 100).toFixed(n || 0) + '%'; };
+      kvRows($('mom-stats'), [
+        ['Trades closed / open', (ms.closed || 0) + ' / ' + (ms.open || 0)],
+        ['Win rate', pctx(ms.win_rate)],
+        ['Avg NET per trade (after fees)', ms.avg_net_pct == null ? '—' : pct4(ms.avg_net_pct)],
+        ['P&L / fees', usd(ms.pnl_quote) + ' / ' + usd(-(ms.fees_quote || 0))],
+        ['Long: trades / wins / P&L', ((ms.long || {}).closed || 0) + ' / ' + ((ms.long || {}).wins || 0) + ' / ' + usd((ms.long || {}).pnl_quote)],
+        ['Short: trades / wins / P&L', ((ms.short || {}).closed || 0) + ' / ' + ((ms.short || {}).wins || 0) + ' / ' + usd((ms.short || {}).pnl_quote)],
+        ['Max drawdown', usd(-(ms.max_drawdown_quote || 0))],
+        ['Exits', Object.keys(ms.exits || {}).map(function (k) { return k + ': ' + ms.exits[k]; }).join(', ') || '—'],
+        ['No data / no fill / abandoned', (ms.no_data || 0) + ' / ' + (ms.no_fill || 0) + ' / ' + (ms.abandoned || 0)]
+      ]);
+      kvRows($('mom-status'), (mo.status || []).map(function (st) {
+        var warm = st.move_window_pct == null ? ' (warming up: ' + Math.round(num(st.series_s) / 60) + ' min of data)' : '';
+        return [st.asset + (st.venue ? ' @ ' + st.venue : ''),
+          '15 m ' + pct4(st.move_window_pct) + ' · 1 h ' + pct4(st.move_trend_pct) + warm +
+          (num(st.cooldown_s) > 0 ? ' · cooldown ' + Math.round(num(st.cooldown_s) / 60) + ' min' : '')];
+      }));
+      var mt = $('mom-trades'); clear(mt);
+      (mo.trades || []).forEach(function (t) {
+        mt.appendChild(h('tr', null,
+          h('td', { class: 'mono', text: fmtTime(t.signal_ts) }), h('td', { text: t.asset }),
+          h('td', { class: t.side === 'long' ? 'pos' : 'neg', text: t.side }), h('td', { text: t.venue }),
+          h('td', { text: t.status + (t.partial ? ' (partial)' : '') }),
+          h('td', { class: 'num', text: pct4(t.move_window_pct) + ' / ' + pct4(t.move_trend_pct) }),
+          h('td', { class: 'num', text: t.entry_px ? String(+num(t.entry_px).toPrecision(8)) : '—' }),
+          h('td', { class: 'num', text: t.exit_px ? String(+num(t.exit_px).toPrecision(8)) : '—' }),
+          h('td', { class: 'num', text: usd(-(t.fees_quote || 0)) }),
+          h('td', { class: 'num ' + (num(t.net_quote) >= 0 ? 'pos' : 'neg'), text: t.net_quote == null ? '—' : usd(t.net_quote) }),
+          h('td', { class: 'wrap muted', text: t.exit_reason || '' })));
+      });
       var xf = d.xfund || {}, xs = xf.stats || {};
       kvRows($('xfund-stats'), [
         ['Pairs open / closed / incidents', (xs.open || 0) + ' / ' + (xs.closed || 0) + ' / ' + (xs.incidents || 0)],

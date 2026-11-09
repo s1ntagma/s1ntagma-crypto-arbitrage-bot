@@ -276,6 +276,20 @@ class Settings:
     xfund_liq_guard_pct: float = 5.0  # close when a leg is this close (%) to its liquidation price
     xfund_exit_horizon_h: float = 24.0  # a turned difference closes only when holding this long costs more
     xfund_max_hold_h: float = 336.0
+    # momentum on perpetuals (virtual): ride a move of BTC / ETH, long or short
+    mom_enabled: bool = True
+    mom_assets: list[str] = field(default_factory=lambda: ["BTC", "ETH"])
+    mom_venues: list[str] = field(default_factory=lambda: ["binance", "bybit", "okx", "mexc", "gate", "bitget"])
+    mom_notional_quote: float = 1000.0  # virtual size per position, 1x
+    mom_window_s: float = 900.0  # entry: move over this window ...
+    mom_entry_pct: float = 0.6  # ... at least this %
+    mom_trend_s: float = 3600.0  # and the move over this longer window ...
+    mom_trend_pct: float = 0.3  # ... at least this %, same direction
+    mom_stop_pct: float = 0.5  # hard stop against the entry price
+    mom_trail_pct: float = 0.4  # trailing stop from the best price since the entry
+    mom_max_hold_s: float = 3600.0
+    mom_cooldown_s: float = 900.0  # no new entry on the coin this long after an exit
+    mom_stale_s: float = 60.0  # no fresh book this long: venue switch / open position closed as "no data"
     exchanges: list[ExchangeConfig] = field(default_factory=lambda: [ExchangeConfig(**asdict(e)) for e in DEFAULT_EXCHANGES])
     # ---- coverage: WS for the core watchlist, REST ticker polling for breadth --
     ws_assets: int = 25  # WebSocket streams per exchange: the whole Phase 3 pool (REST polling is 1-2 s slower)

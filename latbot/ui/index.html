@@ -341,6 +341,25 @@
       </div>
       <div class="diag-grid">
         <div class="diag-block">
+          <h3 class="diag-title">MOMENTUM · BTC / ETH perpetuals, long and short (virtual)</h3>
+          <table class="table table-compact"><tbody id="mom-stats"></tbody></table>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title">MOMENTUM · live moves</h3>
+          <table class="table table-compact"><tbody id="mom-status"></tbody></table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">MOMENTUM · virtual trades</h3>
+        <div class="table-wrap">
+          <table class="table" id="mom-trades-table">
+            <thead><tr><th>Signal</th><th>Coin</th><th>Side</th><th>Venue</th><th>Status</th><th class="num">Move 15 m / 1 h</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">Fees</th><th class="num">Net</th><th>Exit reason</th></tr></thead>
+            <tbody id="mom-trades"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-grid">
+        <div class="diag-block">
           <h3 class="diag-title">CROSS-VENUE FUNDING · long perp where funding is low, short where it is high</h3>
           <table class="table table-compact"><tbody id="xfund-stats"></tbody></table>
         </div>

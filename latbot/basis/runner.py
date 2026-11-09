@@ -18,6 +18,7 @@ from ..config import ExchangeConfig, Settings
 from ..events import EventBus
 from ..models import BookLevel, ExchangeRole, OrderBook
 from .scanner import BasisScanner
+from .momentum import Momentum
 from .xfund import FundingArb
 
 log = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ class BasisRunner:
         self.bus = EventBus()  # private: these books never reach the latency pipeline
         self.scanner = BasisScanner(settings, clock, db=db)
         self.xfund = FundingArb(self.scanner, settings, clock, db=db)  # cross-venue funding on the same data
+        self.momentum = Momentum(self.scanner, settings, clock, db=db)  # BTC / ETH momentum on the perp books
         self._factory = leg_factory or self._default_factory
         self.legs: dict[str, dict[str, Any]] = {}  # venue -> {"spot": adapter, "perp": adapter}
         self._route: dict[str, tuple[str, str]] = {}  # adapter name -> (venue, leg)
@@ -220,6 +222,7 @@ class BasisRunner:
             try:
                 self.scanner.tick()
                 self.xfund.tick()
+                self.momentum.tick()
             except Exception:  # noqa: BLE001
                 log.exception("basis tick failed")
             await asyncio.sleep(_TICK_S)
@@ -315,6 +318,8 @@ class BasisRunner:
             "trades": self.scanner.trades(200),
             "xfund": {"stats": self.xfund.stats(), "candidates": self.xfund.candidates,
                       "trades": self.xfund.trades(100)},
+            "momentum": {"stats": self.momentum.stats(), "status": self.momentum.status(),
+                         "trades": self.momentum.trades(100)},
             "history": {f"{p['venue']}:{p['asset']}": self.scanner.history(p["venue"], p["asset"], history_limit)
                         for p in pairs},
             "settings": {k: getattr(self._settings, k) for k in (
@@ -326,7 +331,9 @@ class BasisRunner:
                 "carry_maint_margin", "carry_liq_guard_pct", "carry_history_n", "carry_min_positive_share",
                 "carry_exit_horizon_h", "xfund_enabled", "xfund_notional_quote", "xfund_horizon_h",
                 "xfund_min_edge_pct", "xfund_max_positions", "xfund_leverage", "xfund_liq_guard_pct",
-                "xfund_exit_horizon_h", "xfund_max_hold_h")},
+                "xfund_exit_horizon_h", "xfund_max_hold_h", "mom_enabled", "mom_assets", "mom_venues",
+                "mom_notional_quote", "mom_window_s", "mom_entry_pct", "mom_trend_s", "mom_trend_pct",
+                "mom_stop_pct", "mom_trail_pct", "mom_max_hold_s", "mom_cooldown_s")},
         }
 
 
