@@ -93,6 +93,7 @@ class BasisTrade:
     target_qty: float  # base amount of each leg
     signal_basis_pct: float  # executable entry basis at the signal (best effort)
     status: str = "pending"  # pending | open | closing | closed | one_leg | no_fill | abandoned
+    training: bool = False  # opened by a condition that is not the basis_mode: measured, never offered
     opened_ts: float | None = None
     closed_ts: float | None = None
     spot_qty: float = 0.0  # open position: long spot
@@ -176,6 +177,7 @@ class BasisScanner:
         self.counters: dict[str, int] = {
             "signals_fut_upper": 0, "signals_spot_lower": 0, "signals_both": 0, "signals_while_open": 0,
             "entries": 0, "stale_evals": 0, "skew_evals": 0, "evaluations": 0, "carry_entries": 0,
+            "training_entries": 0,
         }
         self._load()
 
@@ -369,14 +371,18 @@ class BasisScanner:
         if not fired:
             return
         trigger = self._trigger(fired)
+        training = False
         if trigger is None:
-            return
+            if not bool(getattr(self._settings, "basis_train_all_signals", False)):
+                return
+            # not the configured mode: still entered VIRTUALLY to measure it (owner: every signal in Stats)
+            trigger, training = fired[-1], True  # "both" when both fired at once, else the one that did
         if self._active(p, carry=False):
             self.counters["signals_while_open"] += 1
             return
         if qty <= 0:
             return
-        self._open(p, trigger, qty, entry, now)
+        self._open(p, trigger, qty, entry, now, training=training)
 
     def _active(self, p: _Pair, *, carry: bool) -> bool:
         return any(t.venue == p.venue and t.asset == p.asset and t.status in _ACTIVE
@@ -503,16 +509,20 @@ class BasisScanner:
         return mode if mode in fired else None
 
     # ------------------------------------------------------------------ simulator
-    def _open(self, p: _Pair, trigger: str, qty: float, entry: float | None, now: float) -> None:
+    def _open(self, p: _Pair, trigger: str, qty: float, entry: float | None, now: float,
+              training: bool = False) -> None:
         lat = self._s("basis_latency_ms", 300.0) / 1000.0
         t = BasisTrade(id=f"basis-{p.venue}-{p.asset}-{int(self._clock.wall() * 1000)}-{next(self._ids)}",
                        venue=p.venue, asset=p.asset, trigger=trigger, signal_ts=self._clock.wall(), signal_mono=now,
-                       target_qty=qty, signal_basis_pct=entry if entry is not None else float("nan"))
+                       target_qty=qty, signal_basis_pct=entry if entry is not None else float("nan"),
+                       training=training)
         t.due = {leg: now + lat for leg in LEGS}
         t.done = {leg: False for leg in LEGS}
         self._trades.append(t)
         del self._trades[:-_TRADES_KEEP]
-        if trigger != CARRY:  # carry entries are counted by carry_review
+        if training:
+            self.counters["training_entries"] += 1
+        elif trigger != CARRY:  # carry entries are counted by carry_review
             self.counters["entries"] += 1
         self._save(t)
 
@@ -899,6 +909,9 @@ class BasisScanner:
             "skew_share": c["skew_evals"] / c["evaluations"] if c["evaluations"] else None,
             "mode": self.mode,
             "carry": self._carry_stats(),
+            "training_entries": c.get("training_entries", 0),
+            "by_trigger": _breakdown(done, lambda t: t.trigger),
+            "by_venue_asset": _breakdown(done, lambda t: f"{t.venue} {t.asset}"),
         }
 
     def _carry_stats(self) -> dict[str, Any]:
@@ -935,6 +948,23 @@ class BasisScanner:
             "realized_apr_pct": apr(closed, lambda t: t.net_quote or 0.0),
             "funding_apr_open_pct": apr(live, lambda t: t.funding_quote),
         }
+
+
+def _breakdown(rows: list[BasisTrade], key) -> dict[str, dict[str, Any]]:
+    """Closed pairs and incidents per group: count, wins, win rate, avg NET %, P&L (minuses included)."""
+    out: dict[str, list[BasisTrade]] = {}
+    for t in rows:
+        out.setdefault(str(key(t)), []).append(t)
+    res = {}
+    for k, ts in out.items():
+        closed = [t for t in ts if t.status == "closed"]
+        wins = sum(1 for t in ts if (t.net_quote or 0.0) > 0)
+        nets = [t.net_pct for t in ts if t.net_pct is not None]
+        res[k] = {"closed": len(closed), "incidents": len(ts) - len(closed), "wins": wins,
+                  "win_rate": wins / len(ts) if ts else None,
+                  "avg_net_pct": sum(nets) / len(nets) if nets else None,
+                  "pnl_quote": sum(t.net_quote or 0.0 for t in ts)}
+    return dict(sorted(res.items(), key=lambda kv: kv[1]["pnl_quote"], reverse=True))
 
 
 def _quote(symbol: str) -> str:

@@ -251,6 +251,7 @@ class Settings:
     basis_max_slippage_pct: float = 0.3  # a simulated market order walks the book at most this far
     basis_funding_poll_s: float = 300.0
     basis_history_s: float = 3600.0
+    basis_train_all_signals: bool = True  # every condition (not only basis_mode) opens a virtual pair to measure it
     # funding carry (virtual, inside the basis scanner): long spot + short perp while funding pays the short
     carry_enabled: bool = True
     carry_notional_quote: float = 1000.0  # virtual size of each leg (quote currency)

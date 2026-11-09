@@ -17,7 +17,8 @@ def settings(**over) -> Settings:
     base = dict(basis_enabled=True, basis_notional_quote=500.0, basis_mode="both", basis_fut_upper_pct=0.1,
                 basis_spot_lower_pct=0.1, basis_ref_window_s=10.0, basis_exit_basis_pct=0.02,
                 basis_min_convergence_pct=0.05, basis_max_hold_s=3600.0, basis_latency_ms=300.0,
-                basis_max_skew_ms=500.0, basis_max_age_ms=2000.0, basis_max_slippage_pct=0.3)
+                basis_max_skew_ms=500.0, basis_max_age_ms=2000.0, basis_max_slippage_pct=0.3,
+                basis_train_all_signals=False)
     base.update(over)
     return Settings(**base)
 
@@ -378,3 +379,30 @@ def test_rejections_are_reported_as_a_share_of_book_updates():
     st = env.sc.stats()
     assert st["evaluations"] == 4 and st["stale_evals"] == 1
     assert st["stale_share"] == pytest.approx(0.25) and st["skew_share"] == 0
+
+
+
+def test_every_signal_trains_a_virtual_pair_and_the_results_are_split_by_trigger():
+    """Owner (2026-11-09): spot / futures must show up in the statistics (minuses included) so the bot
+    can see which signals lose and which pay."""
+    env = Env(basis_mode="both", basis_train_all_signals=True)
+    env.warm()
+    env.push((99.99, 100.01), (100.30, 100.32))  # only the futures condition: not the mode -> training pair
+    st = env.sc.stats()
+    assert st["entries_attempted"] == 0 and st["training_entries"] == 1
+    env.clock.advance(0.4)
+    env.push((99.99, 100.01), (100.30, 100.32))
+    env.sc.tick()
+    [t] = env.sc.trades()
+    assert t["training"] and t["trigger"] == "fut_upper" and t["status"] == "open"
+    env.clock.advance(1.0)
+    env.push((99.99, 100.01), (99.98, 100.00))  # the basis converged: exit
+    env.sc.tick()
+    env.clock.advance(0.4)
+    env.push((99.99, 100.01), (99.98, 100.00))
+    env.sc.tick()
+    t = env.sc.trades()[0]
+    assert t["status"] == "closed"
+    by = env.sc.stats()["by_trigger"]["fut_upper"]
+    assert by["closed"] == 1 and by["pnl_quote"] == pytest.approx(t["net_quote"])
+    assert env.sc.stats()["by_venue_asset"]["okx BTC"]["closed"] == 1

@@ -1611,7 +1611,7 @@
       var s = d.stats || {};
       kvRows($('basis-stats'), [
         ['Signals: total (fut upper / spot lower / both)', (s.signals_total || 0) + ' (' + (s.signals_fut_upper || 0) + ' / ' + (s.signals_spot_lower || 0) + ' / ' + (s.signals_both || 0) + ')'],
-        ['Mode', s.mode || '—'],
+        ['Mode (offered) · training pairs (every other signal)', (s.mode || '—') + ' · ' + (s.training_entries || 0)],
         ['Virtual pairs: executed / open / closed', (s.pairs_executed || 0) + ' / ' + (s.pairs_open || 0) + ' / ' + (s.pairs_closed || 0)],
         ['Incomplete: total / one leg / no fill', (s.incomplete || 0) + ' / ' + (s.one_leg || 0) + ' / ' + (s.no_fill || 0)],
         ['Avg basis at entry / exit', pct4(s.avg_entry_basis_pct) + ' / ' + pct4(s.avg_exit_basis_pct)],
@@ -1636,6 +1636,23 @@
         ['Realized APR on capital (net, closed)', cs.realized_apr_pct == null ? '—' : num(cs.realized_apr_pct).toFixed(1) + '%'],
         ['Funding unknown (restart gaps)', String(cs.funding_unknown || 0)]
       ]);
+      var bb = $('basis-breakdown'); clear(bb);
+      var addGroup = function (title, groups, limit) {
+        var keys = Object.keys(groups || {});
+        if (!keys.length) return;
+        bb.appendChild(h('tr', null, h('td', { class: 'muted', colspan: '6', text: title })));
+        keys.slice(0, limit).forEach(function (k) {
+          var g = groups[k];
+          bb.appendChild(h('tr', null, h('td', { text: k }), h('td', { class: 'num', text: String(g.closed) }),
+            h('td', { class: 'num', text: String(g.incidents) }),
+            h('td', { class: 'num', text: g.win_rate == null ? '—' : (num(g.win_rate) * 100).toFixed(0) + '%' }),
+            h('td', { class: 'num ' + (num(g.avg_net_pct) >= 0 ? 'pos' : 'neg'), text: pct4(g.avg_net_pct) }),
+            h('td', { class: 'num ' + (num(g.pnl_quote) >= 0 ? 'pos' : 'neg'), text: usd(g.pnl_quote) })));
+        });
+      };
+      addGroup('By signal (fut_upper = futures above its norm, spot_lower = spot below, both = at once)', s.by_trigger, 10);
+      addGroup('By venue + coin (best first, top 20)', s.by_venue_asset, 20);
+      if (!bb.children.length) bb.appendChild(h('tr', null, h('td', { class: 'muted', colspan: '6', text: 'No closed spot / futures pairs yet.' })));
       var mo = d.momentum || {}, ms = mo.stats || {};
       var pctx = function (v, n) { return v == null ? '—' : (num(v) * 100).toFixed(n || 0) + '%'; };
       kvRows($('mom-stats'), [
