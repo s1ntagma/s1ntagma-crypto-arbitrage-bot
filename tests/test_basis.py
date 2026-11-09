@@ -366,4 +366,4 @@ def test_owner_config_moves_to_the_top_100():
     s = S.from_dict({"config_version": 6, "pool_max_assets": 25, "basis_assets": ["BTC"]})
     assert s.pool_max_assets == 100 and s.pool_stability_filters is False and s.basis_assets == []
     assert s.basis_top_n == 100 and s.ws_assets == 50
-    assert "meme-token" not in s.pool_exclude_categories and "stablecoins" in s.pool_exclude_categories
+    assert s.pool_exclude_categories is None  # the pool's default: memes, stablecoins, wrapped ... excluded

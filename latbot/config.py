@@ -184,12 +184,12 @@ DEFAULT_EXCHANGES: list[ExchangeConfig] = [
 # Runtime settings (public, user-tunable)
 # --------------------------------------------------------------------------- #
 # Bumped when a saved config.json needs a one-time upgrade (see Settings._migrate).
-CONFIG_VERSION = 8
+CONFIG_VERSION = 9
 BASIS_TOP_VENUES = ("binance", "okx", "bybit", "mexc", "gate", "bitget")
 _OLD_BASIS_VENUES = ["okx", "bybit", "htx", "kraken"]
 
-# owner (2026-11-08): "топ-50 - топ-100 монет в мире" - only coins that are not a tradable coin of their own
-# are left out (stablecoins, wrapped / bridged / staked receipts, tokenized gold / stocks, fan tokens)
+# the exclusions of the top-100 build of 2026-11-08 (memes were allowed there): kept only so the v9
+# migration recognises them and replaces them by the pool's full default (memes excluded)
 TOP_EXCLUDE_CATEGORIES: list[str] = [
     "stablecoins", "usd-stablecoin", "eur-stablecoin", "fiat-backed-stablecoin", "crypto-backed-stablecoin",
     "algorithmic-stablecoin", "yield-bearing-stablecoins", "synthetic-dollar", "bridged-stablecoins",
@@ -217,7 +217,7 @@ class Settings:
     # asset using market_type + quote_assets preference (USD-equivalents only,
     # so prices are comparable across exchanges without FX).
     watchlist: list[str] = field(
-        default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "LINK", "AVAX", "DOT", "LTC"]
+        default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "BNB", "ADA", "LINK", "AVAX", "DOT", "LTC"]
     )
     watchlist_auto: bool = False  # pick most liquid assets on watchlist_exchange at start
     watchlist_size: int = 15  # 3..20 when watchlist_auto
@@ -235,7 +235,7 @@ class Settings:
     # the most traded spot + perp venues (TokenInsight Q3 2026: volume and open interest); htx and kraken
     # stay available but are not default (spot taker 0.2 % / 0.4 % eats a carry)
     basis_venues: list[str] = field(default_factory=lambda: list(BASIS_TOP_VENUES))
-    basis_assets: list[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "DOGE"])  # [] = the pool
+    basis_assets: list[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "BNB"])  # [] = the pool
     basis_top_n: int = 100  # with basis_assets empty: the first N coins of the pool (market-cap order)
     basis_notional_quote: float = 1000.0  # virtual size of each leg (quote currency)
     basis_mode: str = "both"  # what opens a pair: fut_upper | spot_lower | any | both
@@ -506,6 +506,20 @@ class Settings:
             if float(data.get("min_target_volume_quote", 100_000.0)) == 100_000.0:
                 data["min_target_volume_quote"] = 500_000.0
             data["min_net_pct_show"] = 0.1
+        if version < 9:
+            # owner: never a meme coin.  The top-100 build excluded only non-coins; memes go out again
+            for key in ("watchlist", "basis_assets"):  # the old default lists carried DOGE
+                v = data.get(key)
+                if isinstance(v, list) and "DOGE" in [str(a).upper() for a in v]:
+                    data[key] = [a for a in v if str(a).upper() != "DOGE"]
+            cats = data.get("pool_exclude_categories")
+            if cats is not None:
+                if [str(c) for c in cats] == TOP_EXCLUDE_CATEGORIES:
+                    data["pool_exclude_categories"] = None  # the pool's full default
+                else:
+                    from .universe.pool import MEME_CATEGORIES
+
+                    data["pool_exclude_categories"] = list(dict.fromkeys([*map(str, cats), *MEME_CATEGORIES]))
         if version < 8:
             # owner: basis / funding carry on the venues that trade the most (an edited list stays)
             if [str(v).lower() for v in (data.get("basis_venues") or _OLD_BASIS_VENUES)] == _OLD_BASIS_VENUES:
@@ -702,7 +716,8 @@ def _exchange_from_dict(x: dict[str, Any]) -> ExchangeConfig:
 def _top100_settings() -> dict[str, Any]:
     """The owner's universe: the top-100 coins by market cap for the whole bot (latency + basis)."""
     return {
-        "pool_max_assets": TOP_N, "pool_stability_filters": False, "pool_exclude_categories": list(TOP_EXCLUDE_CATEGORIES),
+        # None = the pool's default exclusions: memes too (owner 2026-11-09: "не брал мем коины")
+        "pool_max_assets": TOP_N, "pool_stability_filters": False, "pool_exclude_categories": None,
         # ~25 of the top 100 are stablecoins / tokenized assets: 100 TRADABLE coins reach about rank 140
         "pool_min_market_cap_usd": 1e8, "pool_min_volume_24h_usd": 5e6,
         "pool_max_abs_change_24h_pct": 100.0, "pool_max_abs_change_7d_pct": 1000.0,

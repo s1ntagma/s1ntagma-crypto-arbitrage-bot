@@ -50,14 +50,15 @@ SYMBOL_MAP: dict[str, str] = {"XBT": "BTC", "XDG": "DOGE"}
 # Every CoinGecko category id excluded by default (same ids as the groups in
 # data/fallback_pool.json "exclude_categories"; verified against
 # /coins/categories/list on 2026-10-08).
-DEFAULT_EXCLUDE_CATEGORIES: tuple[str, ...] = (
-    # meme
+MEME_CATEGORIES: tuple[str, ...] = (
     "meme-token", "solana-meme-coins", "base-meme-coins", "bitcoin-meme", "sui-meme", "ton-meme-coins",
     "tron-meme", "chinese-meme", "ai-meme-coins", "tiktok-meme", "politifi", "trump-affiliated-tokens",
     "parody-meme-coins", "celebrity-themed-coins", "elon-musk-inspired-coins", "dog-themed-coins",
     "cat-themed-coins", "frog-themed-coins", "four-meme-ecosystem", "pump-fun", "pump-fun-creator",
     "gmci-meme-index", "desci-meme", "ip-meme", "country-themed-meme-coins", "4chan-themed", "zoo-themed",
     "mascot-themed", "sticker-themed-coin",
+)
+DEFAULT_EXCLUDE_CATEGORIES: tuple[str, ...] = MEME_CATEGORIES + (
     # stablecoins
     "stablecoins", "usd-stablecoin", "eur-stablecoin", "fiat-backed-stablecoin", "crypto-backed-stablecoin",
     "algorithmic-stablecoin", "yield-bearing-stablecoins", "synthetic-dollar", "bridged-stablecoins",
@@ -1151,6 +1152,6 @@ class AssetPool(PollingCollector):
 
 
 __all__ = [
-    "AssetPool", "COINGECKO_MARKETS_URL", "DEFAULT_EXCLUDE_CATEGORIES", "DEFAULT_LIVE_CATEGORIES", "FALLBACK_PATH",
+    "AssetPool", "COINGECKO_MARKETS_URL", "DEFAULT_EXCLUDE_CATEGORIES", "MEME_CATEGORIES", "DEFAULT_LIVE_CATEGORIES", "FALLBACK_PATH",
     "POOL_DEFAULTS", "PoolAsset", "SYMBOL_MAP", "jumpiness", "load_fallback", "normalise_asset",
 ]

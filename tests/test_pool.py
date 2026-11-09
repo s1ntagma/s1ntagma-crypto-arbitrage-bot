@@ -567,3 +567,19 @@ async def test_top_coins_mode_skips_stability_funding_and_spike_steps():
     await pool.poll_once()
     assert pool.contains("SOL") and pool.contains("XRP")  # no stability data / jumpy / 4 h funding: all in
     assert any("топ-монеты по капитализации" in r for r in pool.get("SOL").reasons)
+
+
+async def test_top_100_mode_still_excludes_meme_coins():
+    """Owner (2026-11-09): "самое главное чтоб ты не брал мем коины" - top 100, but never a meme coin."""
+    from latbot.config import Settings, _top100_settings
+
+    top = {k: v for k, v in _top100_settings().items() if k.startswith("pool_")}
+    pool = make_pool(make_settings(**top), http=FakeHttp(), api_key="k", listings_fn=lambda: LISTINGS,
+                     stability_fn=research_stability)
+    await pool.poll_once()
+    assert not pool.contains("DOGE") and not pool.contains("PEPE") and not pool.contains("1000PEPE")
+    assert "мем-монета" in " | ".join(pool.get("DOGE").reasons)
+    assert pool.contains("BTC") and pool.contains("SOL")
+    # an owner config of the top-100 build (memes were allowed there) moves to memes excluded
+    old = Settings.from_dict({"config_version": 8, "pool_exclude_categories": ["stablecoins", "wrapped-tokens"]})
+    assert old.pool_exclude_categories is None or "meme-token" in old.pool_exclude_categories
