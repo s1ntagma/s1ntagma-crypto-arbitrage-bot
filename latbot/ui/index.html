@@ -339,6 +339,30 @@
           <table class="table table-compact"><tbody id="carry-stats"></tbody></table>
         </div>
       </div>
+      <div class="diag-grid">
+        <div class="diag-block">
+          <h3 class="diag-title">CROSS-VENUE FUNDING · long perp where funding is low, short where it is high</h3>
+          <table class="table table-compact"><tbody id="xfund-stats"></tbody></table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">CROSS-VENUE FUNDING · best pairs now (after fees, spreads and the price gap)</h3>
+        <div class="table-wrap">
+          <table class="table" id="xfund-cands-table">
+            <thead><tr><th>Asset</th><th>Long (low funding)</th><th>Short (high funding)</th><th class="num">Difference / day</th><th class="num">Funding 72 h</th><th class="num">Fees 4 legs</th><th class="num">Crossing</th><th class="num">Edge</th><th>Confirmed</th></tr></thead>
+            <tbody id="xfund-cands"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">CROSS-VENUE FUNDING · virtual pairs</h3>
+        <div class="table-wrap">
+          <table class="table" id="xfund-trades-table">
+            <thead><tr><th>Signal</th><th>Asset</th><th>Long / short</th><th>Status</th><th class="num">Edge at entry</th><th class="num">Capital</th><th class="num">Funding</th><th class="num">Fees</th><th class="num">Net</th><th>Notes</th></tr></thead>
+            <tbody id="xfund-trades"></tbody>
+          </table>
+        </div>
+      </div>
       <details class="basis-settings">
         <summary>Settings (config.json: basis_*, carry_*)</summary>
         <table class="table table-compact"><tbody id="basis-settings"></tbody></table>

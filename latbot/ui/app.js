@@ -1619,7 +1619,10 @@
         ['Net P&L', usd(s.net_pnl_quote)], ['of it incidents', usd(s.incident_pnl_quote)],
         ['Max adverse basis move', pct4(s.max_adverse_basis_pct)],
         ['Funding unknown (flagged)', String(s.funding_unknown || 0)],
-        ['Rejected moments: stale / timestamps apart', (s.stale_evals || 0) + ' / ' + (s.skew_evals || 0)]
+        ['Rejected book updates: stale / timestamps apart',
+          (s.stale_share == null ? '—' : (num(s.stale_share) * 100).toFixed(1) + '%') + ' / ' +
+          (s.skew_share == null ? '—' : (num(s.skew_share) * 100).toFixed(1) + '%') +
+          ' of ' + (s.evaluations || 0).toLocaleString('en-US')]
       ]);
       var cs = s.carry || {};
       kvRows($('carry-stats'), [
@@ -1633,6 +1636,38 @@
         ['Realized APR on capital (net, closed)', cs.realized_apr_pct == null ? '—' : num(cs.realized_apr_pct).toFixed(1) + '%'],
         ['Funding unknown (restart gaps)', String(cs.funding_unknown || 0)]
       ]);
+      var xf = d.xfund || {}, xs = xf.stats || {};
+      kvRows($('xfund-stats'), [
+        ['Pairs open / closed / incidents', (xs.open || 0) + ' / ' + (xs.closed || 0) + ' / ' + (xs.incidents || 0)],
+        ['Capital (margin on both venues, ' + (xs.leverage || '?') + 'x)', usd(xs.open_capital_quote)],
+        ['Funding collected: total / open pairs', usd(xs.funding_quote) + ' / ' + usd(xs.funding_open_quote)],
+        ['Funding APR on capital (open)', xs.funding_apr_open_pct == null ? '—' : num(xs.funding_apr_open_pct).toFixed(1) + '%'],
+        ['Closed: fees / net', usd(-(xs.fees_quote || 0)) + ' / ' + usd(xs.net_quote)],
+        ['Realized APR on capital (net, closed)', xs.realized_apr_pct == null ? '—' : num(xs.realized_apr_pct).toFixed(1) + '%'],
+        ['Liquidations / entries refused on the latest book', (xs.liquidations || 0) + ' / ' + (xs.revalidation_failed || 0)]
+      ]);
+      var xc = $('xfund-cands'); clear(xc);
+      (xf.candidates || []).forEach(function (c) {
+        xc.appendChild(h('tr', null,
+          h('td', { text: c.asset }), h('td', { text: c.long }), h('td', { text: c.short }),
+          h('td', { class: 'num', text: pct4(c.diff_day_pct) }), h('td', { class: 'num', text: pct4(c.funding_pct) }),
+          h('td', { class: 'num', text: pct4(c.fees_pct) }), h('td', { class: 'num', text: c.cross_pct == null ? 'book not fresh' : pct4(c.cross_pct) }),
+          h('td', { class: 'num ' + (num(c.edge_pct == null ? c.edge_est_pct : c.edge_pct) >= 0 ? 'pos' : 'neg'),
+            text: c.edge_pct == null ? '≤ ' + pct4(c.edge_est_pct) : pct4(c.edge_pct) }),
+          h('td', { text: c.confirmed ? 'yes' : 'not yet' })));
+      });
+      var xt = $('xfund-trades'); clear(xt);
+      (xf.trades || []).forEach(function (t) {
+        var notes = [t.incident, t.exit_reason, t.funding_unknown ? 'funding unknown' : '',
+          t.liq_buffer_pct == null ? '' : 'closest to liquidation ' + num(t.liq_buffer_pct).toFixed(1) + '%'].filter(Boolean).join(' · ');
+        xt.appendChild(h('tr', null,
+          h('td', { class: 'mono', text: fmtTime(t.signal_ts) }), h('td', { text: t.asset }),
+          h('td', { text: t.long_venue + ' / ' + t.short_venue }), h('td', { text: t.status + (t.partial ? ' (partial)' : '') }),
+          h('td', { class: 'num', text: pct4(t.edge_pct) }), h('td', { class: 'num', text: usd(t.capital_quote) }),
+          h('td', { class: 'num', text: usd(t.funding_quote) }), h('td', { class: 'num', text: usd(-(t.fees_quote || 0)) }),
+          h('td', { class: 'num ' + (num(t.net_quote) >= 0 ? 'pos' : 'neg'), text: usd(t.net_quote) }),
+          h('td', { class: 'wrap muted', text: notes })));
+      });
       var cfg = d.settings || {};
       kvRows($('basis-settings'), Object.keys(cfg).map(function (k) { return [k.replace('basis_', ''), String(cfg[k])]; }));
       var pb = $('basis-pairs'); clear(pb);

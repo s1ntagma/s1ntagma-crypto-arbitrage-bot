@@ -894,6 +894,9 @@ class BasisScanner:
             "max_adverse_basis_pct": max((t.max_adverse_pct for t in hedged), default=None),
             "avg_max_adverse_basis_pct": avg(t.max_adverse_pct for t in closed),
             "stale_evals": c["stale_evals"], "skew_evals": c["skew_evals"], "evaluations": c["evaluations"],
+            # counted per book update (evaluation), not per moment: the share is what matters
+            "stale_share": c["stale_evals"] / c["evaluations"] if c["evaluations"] else None,
+            "skew_share": c["skew_evals"] / c["evaluations"] if c["evaluations"] else None,
             "mode": self.mode,
             "carry": self._carry_stats(),
         }

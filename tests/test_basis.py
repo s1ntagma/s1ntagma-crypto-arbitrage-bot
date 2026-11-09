@@ -367,3 +367,14 @@ def test_owner_config_moves_to_the_top_100():
     assert s.pool_max_assets == 100 and s.pool_stability_filters is False and s.basis_assets == []
     assert s.basis_top_n == 100 and s.ws_assets == 50
     assert s.pool_exclude_categories is None  # the pool's default: memes, stablecoins, wrapped ... excluded
+
+
+def test_rejections_are_reported_as_a_share_of_book_updates():
+    env = Env()
+    env.sc.on_book("okx", "spot", book(env.clock, "okx", "spot", 99.99, 100.01))
+    env.clock.advance(3.0)
+    env.sc.on_book("okx", "perp", book(env.clock, "okx", "perp", 100.04, 100.06))  # spot is 3 s old: stale
+    env.push((99.99, 100.01), (100.04, 100.06))  # both fresh: ok
+    st = env.sc.stats()
+    assert st["evaluations"] == 4 and st["stale_evals"] == 1
+    assert st["stale_share"] == pytest.approx(0.25) and st["skew_share"] == 0

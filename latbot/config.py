@@ -266,6 +266,16 @@ class Settings:
     carry_history_n: int = 21  # settled funding rates from the exchange behind the rate estimate (7 days at 8 h)
     carry_min_positive_share: float = 0.8  # entry: at least this share of them positive
     carry_exit_horizon_h: float = 24.0  # exit: only when holding this long at the turned rate costs more than leaving
+    # cross-venue funding arbitrage (virtual): long perp where funding is low, short perp where it is high
+    xfund_enabled: bool = True
+    xfund_notional_quote: float = 1000.0  # virtual size of each leg (quote currency)
+    xfund_horizon_h: float = 72.0  # the edge counts the funding difference over this many hours
+    xfund_min_edge_pct: float = 0.10  # enter when the difference beats 4 fees + crossing by this
+    xfund_max_positions: int = 5
+    xfund_leverage: float = 2.0  # margin per leg = notional / leverage
+    xfund_liq_guard_pct: float = 5.0  # close when a leg is this close (%) to its liquidation price
+    xfund_exit_horizon_h: float = 24.0  # a turned difference closes only when holding this long costs more
+    xfund_max_hold_h: float = 336.0
     exchanges: list[ExchangeConfig] = field(default_factory=lambda: [ExchangeConfig(**asdict(e)) for e in DEFAULT_EXCHANGES])
     # ---- coverage: WS for the core watchlist, REST ticker polling for breadth --
     ws_assets: int = 25  # WebSocket streams per exchange: the whole Phase 3 pool (REST polling is 1-2 s slower)

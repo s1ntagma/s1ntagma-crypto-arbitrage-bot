@@ -78,6 +78,14 @@ CREATE TABLE IF NOT EXISTS basis_trades (
 );
 CREATE INDEX IF NOT EXISTS ix_basis_signal ON basis_trades(opened_ts);
 
+CREATE TABLE IF NOT EXISTS xfund_trades (
+    id TEXT PRIMARY KEY,
+    opened_ts REAL,
+    closed_ts REAL,
+    json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_xfund_signal ON xfund_trades(opened_ts);
+
 CREATE TABLE IF NOT EXISTS funding_samples (
     ts REAL NOT NULL,
     venue TEXT NOT NULL,
@@ -540,6 +548,18 @@ class Database:
                 "ON CONFLICT(id) DO UPDATE SET opened_ts=excluded.opened_ts, closed_ts=excluded.closed_ts, json=excluded.json",
                 (str(row["id"]), row.get("signal_ts"), row.get("closed_ts"), json.dumps(row, ensure_ascii=False, default=str)),
             )
+
+    def save_xfund_trade(self, row: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO xfund_trades (id, opened_ts, closed_ts, json) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET opened_ts=excluded.opened_ts, closed_ts=excluded.closed_ts, json=excluded.json",
+                (str(row["id"]), row.get("signal_ts"), row.get("closed_ts"), json.dumps(row, ensure_ascii=False, default=str)),
+            )
+
+    def list_xfund_trades(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Newest first."""
+        return self._json_rows("SELECT json FROM xfund_trades ORDER BY opened_ts DESC LIMIT ?", (int(limit),))
 
     def save_funding_sample(self, ts: float, venue: str, asset: str, rate: float, interval_h: float | None) -> None:
         with self._lock:

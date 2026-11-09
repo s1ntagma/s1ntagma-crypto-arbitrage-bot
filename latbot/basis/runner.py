@@ -18,6 +18,7 @@ from ..config import ExchangeConfig, Settings
 from ..events import EventBus
 from ..models import BookLevel, ExchangeRole, OrderBook
 from .scanner import BasisScanner
+from .xfund import FundingArb
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class BasisRunner:
         self._clock = clock
         self.bus = EventBus()  # private: these books never reach the latency pipeline
         self.scanner = BasisScanner(settings, clock, db=db)
+        self.xfund = FundingArb(self.scanner, settings, clock, db=db)  # cross-venue funding on the same data
         self._factory = leg_factory or self._default_factory
         self.legs: dict[str, dict[str, Any]] = {}  # venue -> {"spot": adapter, "perp": adapter}
         self._route: dict[str, tuple[str, str]] = {}  # adapter name -> (venue, leg)
@@ -217,6 +219,7 @@ class BasisRunner:
         while True:
             try:
                 self.scanner.tick()
+                self.xfund.tick()
             except Exception:  # noqa: BLE001
                 log.exception("basis tick failed")
             await asyncio.sleep(_TICK_S)
@@ -228,8 +231,9 @@ class BasisRunner:
         n = sum(c for c in counts if isinstance(c, int))
         try:
             self.scanner.carry_review()  # funding carry decides on fresh rates
+            self.xfund.review()  # so does the cross-venue funding arbitrage
         except Exception:  # noqa: BLE001
-            log.exception("basis: carry review failed")
+            log.exception("basis: carry / xfund review failed")
         return n
 
     async def _poll_venue_funding(self, venue: str, perp: Any) -> int:
@@ -309,6 +313,8 @@ class BasisRunner:
             "pairs": pairs,
             "stats": self.scanner.stats(),
             "trades": self.scanner.trades(200),
+            "xfund": {"stats": self.xfund.stats(), "candidates": self.xfund.candidates,
+                      "trades": self.xfund.trades(100)},
             "history": {f"{p['venue']}:{p['asset']}": self.scanner.history(p["venue"], p["asset"], history_limit)
                         for p in pairs},
             "settings": {k: getattr(self._settings, k) for k in (
@@ -318,7 +324,9 @@ class BasisRunner:
                 "carry_notional_quote", "carry_horizon_h", "carry_min_edge_pct", "carry_exit_rate",
                 "carry_confirm_polls", "carry_max_hold_h", "carry_max_positions", "carry_leverage",
                 "carry_maint_margin", "carry_liq_guard_pct", "carry_history_n", "carry_min_positive_share",
-                "carry_exit_horizon_h")},
+                "carry_exit_horizon_h", "xfund_enabled", "xfund_notional_quote", "xfund_horizon_h",
+                "xfund_min_edge_pct", "xfund_max_positions", "xfund_leverage", "xfund_liq_guard_pct",
+                "xfund_exit_horizon_h", "xfund_max_hold_h")},
         }
 
 
