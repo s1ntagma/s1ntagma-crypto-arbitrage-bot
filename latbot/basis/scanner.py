@@ -135,6 +135,10 @@ class BasisTrade:
     # maker execution: one resting limit order {leg: {side, px, qty, posted_mono}} (see _check_resting)
     orders: dict[str, dict[str, float]] = field(default_factory=dict)
     maker_fills: int = 0
+    # an excess leg waiting for a fresh book to be unwound on: [{leg, qty, since}] (never priced at the entry)
+    pending_unwind: list[dict[str, Any]] = field(default_factory=list)
+    deferred_status: str = ""  # the incident status / reason applied once the unwinds are resolved
+    deferred_close: str = ""
 
     @property
     def hedged(self) -> bool:
@@ -602,6 +606,10 @@ class BasisScanner:
                 self._adverse(t, p, now)
                 if t.trigger == CARRY:
                     self._carry_risk(t, p, now)
+            if t.pending_unwind:
+                self._run_unwinds(t, p, now)
+            if t.status not in _ACTIVE:
+                continue
             if t.orders:
                 self._check_resting(t, p, now)
             elif t.due:
@@ -729,9 +737,12 @@ class BasisScanner:
                              "ts": self._clock.wall(), "maker": maker})
 
     def _run_due(self, t: BasisTrade, p: _Pair, now: float) -> None:
+        wait = self._s("fill_wait_s", 30.0)
         for leg in LEGS:
             if t.done.get(leg) or now < t.due.get(leg, float("inf")):
                 continue
+            if self._leg_book(p, leg, now) is None and now - t.due[leg] < wait:
+                continue  # the order is out; its price shows on the first fresh book (within fill_wait_s)
             t.done[leg] = True
             if t.phase == "entry":
                 side = Side.BUY if leg == "spot" else Side.SELL
@@ -770,7 +781,12 @@ class BasisScanner:
             t.status = "one_leg" if (s > _EPS or f > _EPS) else "no_fill"
             t.incident = ("only the spot leg filled" if s > _EPS else "only the perp leg filled") if t.status == "one_leg" \
                 else "no leg filled (no fresh book or no depth within the slippage cap)"
+            status = t.status
             self._unwind(t, p, now)
+            if t.pending_unwind:  # the filled leg has no fresh book either: its unwind waits for a price
+                t.deferred_status, t.deferred_close = status, "entry incident: " + t.incident
+                t.status, t.phase = "closing", "unwind"
+                return
             self._close(t, "entry incident: " + t.incident)
             return
         notes = []
@@ -804,14 +820,34 @@ class BasisScanner:
             self._unwind_leg(t, p, "perp", t.perp_qty, now)
         t.spot_qty = t.perp_qty = 0.0
 
-    def _unwind_leg(self, t: BasisTrade, p: _Pair, leg: str, qty: float, now: float) -> None:
-        """Close an unhedged excess at once on the leg's current book (the whole side, no cap)."""
+    def _run_unwinds(self, t: BasisTrade, p: _Pair, now: float) -> None:
+        wait = self._s("fill_wait_s", 30.0)
+        left = []
+        for u in t.pending_unwind:
+            if self._leg_book(p, u["leg"], now) is not None:
+                self._unwind_leg(t, p, u["leg"], u["qty"], now, wait=False)
+            elif now - u["since"] >= wait:
+                t.unwind_unknown = True  # never seen a price: the result of this trade is unknown
+            else:
+                left.append(u)
+        changed = len(left) != len(t.pending_unwind)
+        t.pending_unwind = left
+        if not left and t.phase == "unwind":
+            t.status = t.deferred_status or "one_leg"
+            self._close(t, t.deferred_close)
+        if changed:
+            self._save(t)
+
+    def _unwind_leg(self, t: BasisTrade, p: _Pair, leg: str, qty: float, now: float, wait: bool = True) -> None:
+        """Close an unhedged excess on the leg's book (the whole side, no cap).  Without a fresh book the
+        unwind waits for one (``fill_wait_s``); the entry price is never used as a stand-in."""
         side = Side.SELL if leg == "spot" else Side.BUY
         b = self._leg_book(p, leg, now)
         if b is None:
-            t.unwind_unknown = True  # no fresh book: the loss of this excess is not known
-            entry_px = t.entry_spot_vwap if leg == "spot" else t.entry_perp_vwap
-            self._book_cash(t, p, leg, side, qty, entry_px, "unwind")
+            if wait and self._s("fill_wait_s", 30.0) > 0:
+                t.pending_unwind.append({"leg": leg, "qty": qty, "since": now})
+            else:
+                t.unwind_unknown = True  # no price: the loss of this excess is not known
             return
         levels = b.bids if side == Side.SELL else b.asks
         w = walk_book(levels, base_amount=qty, side=side)
@@ -872,10 +908,16 @@ class BasisScanner:
     def _close(self, t: BasisTrade, reason: str) -> None:
         t.closed_ts = self._clock.wall()
         t.exit_reason = reason
-        t.gross_quote = t.cash_quote
-        t.net_quote = t.cash_quote - t.fees_quote + t.funding_quote
-        base = t.target_qty * (t.entry_spot_vwap or 0.0)
-        t.net_pct = t.net_quote / base * 100.0 if base > 0 else None
+        if t.pending_unwind:
+            t.pending_unwind, t.unwind_unknown = [], True
+        if t.unwind_unknown:
+            # an excess leg was never priced: the result is unknown and stays out of every total
+            t.gross_quote = t.net_quote = t.net_pct = None
+        else:
+            t.gross_quote = t.cash_quote
+            t.net_quote = t.cash_quote - t.fees_quote + t.funding_quote
+            base = t.target_qty * (t.entry_spot_vwap or 0.0)
+            t.net_pct = t.net_quote / base * 100.0 if base > 0 else None
         if t.status in _ACTIVE:
             t.status = "closed"
         t.due, t.done = {}, {}
@@ -960,7 +1002,12 @@ class BasisScanner:
                 t = BasisTrade(**{k: v for k, v in r.items() if k in known})
             except TypeError:
                 continue
-            if t.trigger == CARRY and t.status in ("open", "closing"):
+            if t.status in _ACTIVE and (t.pending_unwind or t.phase == "unwind"):
+                t.pending_unwind, t.unwind_unknown = [], True  # an unwind cut by the restart: unknown
+                t.status = t.deferred_status or "abandoned"
+                self._close(t, t.deferred_close or "process restarted: outcome unknown")
+                self._save(t)
+            elif t.trigger == CARRY and t.status in ("open", "closing"):
                 # a carry position lives for days: it resumes; funding while the process was down is not known
                 t.funding_unknown = True
                 t.orders = {}  # a resting order of the previous run is gone
@@ -1036,6 +1083,7 @@ class BasisScanner:
             "net_pnl_quote": sum(t.net_quote or 0.0 for t in done),
             "incident_pnl_quote": sum(t.net_quote or 0.0 for t in incidents),
             "funding_unknown": sum(1 for t in hedged if t.funding_unknown),
+            "unknown": sum(1 for t in trades if t.unwind_unknown and t.status not in _ACTIVE),
             "max_adverse_basis_pct": max((t.max_adverse_pct for t in hedged), default=None),
             "avg_max_adverse_basis_pct": avg(t.max_adverse_pct for t in closed),
             "stale_evals": c["stale_evals"], "skew_evals": c["skew_evals"], "evaluations": c["evaluations"],

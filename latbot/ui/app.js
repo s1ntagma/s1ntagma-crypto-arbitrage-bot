@@ -1667,13 +1667,15 @@
         ['Short: trades / wins / P&L', ((ms.short || {}).closed || 0) + ' / ' + ((ms.short || {}).wins || 0) + ' / ' + usd((ms.short || {}).pnl_quote)],
         ['Max drawdown', usd(-(ms.max_drawdown_quote || 0))],
         ['Exits', Object.keys(ms.exits || {}).map(function (k) { return k + ': ' + ms.exits[k]; }).join(', ') || '—'],
-        ['No data / no fill / abandoned', (ms.no_data || 0) + ' / ' + (ms.no_fill || 0) + ' / ' + (ms.abandoned || 0)]
+        ['No data / no fill / abandoned', (ms.no_data || 0) + ' / ' + (ms.no_fill || 0) + ' / ' + (ms.abandoned || 0)],
+        ['Fees paid on no-data trades (result unknown)', usd(-(ms.no_data_cost_quote || 0))]
       ]);
       kvRows($('mom-status'), (mo.status || []).map(function (st) {
         var warm = st.move_window_pct == null ? ' (warming up: ' + Math.round(num(st.series_s) / 60) + ' min of data)' : '';
         return [st.asset + (st.venue ? ' @ ' + st.venue : ''),
           '15 m ' + pct4(st.move_window_pct) + ' · 1 h ' + pct4(st.move_trend_pct) + warm +
-          (num(st.cooldown_s) > 0 ? ' · cooldown ' + Math.round(num(st.cooldown_s) / 60) + ' min' : '')];
+          (num(st.cooldown_s) > 0 ? ' · cooldown ' + Math.round(num(st.cooldown_s) / 60) + ' min' : '') +
+          ' · venues ready ' + (st.warm_venues || 0) + ' of ' + (st.venues || 0)];
       }));
       var mt = $('mom-trades'); clear(mt);
       (mo.trades || []).forEach(function (t) {
@@ -1698,6 +1700,7 @@
         ['Closed: fees / net', usd(-(xs.fees_quote || 0)) + ' / ' + usd(xs.net_quote)],
         ['Realized APR on capital (net, closed)', xs.realized_apr_pct == null ? '—' : num(xs.realized_apr_pct).toFixed(1) + '%'],
         ['Liquidations / entries refused on the latest book', (xs.liquidations || 0) + ' / ' + (xs.revalidation_failed || 0)],
+        ['Result unknown (a leg never got a price)', String(xs.unknown || 0)],
         ['Pairs priced on fresh books at the last funding poll', (xs.edge_executable || 0) + ' of ' + (xs.edge_pairs || 0)],
         ['Orders: ' + (xs.exec === 'maker' ? 'limit (maker) + market hedge' : 'market (taker)'),
           'limit fills ' + (xs.maker_fills || 0) + ' · hedges ' + (xs.taker_hedges || 0) + ' · not filled ' + (xs.maker_unfilled || 0)]
@@ -1715,6 +1718,7 @@
       var xt = $('xfund-trades'); clear(xt);
       (xf.trades || []).forEach(function (t) {
         var notes = [t.incident, t.exit_reason, t.funding_unknown ? 'funding unknown' : '',
+          t.unwind_unknown ? 'unwind price unknown: result not counted' : '',
           t.liq_buffer_pct == null ? '' : 'closest to liquidation ' + num(t.liq_buffer_pct).toFixed(1) + '%'].filter(Boolean).join(' · ');
         xt.appendChild(h('tr', null,
           h('td', { class: 'mono', text: fmtTime(t.signal_ts) }), h('td', { text: t.asset }),

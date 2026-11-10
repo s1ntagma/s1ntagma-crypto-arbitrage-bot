@@ -475,3 +475,33 @@ def test_a_stale_book_still_gives_no_carry_edge():
     apart(c, gap=2.5)  # the spot book is older than basis_max_age_ms
     assert c.sc.pairs()[0].get("carry_edge_pct") is None
     assert c.sc.stats()["carry"]["edge_evals"] == 0
+
+
+def test_a_carry_leg_with_a_stale_book_fills_on_the_first_fresh_book():
+    c = Carry(fill_wait_s=30.0)
+    c.poll({"BTC": 0.0005})
+    c.poll({"BTC": 0.0005})  # entry scheduled, both legs by market
+    c.clock.advance(2.5)
+    c.sc.on_book("okx", "spot", book(c.clock, "okx", "spot", *SPOT))  # the perp book stays silent
+    c.sc.tick()
+    t = c.carry()[0]
+    assert t["status"] == "pending" and t["spot_qty"] > 0 and t["perp_qty"] == 0
+    c.clock.advance(4.0)
+    c.push(perp=(100.10, 100.12))
+    c.sc.tick()
+    t = c.carry()[0]
+    assert t["status"] == "open" and t["hedged"] and t["entry_perp_vwap"] == 100.10 and t["incident"] == ""
+
+
+def test_a_carry_leg_never_seen_is_an_incident_with_an_unknown_result_not_a_flat_one():
+    c = Carry(fill_wait_s=30.0)
+    c.poll({"BTC": 0.0005})
+    c.poll({"BTC": 0.0005})
+    c.clock.advance(2.5)  # the perp book is silent: stale when its leg is due
+    c.sc.on_book("okx", "spot", book(c.clock, "okx", "spot", *SPOT))
+    c.sc.tick()
+    for _ in range(70):
+        c.clock.advance(1.0)
+        c.sc.tick()  # nothing arrives any more: the hedge wait, then the unwind wait, run out
+    t = c.carry()[0]
+    assert t["status"] == "one_leg" and t["unwind_unknown"] and t["net_quote"] is None

@@ -19,7 +19,7 @@ def settings(**over) -> Settings:
                 basis_min_convergence_pct=0.05, basis_max_hold_s=3600.0, basis_latency_ms=300.0,
                 basis_max_skew_ms=500.0, basis_max_age_ms=2000.0, basis_max_slippage_pct=0.3,
                 basis_train_all_signals=False, carry_exec="taker", xfund_exec="taker",
-                basis_perp_venues=[])
+                basis_perp_venues=[], fill_wait_s=0.0)
     base.update(over)
     return Settings(**base)
 

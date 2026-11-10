@@ -84,6 +84,10 @@ class XFundTrade:
     done: dict[str, bool] = field(default_factory=dict)
     order: dict[str, Any] = field(default_factory=dict)  # maker mode: {leg, side, px, qty, posted_mono}
     maker_fills: int = 0
+    pending_unwind: list[dict[str, Any]] = field(default_factory=list)  # [{leg, qty, since}] waiting for a book
+    unwind_unknown: bool = False  # an excess leg was never priced: the result is unknown
+    deferred_status: str = ""
+    deferred_close: str = ""
 
     @property
     def hedged(self) -> bool:
@@ -287,6 +291,10 @@ class FundingArb:
         for t in list(self._trades):
             if t.status not in _ACTIVE:
                 continue
+            if t.pending_unwind:
+                self._run_unwinds(t, now)
+                if t.status not in _ACTIVE:
+                    continue
             if t.order:
                 if t.status == "closing":
                     self._risk(t, now)  # a leg near liquidation while the exit order rests: out by market
@@ -394,11 +402,14 @@ class FundingArb:
             self._schedule_exit(t, now, t.exit_reason)
 
     def _run_due(self, t: XFundTrade, now: float) -> None:
+        wait = self._f("fill_wait_s", 30.0)
         for leg in LEGS:
             if t.done.get(leg) or now < t.due.get(leg, float("inf")):
                 continue
-            t.done[leg] = True
             p = self._pair(t, leg)
+            if (p is None or self.sc._leg_book(p, "perp", now) is None) and now - t.due[leg] < wait:
+                continue  # the order is out; its price shows on the first fresh book (within fill_wait_s)
+            t.done[leg] = True
             if p is None:
                 continue
             if t.phase == "entry":
@@ -423,14 +434,40 @@ class FundingArb:
             self._finish_exit(t, now)
         self._save(t)
 
-    def _unwind(self, t: XFundTrade, leg: str, qty: float, now: float) -> None:
+    def _unwind(self, t: XFundTrade, leg: str, qty: float, now: float, wait: bool = True) -> None:
+        """Close an unhedged excess by market.  Without a fresh book it waits for one (``fill_wait_s``);
+        the entry price is never used as a stand-in."""
         p = self._pair(t, leg)
         side = Side.SELL if leg == "long" else Side.BUY
-        q, px = self.sc._fill(p, "perp", side, qty, now) if p is not None else (0.0, 0.0)
-        if q <= 0:
-            px = t.entry_px[leg]  # no fresh book: the excess is booked flat and flagged
-            t.incident = (t.incident + "; " if t.incident else "") + f"{leg} excess unwound without a fresh price"
-        self._book(t, leg, side, qty, px, "unwind")
+        b = self.sc._leg_book(p, "perp", now) if p is not None else None
+        if b is None:
+            if wait and self._f("fill_wait_s", 30.0) > 0:
+                t.pending_unwind.append({"leg": leg, "qty": qty, "since": now})
+            else:
+                t.unwind_unknown = True
+            return
+        levels = b.bids if side == Side.SELL else b.asks
+        w = walk_book(levels, base_amount=qty, side=side)  # the whole side, no slippage cap: it must go
+        self._book(t, leg, side, qty, w.vwap or levels[0].price, "unwind")
+
+    def _run_unwinds(self, t: XFundTrade, now: float) -> None:
+        wait = self._f("fill_wait_s", 30.0)
+        left = []
+        for u in t.pending_unwind:
+            p = self._pair(t, u["leg"])
+            if p is not None and self.sc._leg_book(p, "perp", now) is not None:
+                self._unwind(t, u["leg"], u["qty"], now, wait=False)
+            elif now - u["since"] >= wait:
+                t.unwind_unknown = True
+            else:
+                left.append(u)
+        changed = len(left) != len(t.pending_unwind)
+        t.pending_unwind = left
+        if not left and t.phase == "unwind":
+            t.status = t.deferred_status or "one_leg"
+            self._close(t, t.deferred_close)
+        if changed:
+            self._save(t)
 
     def _finish_entry(self, t: XFundTrade, now: float) -> None:
         ql, qs = t.qty["long"], t.qty["short"]
@@ -439,10 +476,15 @@ class FundingArb:
             t.status = "one_leg" if (ql > _EPS or qs > _EPS) else "no_fill"
             t.incident = ("only the long leg filled" if ql > _EPS else "only the short leg filled") \
                 if t.status == "one_leg" else "no leg filled (no fresh book or no depth within the slippage cap)"
+            status = t.status
             for leg in LEGS:
                 if t.qty[leg] > _EPS:
                     self._unwind(t, leg, t.qty[leg], now)
                     t.qty[leg] = 0.0
+            if t.pending_unwind:  # the filled leg has no fresh book either: its unwind waits for a price
+                t.deferred_status, t.deferred_close = status, "entry incident: " + t.incident
+                t.status, t.phase = "closing", "unwind"
+                return
             self._close(t, "entry incident: " + t.incident)
             return
         for leg in LEGS:
@@ -486,8 +528,13 @@ class FundingArb:
     def _close(self, t: XFundTrade, reason: str) -> None:
         t.closed_ts = self._clock.wall()
         t.exit_reason = reason
-        t.net_quote = t.cash_quote - t.fees_quote + t.funding_quote
-        t.net_pct = t.net_quote / t.capital_quote * 100.0 if t.capital_quote > 0 else None
+        if t.pending_unwind:
+            t.pending_unwind, t.unwind_unknown = [], True
+        if t.unwind_unknown:  # an excess leg was never priced: unknown, out of every total
+            t.net_quote = t.net_pct = None
+        else:
+            t.net_quote = t.cash_quote - t.fees_quote + t.funding_quote
+            t.net_pct = t.net_quote / t.capital_quote * 100.0 if t.capital_quote > 0 else None
         if t.status in _ACTIVE:
             t.status = "closed"
         t.due, t.done = {}, {}
@@ -598,7 +645,11 @@ class FundingArb:
                 t = XFundTrade(**{k: v for k, v in r.items() if k in known})
             except TypeError:
                 continue
-            if t.status in ("open", "closing"):
+            if t.status in _ACTIVE and (t.pending_unwind or t.phase == "unwind"):
+                t.pending_unwind, t.unwind_unknown = [], True  # an unwind cut by the restart: unknown
+                t.status = t.deferred_status or "abandoned"
+                self._close(t, t.deferred_close or "process restarted: outcome unknown")
+            elif t.status in ("open", "closing"):
                 t.funding_unknown = True  # funding while the process was down is not counted
                 t.order = {}  # a resting order of the previous run is gone
                 if t.status == "closing":
@@ -636,6 +687,7 @@ class FundingArb:
             "net_quote": sum(t.net_quote or 0.0 for t in closed + incidents),
             "open_capital_quote": sum(t.capital_quote for t in live),
             "liquidations": sum(1 for t in ts if t.liquidated),
+            "unknown": sum(1 for t in ts if t.unwind_unknown and t.status not in _ACTIVE),
             "funding_unknown": sum(1 for t in live + closed if t.funding_unknown),
             "realized_apr_pct": apr(closed, lambda t: t.net_quote or 0.0),
             "funding_apr_open_pct": apr(live, lambda t: t.funding_quote),

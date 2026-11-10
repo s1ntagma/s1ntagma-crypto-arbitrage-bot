@@ -349,3 +349,68 @@ def test_training_pairs_are_off_by_default_and_for_the_owner_config():
     assert Settings().basis_train_all_signals is False
     assert Settings.from_dict({"config_version": 9, "basis_train_all_signals": True}).basis_train_all_signals is False
     assert Settings.from_dict({"config_version": 10, "basis_train_all_signals": True}).basis_train_all_signals is True
+
+
+# ---- a market order waits for the first fresh book (it was sent; we just could not see the price yet) --
+def one_book(x, venue, perp=PERP):
+    b = book(x.clock, venue, "perp", *perp)
+    b.symbol = "BTC/USDT:USDT"
+    x.sc.on_book(venue, "perp", b)
+
+
+def test_a_leg_whose_book_is_stale_fills_on_the_first_fresh_book():
+    x = X(fill_wait_s=30.0)
+    x.poll(RATES)
+    x.poll(RATES)
+    x.run(0.1)  # both legs sent
+    x.clock.advance(2.5)  # mexc silent: its book is stale when the legs are due
+    one_book(x, "okx")
+    x.xf.tick()
+    t = x.trades()[0]
+    assert t["status"] == "pending" and t["qty"]["long"] > 0 and t["qty"]["short"] == 0  # not an incident yet
+    x.clock.advance(3.0)
+    one_book(x, "okx")
+    one_book(x, "mexc", perp=(100.10, 100.12))  # the price it really got, 5 s later
+    x.xf.tick()
+    t = x.trades()[0]
+    assert t["status"] == "open" and t["hedged"] and t["entry_px"]["short"] == 100.10 and t["incident"] == ""
+
+
+def test_no_fresh_book_for_the_whole_wait_is_an_incident_and_the_unwind_waits_too():
+    x = X(fill_wait_s=30.0)
+    x.poll(RATES)
+    x.poll(RATES)
+    x.run(0.1)
+    x.clock.advance(2.5)  # mexc silent: stale when its leg is due
+    one_book(x, "okx")
+    x.xf.tick()  # the long fills, mexc gives nothing
+    for _ in range(32):
+        x.clock.advance(1.0)
+        x.xf.tick()  # no book from either venue any more
+    t = x.trades()[0]
+    assert t["status"] == "closing" and t["pending_unwind"]  # one leg: its unwind waits for a price
+    for _ in range(32):
+        x.clock.advance(1.0)
+        x.xf.tick()
+    t = x.trades()[0]
+    assert t["status"] == "one_leg" and t["unwind_unknown"] and t["net_quote"] is None  # never booked at the entry price
+    assert x.xf.stats()["unknown"] == 1 and x.xf.stats()["net_quote"] == 0
+
+
+def test_the_unwind_of_a_single_leg_uses_the_first_fresh_book():
+    x = X(fill_wait_s=30.0)
+    x.poll(RATES)
+    x.poll(RATES)
+    x.run(0.1)
+    x.clock.advance(2.5)  # mexc silent: stale when its leg is due
+    one_book(x, "okx")
+    x.xf.tick()
+    for _ in range(32):
+        x.clock.advance(1.0)
+        x.xf.tick()
+    one_book(x, "okx", perp=(99.50, 99.52))  # the long is sold 0.5 % lower: a real, known loss
+    x.xf.tick()
+    t = x.trades()[0]
+    q = 500 / 100.01
+    assert t["status"] == "one_leg" and not t["unwind_unknown"]
+    assert t["net_quote"] == pytest.approx(q * (99.50 - 100.02) - t["fees_quote"])
