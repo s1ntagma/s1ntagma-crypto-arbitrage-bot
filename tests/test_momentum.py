@@ -159,3 +159,37 @@ def test_off_means_nothing_happens():
     warm(m)
     m.path(100.0, 100.8, 600)
     assert m.trades() == []
+
+
+def test_a_silent_venue_does_not_reset_the_other_venues_history():
+    m = M()
+    for i in range(3000):  # both venues warm up in parallel (mexc 2 % higher: never mixed with okx)
+        m.clock.advance(1.0)
+        m.sc._pairs[("okx", "BTC")].books["perp"] = m.book("okx", 100.0)
+        m.sc._pairs[("mexc", "BTC")].books["perp"] = m.book("mexc", 102.0)
+        m.m.tick()
+    for i in range(1, 601):  # okx goes silent; mexc rises 0.8 % in 10 minutes
+        m.clock.advance(1.0)
+        m.sc._pairs[("mexc", "BTC")].books["perp"] = m.book("mexc", 102.0 * (1 + 0.008 * i / 600))
+        m.m.tick()
+    [t] = m.trades()
+    assert t["venue"] == "mexc" and t["side"] == "long" and t["status"] == "open"
+    assert 0.6 <= t["move_window_pct"] < 0.7  # mexc's own move, not a jump from okx's 100 to 102
+    st = m.m.status()[0]
+    assert st["venue"] == "mexc" and st["warm_venues"] == 1  # okx restarted its own series only
+
+
+def test_the_first_configured_venue_that_is_warm_and_fresh_gives_the_signal():
+    m = M()
+    for i in range(3000):
+        m.clock.advance(1.0)
+        m.sc._pairs[("okx", "BTC")].books["perp"] = m.book("okx", 100.0)
+        m.sc._pairs[("mexc", "BTC")].books["perp"] = m.book("mexc", 102.0)
+        m.m.tick()
+    for i in range(1, 601):
+        m.clock.advance(1.0)
+        m.sc._pairs[("okx", "BTC")].books["perp"] = m.book("okx", 100.0 * (1 + 0.008 * i / 600))
+        m.sc._pairs[("mexc", "BTC")].books["perp"] = m.book("mexc", 102.0 * (1 + 0.008 * i / 600))
+        m.m.tick()
+    [t] = m.trades()  # one position per coin, on the first venue of mom_venues
+    assert t["venue"] == "okx"

@@ -4,9 +4,10 @@ Owner (2026-11-09): "BTC and ETH rose ~1 % in 15 min - ride it".  This module me
 fees, latency and slippage, whether riding such moves pays.  Fixed rules (settings ``mom_*``, never fitted
 to past trades):
 
-* Price series: the perp mid of each coin, sampled once a second from ONE venue (the first of
-  ``mom_venues`` with a fresh book).  The venue is kept while its book stays fresh; after ``mom_stale_s``
-  without it the series restarts on the next venue (two venues' prices are never mixed into one move).
+* Price series: the perp mid of each coin, sampled once a second on EVERY venue of ``mom_venues``, one
+  series per venue (two venues' prices are never mixed into one move).  The signal comes from the first
+  configured venue whose series is warm and fresh; a venue silent for ``mom_stale_s`` restarts only its
+  own series.
 * Entry LONG when the move over ``mom_window_s`` >= ``mom_entry_pct`` AND the move over ``mom_trend_s``
   >= ``mom_trend_pct`` (same direction); SHORT is the mirror.  Edge-triggered (one entry per move), one
   position per coin, ``mom_cooldown_s`` after an exit.  A series shorter than 80 % of a window gives no
@@ -100,7 +101,8 @@ class Momentum:
         self._db = db
         self._trades: list[MomTrade] = []
         self._ids = itertools.count(1)
-        self._series: dict[str, _Series] = {}
+        self._series: dict[tuple[str, str], _Series] = {}  # (asset, venue)
+        self._cooldown: dict[str, float] = {}  # asset -> mono time until which no new entry
         self._load()
 
     def _f(self, name: str, default: float) -> float:
@@ -127,34 +129,44 @@ class Momentum:
         b = self.sc._leg_book(p, "perp", now)
         return (p, b) if b is not None and b.mid else (None, None)
 
-    def _sample(self, asset: str, now: float) -> _Series:
-        sr = self._series.get(asset)
+    def _series_of(self, asset: str, venue: str) -> _Series:
+        sr = self._series.get((asset, venue))
         if sr is None:
             n = int(max(self._f("mom_trend_s", 3600.0), self._f("mom_window_s", 900.0)) / _SAMPLE_S) + 120
-            sr = self._series[asset] = _Series(n)
-        stale_s = self._f("mom_stale_s", 60.0)
-        if sr.venue is not None:
-            _, b = self._book(sr.venue, asset, now)
-            if b is not None:
-                sr.last_fresh_mono = now
-                if not sr.points or now - sr.points[-1][0] >= _SAMPLE_S:
-                    sr.points.append((now, b.mid))
-                return sr
-            if sr.last_fresh_mono is not None and now - sr.last_fresh_mono <= stale_s:
-                return sr  # a short gap: keep the venue
-        for v in self._venues():  # pick (or switch to) the first venue with a fresh book; never mix venues
-            if v == sr.venue:
-                continue
-            _, b = self._book(v, asset, now)
-            if b is not None:
-                if sr.venue is not None:
-                    log.info("momentum %s: %s stale, series restarts on %s", asset, sr.venue, v)
-                sr.venue, sr.last_fresh_mono = v, now
-                sr.points.clear()
-                sr.points.append((now, b.mid))
-                sr.armed = {1: False, -1: False}
-                break
+            sr = self._series[(asset, venue)] = _Series(n)
+            sr.venue = venue
         return sr
+
+    def _sample(self, asset: str, now: float) -> None:
+        """One series per venue, sampled in parallel and never mixed: a venue that goes silent keeps its
+        own gap and does not cost the others their history."""
+        stale_s = self._f("mom_stale_s", 60.0)
+        for v in self._venues():
+            _, b = self._book(v, asset, now)
+            if b is None:
+                sr = self._series.get((asset, v))
+                if sr is not None and sr.points and sr.last_fresh_mono is not None \
+                        and now - sr.last_fresh_mono > stale_s:
+                    sr.points.clear()  # a gap this long: the series starts again when the venue is back
+                    sr.armed = {1: False, -1: False}
+                continue
+            sr = self._series_of(asset, v)
+            sr.last_fresh_mono = now
+            if not sr.points or now - sr.points[-1][0] >= _SAMPLE_S:
+                sr.points.append((now, b.mid))
+
+    def _fresh_now(self, sr: _Series, now: float) -> bool:
+        return bool(sr.points) and sr.last_fresh_mono is not None and now - sr.last_fresh_mono <= 2.0 * _SAMPLE_S
+
+    def _lead(self, asset: str, now: float) -> _Series | None:
+        """The first configured venue whose series is warm (both windows) and fresh right now."""
+        for v in self._venues():
+            sr = self._series.get((asset, v))
+            if sr is not None and self._fresh_now(sr, now) \
+                    and sr.move(now, self._f("mom_trend_s", 3600.0)) is not None \
+                    and sr.move(now, self._f("mom_window_s", 900.0)) is not None:
+                return sr
+        return None
 
     # ------------------------------------------------------------------ main loop
     def tick(self, now: float | None = None) -> None:
@@ -163,37 +175,44 @@ class Momentum:
             return
         now = self._clock.mono() if now is None else now
         for asset in self._assets():
-            sr = self._sample(asset, now)
+            self._sample(asset, now)
             if self.enabled:
-                self._signal(asset, sr, now)
+                self._signal(asset, now)
         for t in list(self._trades):
             if t.status in _ACTIVE:
                 self._manage(t, now)
 
-    def _signal(self, asset: str, sr: _Series, now: float) -> None:
-        w = sr.move(now, self._f("mom_window_s", 900.0))
-        tr = sr.move(now, self._f("mom_trend_s", 3600.0))
-        if w is None or tr is None or sr.venue is None:
-            return
+    def _signal(self, asset: str, now: float) -> None:
         entry, trend = self._f("mom_entry_pct", 0.6), self._f("mom_trend_pct", 0.3)
-        for d in (1, -1):
-            cond = w * d >= entry and tr * d >= trend
-            fired = cond and not sr.armed[d]
-            sr.armed[d] = cond
-            if not fired:
+        lead = self._lead(asset, now)
+        for v in self._venues():  # every warm venue keeps its own edge state (no re-fire after a switch)
+            sr = self._series.get((asset, v))
+            if sr is None or not self._fresh_now(sr, now):
                 continue
-            if now < sr.cooldown_until or any(t.asset == asset and t.status in _ACTIVE for t in self._trades):
+            w = sr.move(now, self._f("mom_window_s", 900.0))
+            tr = sr.move(now, self._f("mom_trend_s", 3600.0))
+            if w is None or tr is None:
                 continue
-            mid = sr.points[-1][1]
-            t = MomTrade(id=f"mom-{asset}-{sr.venue}-{int(self._clock.wall() * 1000)}-{next(self._ids)}",
-                         asset=asset, venue=sr.venue, direction=d, signal_ts=self._clock.wall(),
-                         move_window_pct=w, move_trend_pct=tr, target_qty=self._f("mom_notional_quote", 1000.0) / mid)
-            t.due_mono = now + self._f("basis_latency_ms", 300.0) / 1000.0
-            self._trades.append(t)
-            del self._trades[:-_KEEP]
-            self._save(t)
-            log.info("momentum %s %s on %s: %+.2f%% / %gs, trend %+.2f%%", "LONG" if d > 0 else "SHORT",
-                     asset, sr.venue, w, self._f("mom_window_s", 900.0), tr)
+            for d in (1, -1):
+                cond = w * d >= entry and tr * d >= trend
+                fired = cond and not sr.armed[d]
+                sr.armed[d] = cond
+                if not fired or sr is not lead:
+                    continue
+                if now < self._cooldown.get(asset, float("-inf")) or \
+                        any(t.asset == asset and t.status in _ACTIVE for t in self._trades):
+                    continue
+                mid = sr.points[-1][1]
+                t = MomTrade(id=f"mom-{asset}-{v}-{int(self._clock.wall() * 1000)}-{next(self._ids)}",
+                             asset=asset, venue=v, direction=d, signal_ts=self._clock.wall(),
+                             move_window_pct=w, move_trend_pct=tr,
+                             target_qty=self._f("mom_notional_quote", 1000.0) / mid)
+                t.due_mono = now + self._f("basis_latency_ms", 300.0) / 1000.0
+                self._trades.append(t)
+                del self._trades[:-_KEEP]
+                self._save(t)
+                log.info("momentum %s %s on %s: %+.2f%% / %gs, trend %+.2f%%", "LONG" if d > 0 else "SHORT",
+                         asset, v, w, self._f("mom_window_s", 900.0), tr)
 
     def _fill(self, t: MomTrade, side: Side, qty: float, now: float) -> tuple[float, float, Any]:
         p = self.sc._pairs.get((t.venue, t.asset))
@@ -280,9 +299,7 @@ class Momentum:
             t.net_pct = t.net_quote / notional * 100.0 if notional > 0 else None
         self._save(t)
         if t.status in ("closed", "no_data"):
-            sr = self._series.get(t.asset)
-            if sr is not None:
-                sr.cooldown_until = self._clock.mono() + self._f("mom_cooldown_s", 900.0)
+            self._cooldown[t.asset] = self._clock.mono() + self._f("mom_cooldown_s", 900.0)
 
     # ------------------------------------------------------------------ persistence
     def _save(self, t: MomTrade) -> None:
@@ -325,14 +342,18 @@ class Momentum:
         now = self._clock.mono()
         out = []
         for asset in self._assets():
-            sr = self._series.get(asset)
+            all_sr = [sr for (a, _), sr in self._series.items() if a == asset and sr.points]
+            warm = [sr for sr in all_sr if sr.move(now, self._f("mom_trend_s", 3600.0)) is not None]
+            # shown: the venue that would give the signal, else the one with the longest history
+            sr = self._lead(asset, now) or max(all_sr, key=lambda x: x.points[-1][0] - x.points[0][0], default=None)
             out.append({
                 "asset": asset, "venue": sr.venue if sr else None,
-                "mid": sr.points[-1][1] if sr and sr.points else None,
+                "mid": sr.points[-1][1] if sr else None,
                 "move_window_pct": sr.move(now, self._f("mom_window_s", 900.0)) if sr else None,
                 "move_trend_pct": sr.move(now, self._f("mom_trend_s", 3600.0)) if sr else None,
                 "series_s": (sr.points[-1][0] - sr.points[0][0]) if sr and len(sr.points) > 1 else 0.0,
-                "cooldown_s": max(0.0, sr.cooldown_until - now) if sr else 0.0,
+                "venues": len(all_sr), "warm_venues": len(warm),
+                "cooldown_s": max(0.0, self._cooldown.get(asset, float("-inf")) - now),
             })
         return out
 
@@ -361,6 +382,7 @@ class Momentum:
             "pnl_quote": sum(t.net_quote or 0.0 for t in closed), "fees_quote": sum(t.fees_quote for t in closed),
             "max_drawdown_quote": dd, "long": side(1), "short": side(-1), "exits": exits,
             "no_data": sum(1 for t in self._trades if t.status == "no_data"),
+            "no_data_cost_quote": sum(t.fees_quote for t in self._trades if t.status == "no_data"),
             "no_fill": sum(1 for t in self._trades if t.status == "no_fill"),
             "abandoned": sum(1 for t in self._trades if t.status == "abandoned"),
         }
