@@ -329,9 +329,11 @@
         <button id="basis-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
       </div>
       <p id="basis-note" class="muted"></p>
+      <h3 class="diag-title keep-case">Balance · is each strategy in plus or minus (virtual money, after fees)</h3>
+      <div id="balance-cards" class="balance-cards"></div>
       <div class="diag-grid">
         <div class="diag-block">
-          <h3 class="diag-title">STATISTICS</h3>
+          <h3 class="diag-title keep-case">Spot/futures signals · statistics</h3>
           <table class="table table-compact"><tbody id="basis-stats"></tbody></table>
         </div>
         <div class="diag-block">
@@ -353,7 +355,7 @@
         <h3 class="diag-title">MOMENTUM · virtual trades</h3>
         <div class="table-wrap">
           <table class="table" id="mom-trades-table">
-            <thead><tr><th>Signal</th><th>Coin</th><th>Side</th><th>Venue</th><th>Status</th><th class="num">Move 15 m / 1 h</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">Fees</th><th class="num">Net</th><th>Exit reason</th></tr></thead>
+            <thead><tr><th>Signal</th><th>Coin</th><th>Side</th><th>Venue</th><th>Status</th><th class="num">Move 15 m / 1 h</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">Fees</th><th class="num">Result</th><th>Exit reason</th></tr></thead>
             <tbody id="mom-trades"></tbody>
           </table>
         </div>
@@ -377,7 +379,7 @@
         <h3 class="diag-title">CROSS-VENUE FUNDING · virtual pairs</h3>
         <div class="table-wrap">
           <table class="table" id="xfund-trades-table">
-            <thead><tr><th>Signal</th><th>Asset</th><th>Long / short</th><th>Status</th><th class="num">Edge at entry</th><th class="num">Capital</th><th class="num">Funding</th><th class="num">Fees</th><th class="num">Net</th><th>Notes</th></tr></thead>
+            <thead><tr><th>Signal</th><th>Asset</th><th>Long / short</th><th>Status</th><th class="num">Edge at entry</th><th class="num">Money in use</th><th class="num">Funding</th><th class="num">Fees</th><th class="num">Result</th><th>Notes</th></tr></thead>
             <tbody id="xfund-trades"></tbody>
           </table>
         </div>
@@ -408,7 +410,7 @@
         <h3 class="diag-title">VIRTUAL PAIRS AND INCIDENTS</h3>
         <div class="table-wrap">
           <table class="table" id="basis-trades-table">
-            <thead><tr><th>Signal</th><th>Pair</th><th>Trigger</th><th>Status</th><th class="num">Entry basis</th><th class="num">Exit basis</th><th class="num">Max adverse</th><th class="num">Gross</th><th class="num">Fees</th><th class="num">Funding</th><th class="num">Net</th><th>Notes</th></tr></thead>
+            <thead><tr><th>Signal</th><th>Pair</th><th>Trigger</th><th>Status</th><th class="num">Entry basis</th><th class="num">Exit basis</th><th class="num">Max adverse</th><th class="num">Gross</th><th class="num">Fees</th><th class="num">Funding</th><th class="num">Result</th><th>Notes</th></tr></thead>
             <tbody id="basis-trades"></tbody>
           </table>
         </div>

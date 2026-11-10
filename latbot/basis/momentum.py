@@ -65,6 +65,9 @@ class MomTrade:
     exit_reason: str = ""
     net_quote: float | None = None
     net_pct: float | None = None
+    open_net_quote: float | None = None  # result if closed now (exit side of the book, exit fee included)
+    open_net_ts: float | None = None
+    resumed: bool = False  # the bot was restarted while this position was open (it was unwatched meanwhile)
     due_mono: float | None = None
     opened_mono: float | None = None
     last_fresh_mono: float | None = None
@@ -252,6 +255,10 @@ class Momentum:
             self._exit(t, now)
             return
         px = b.bids[0].price if t.direction > 0 else b.asks[0].price  # what the position would sell at
+        out = t.qty * px
+        t.open_net_quote = t.cash_quote + (out if t.direction > 0 else -out) - t.fees_quote \
+            - out * p.taker["perp"] + t.funding_quote
+        t.open_net_ts = self._clock.wall()
         t.best_px = max(t.best_px, px) if t.direction > 0 else min(t.best_px, px)
         stop = t.entry_px * (1.0 - t.direction * self._f("mom_stop_pct", 0.5) / 100.0)
         trail = t.best_px * (1.0 - t.direction * self._f("mom_trail_pct", 0.4) / 100.0)
@@ -326,7 +333,15 @@ class Momentum:
                 t = MomTrade(**{k: v for k, v in r.items() if k in known})
             except TypeError:
                 continue
-            if t.status in _ACTIVE:  # its prices while the bot was down are unknown: never guessed
+            if t.status in ("open", "closing") and t.opened_ts is not None and t.qty > _EPS:
+                # the position is still there (the stop is the bot's own, so nothing closed it while the bot
+                # was down): it is managed again from the first fresh book, at whatever the price is now
+                now = self._clock.mono()
+                t.status, t.resumed, t.exit_reason = "open", True, ""
+                t.opened_mono = now - max(0.0, self._clock.wall() - t.opened_ts)
+                t.last_fresh_mono, t.due_mono = now, None
+                self._save(t)
+            elif t.status in _ACTIVE:  # an entry that never filled
                 t.status, t.closed_ts, t.exit_reason = "abandoned", self._clock.wall(), "process restarted: outcome unknown"
                 t.due_mono = t.opened_mono = t.last_fresh_mono = None
                 self._save(t)
@@ -336,7 +351,27 @@ class Momentum:
 
     # ------------------------------------------------------------------ queries
     def trades(self, limit: int = 100) -> list[dict[str, Any]]:
-        return [t.to_dict() for t in reversed(self._trades[-max(0, int(limit)):])]
+        now = self._clock.wall()
+        out = []
+        for t in reversed(self._trades[-max(0, int(limit)):]):
+            d = t.to_dict()
+            live = t.status in ("open", "closing") and t.open_net_ts is not None
+            d["open_net_age_s"] = max(0.0, now - t.open_net_ts) if live else None
+            if not live:
+                d["open_net_quote"] = None
+            out.append(d)
+        return out
+
+    def balance(self) -> dict[str, Any]:
+        """Plus or minus of the strategy in one number: finished trades + open positions if closed now."""
+        done = [t for t in self._trades if t.status == "closed" and t.net_quote is not None]
+        live = [t for t in self._trades if t.status in ("open", "closing")]
+        priced = [t for t in live if t.open_net_quote is not None]
+        closed_q, open_q = sum(t.net_quote for t in done), sum(t.open_net_quote for t in priced)
+        return {"closed_quote": closed_q, "closed_n": len(done), "wins": sum(1 for t in done if t.net_quote > 0),
+                "open_quote": open_q, "open_n": len(live), "open_priced": len(priced),
+                "unknown": sum(1 for t in self._trades if t.status in ("no_data", "abandoned")),
+                "in_use_quote": sum(t.qty * t.entry_px for t in live), "total_quote": closed_q + open_q}
 
     def status(self) -> list[dict[str, Any]]:
         now = self._clock.mono()

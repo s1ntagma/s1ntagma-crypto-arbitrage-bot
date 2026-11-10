@@ -1608,6 +1608,41 @@
           (d.assets || []).slice(0, 10).join(', ') + ((d.assets || []).length > 10 ? ', …' : '') + ')' +
           '. Long spot + short perp of the same coin and quote; every number is on the real book sides, after fees. No orders are sent.'
         : 'The basis scanner is off (basis_enabled = false in config.json).';
+      var bal = d.balance || {};
+      var cards = $('balance-cards'); clear(cards);
+      var money = function (v) { var n = num(v); return (n < -0.004 ? '−$' : n > 0.004 ? '+$' : '$') + Math.abs(n).toFixed(2); };
+      var card = function (name, b, opts) {
+        opts = opts || {};
+        var total = num(b.total_quote);
+        var el = h('div', { class: 'balance-card' + (opts.total ? ' total' : '') },
+          h('div', { class: 'balance-name', text: name }),
+          h('div', { class: 'balance-value ' + (total > 0 ? 'pos' : total < 0 ? 'neg' : ''), text: money(total) }),
+          h('div', { class: 'balance-line' }, h('span', { text: 'Closed' + (b.closed_n != null ? ' (' + b.closed_n + ')' : ''), title: b.closed_n != null ? 'Finished trades: ' + b.closed_n + ', in plus: ' + (b.wins || 0) : 'Finished trades' }), h('span', { text: money(b.closed_quote) })),
+          h('div', { class: 'balance-line' }, h('span', { text: 'Open now' + (b.open_n != null ? ' (' + b.open_n + ')' : ''), title: 'Result of the open positions if they were closed right now, exit fees included' }), h('span', { text: money(b.open_quote) })),
+          h('div', { class: 'balance-line' }, h('span', { text: 'Money in use', title: 'Deposit tied up in the open positions (not a profit or a loss)' }), h('span', { text: '$' + num(b.in_use_quote).toFixed(0) })));
+        if (b.open_n && b.open_priced < b.open_n) el.appendChild(h('div', { class: 'balance-off', text: (b.open_n - b.open_priced) + ' open position(s) have no fresh price yet: not in the number' }));
+        if (b.unknown) el.appendChild(h('div', { class: 'balance-off', text: b.unknown + ' trade(s) with an unknown result are not counted' }));
+        if (opts.note) el.appendChild(h('div', { class: 'balance-off', text: opts.note }));
+        cards.appendChild(el);
+      };
+      if (bal.total) {
+        card('All strategies together', bal.total, { total: true });
+        card('Funding between exchanges', bal.xfund);
+        card('Momentum BTC / ETH', bal.momentum);
+        card('Funding carry (spot + futures)', bal.carry);
+        card('Spot/futures signals', bal.signals, { note: bal.signals.switched_off ? 'Switched off: it lost. No new trades.' : '' });
+      }
+      var openOr = function (t, cls) {
+        var v = t.net_quote != null ? t.net_quote : t.open_net_quote;
+        if (v == null) return h('td', { class: 'num', text: t.status === 'open' || t.status === 'closing' ? 'no price yet' : '—' });
+        var txt = usd(v);
+        if (t.net_quote == null) txt = 'now ' + txt + (num(t.open_net_age_s) > 10 ? ' (price ' + Math.round(num(t.open_net_age_s)) + ' s old)' : '');
+        return h('td', { class: 'num ' + (num(v) >= 0 ? 'pos' : 'neg'), text: txt });
+      };
+      var aprText = function (st) {
+        if (st.funding_apr_open_pct != null) return num(st.funding_apr_open_pct).toFixed(1) + '%';
+        return (st.open || 0) ? 'too early (' + num(st.open_age_h).toFixed(1) + ' h of data, shown after 24 h)' : '—';
+      };
       var s = d.stats || {};
       kvRows($('basis-stats'), [
         ['Signals: total (fut upper / spot lower / both)', (s.signals_total || 0) + ' (' + (s.signals_fut_upper || 0) + ' / ' + (s.signals_spot_lower || 0) + ' / ' + (s.signals_both || 0) + ')'],
@@ -1627,11 +1662,11 @@
       var cs = s.carry || {};
       kvRows($('carry-stats'), [
         ['Positions open / closed / incidents', (cs.open || 0) + ' / ' + (cs.closed || 0) + ' / ' + (cs.incidents || 0)],
-        ['Open notional / capital (spot + margin ' + (cs.leverage || '?') + 'x)', usd(cs.open_notional_quote) + ' / ' + usd(cs.open_capital_quote)],
+        ['Position size / money in use (spot + deposit, ' + (cs.leverage || '?') + 'x leverage)', usd(cs.open_notional_quote) + ' / ' + usd(cs.open_capital_quote)],
         ['Liquidations / guard exits', (cs.liquidations || 0) + ' / ' + (cs.guard_exits || 0)],
         ['Closest to liquidation (open)', cs.min_liq_buffer_pct == null ? '—' : num(cs.min_liq_buffer_pct).toFixed(1) + '%'],
         ['Funding collected: total / open positions', usd(cs.funding_quote) + ' / ' + usd(cs.funding_open_quote)],
-        ['Funding APR on capital (open)', cs.funding_apr_open_pct == null ? '—' : num(cs.funding_apr_open_pct).toFixed(1) + '%'],
+        ['Yearly rate of the funding collected (open)', aprText(cs)],
         ['Closed: fees / net', usd(-(cs.fees_quote || 0)) + ' / ' + usd(cs.net_quote)],
         ['Realized APR on capital (net, closed)', cs.realized_apr_pct == null ? '—' : num(cs.realized_apr_pct).toFixed(1) + '%'],
         ['Funding unknown (restart gaps)', String(cs.funding_unknown || 0)],
@@ -1687,16 +1722,16 @@
           h('td', { class: 'num', text: t.entry_px ? String(+num(t.entry_px).toPrecision(8)) : '—' }),
           h('td', { class: 'num', text: t.exit_px ? String(+num(t.exit_px).toPrecision(8)) : '—' }),
           h('td', { class: 'num', text: usd(-(t.fees_quote || 0)) }),
-          h('td', { class: 'num ' + (num(t.net_quote) >= 0 ? 'pos' : 'neg'), text: t.net_quote == null ? '—' : usd(t.net_quote) }),
-          h('td', { class: 'wrap muted', text: t.exit_reason || '' })));
+          openOr(t),
+          h('td', { class: 'wrap muted', text: (t.exit_reason || '') + (t.resumed ? ' · bot was restarted while open' : '') })));
       });
       var xf = d.xfund || {}, xs = xf.stats || {};
       kvRows($('xfund-stats'), [
         ['Pairs open / closed / incidents', (xs.open || 0) + ' / ' + (xs.closed || 0) + ' / ' + (xs.incidents || 0)],
-        ['Capital (margin on both venues, ' + (xs.leverage || '?') + 'x)', usd(xs.open_capital_quote)],
+        ['Money in use (deposit for open positions, ' + (xs.leverage || '?') + 'x leverage)', usd(xs.open_capital_quote)],
         ['Liquidation distance at this leverage', xs.liq_distance_pct == null ? '—' : num(xs.liq_distance_pct).toFixed(1) + '% price move'],
         ['Funding collected: total / open pairs', usd(xs.funding_quote) + ' / ' + usd(xs.funding_open_quote)],
-        ['Funding APR on capital (open)', xs.funding_apr_open_pct == null ? '—' : num(xs.funding_apr_open_pct).toFixed(1) + '%'],
+        ['Yearly rate of the funding collected (open)', aprText(xs)],
         ['Closed: fees / net', usd(-(xs.fees_quote || 0)) + ' / ' + usd(xs.net_quote)],
         ['Realized APR on capital (net, closed)', xs.realized_apr_pct == null ? '—' : num(xs.realized_apr_pct).toFixed(1) + '%'],
         ['Liquidations / entries refused on the latest book', (xs.liquidations || 0) + ' / ' + (xs.revalidation_failed || 0)],
@@ -1725,7 +1760,7 @@
           h('td', { text: t.long_venue + ' / ' + t.short_venue }), h('td', { text: t.status + (t.partial ? ' (partial)' : '') }),
           h('td', { class: 'num', text: pct4(t.edge_pct) }), h('td', { class: 'num', text: usd(t.capital_quote) }),
           h('td', { class: 'num', text: usd(t.funding_quote) }), h('td', { class: 'num', text: usd(-(t.fees_quote || 0)) }),
-          h('td', { class: 'num ' + (num(t.net_quote) >= 0 ? 'pos' : 'neg'), text: usd(t.net_quote) }),
+          openOr(t),
           h('td', { class: 'wrap muted', text: notes })));
       });
       var cfg = d.settings || {};
@@ -1766,7 +1801,7 @@
           h('td', { class: 'num', text: pct4(t.entry_basis_pct) }), h('td', { class: 'num', text: pct4(t.exit_basis_pct) }),
           h('td', { class: 'num', text: pct4(t.max_adverse_pct) }), h('td', { class: 'num', text: usd(t.gross_quote) }),
           h('td', { class: 'num', text: usd(-(t.fees_quote || 0)) }), h('td', { class: 'num', text: usd(t.funding_quote) }),
-          h('td', { class: 'num ' + (num(t.net_quote) >= 0 ? 'pos' : 'neg'), text: usd(t.net_quote) }),
+          openOr(t),
           h('td', { class: 'wrap muted', text: notes })));
       });
     });

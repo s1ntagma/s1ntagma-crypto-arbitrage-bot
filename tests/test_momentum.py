@@ -143,12 +143,16 @@ def test_two_venues_are_never_mixed_into_one_move():
     assert st["venue"] == "mexc" and st["move_window_pct"] is None and m.trades() == []
 
 
-def test_open_positions_are_abandoned_after_a_restart(tmp_path):
+def test_a_pending_entry_is_dropped_after_a_restart(tmp_path):
     clock = SimClock()
     db = Database(str(tmp_path / "m.sqlite3"), clock=clock)
     m = M(db=db, clock=clock)
     warm(m)
-    m.path(100.0, 100.8, 600)
+    i = 0
+    while not m.trades():  # stop at the tick the signal fires: the order is not filled yet
+        i += 1
+        m.step(100.0 + 0.8 * i / 600)
+    assert [t["status"] for t in m.trades()] == ["pending"]
     again = Momentum(m.sc, m.s, clock, db=db)
     [t] = again.trades()
     assert t["status"] == "abandoned" and "restarted" in t["exit_reason"]
@@ -193,3 +197,45 @@ def test_the_first_configured_venue_that_is_warm_and_fresh_gives_the_signal():
         m.m.tick()
     [t] = m.trades()  # one position per coin, on the first venue of mom_venues
     assert t["venue"] == "okx"
+
+
+def test_an_open_position_shows_its_result_if_closed_now_and_the_balance():
+    m = M()
+    warm(m)
+    m.path(100.0, 100.8, 600)
+    m.path(100.8, 101.0, 30)
+    t = m.trades()[0]
+    q = t["qty"]
+    expected = q * ((101.0 - SPREAD) - t["entry_px"]) - t["fees_quote"] - q * (101.0 - SPREAD) * 0.0005
+    assert t["status"] == "open" and t["open_net_quote"] == pytest.approx(expected, abs=1e-6)
+    b = m.m.balance()
+    assert b["open_n"] == 1 and b["open_quote"] == pytest.approx(expected, abs=1e-6)
+    assert b["in_use_quote"] == pytest.approx(q * t["entry_px"])
+
+
+def test_an_open_position_resumes_after_a_restart_and_its_stop_still_works(tmp_path):
+    clock = SimClock()
+    db = Database(str(tmp_path / "m.sqlite3"), clock=clock)
+    m = M(db=db, clock=clock)
+    warm(m)
+    m.path(100.0, 100.8, 600)
+    entry = m.trades()[0]["entry_px"]
+    m.m = Momentum(m.sc, m.s, clock, db=db)  # the bot restarts
+    [t] = m.trades()
+    assert t["status"] == "open" and t["resumed"]
+    m.path(100.8, 99.9, 30)  # through the stop
+    t = m.trades()[0]
+    assert t["status"] == "closed" and t["exit_reason"].startswith("stop") and t["exit_px"] < entry
+
+
+def test_a_resumed_position_past_its_max_hold_closes_at_the_first_fresh_price(tmp_path):
+    clock = SimClock()
+    db = Database(str(tmp_path / "m.sqlite3"), clock=clock)
+    m = M(db=db, clock=clock)
+    warm(m)
+    m.path(100.0, 100.8, 600)
+    clock.advance(2 * 3600.0)  # the bot was off for two hours
+    m.m = Momentum(m.sc, m.s, clock, db=db)
+    m.step(100.7)
+    t = m.trades()[0]
+    assert t["status"] == "closed" and t["exit_reason"] == "max hold"

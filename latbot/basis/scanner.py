@@ -139,6 +139,8 @@ class BasisTrade:
     pending_unwind: list[dict[str, Any]] = field(default_factory=list)
     deferred_status: str = ""  # the incident status / reason applied once the unwinds are resolved
     deferred_close: str = ""
+    open_net_quote: float | None = None  # result if closed now (exit side of fresh books, exit fees included)
+    open_net_ts: float | None = None
 
     @property
     def hedged(self) -> bool:
@@ -604,6 +606,8 @@ class BasisScanner:
             if t.status in ("open", "closing"):
                 self._funding(t, p)
                 self._adverse(t, p, now)
+                if t.status == "open":
+                    self._mark(t, p, now)
                 if t.trigger == CARRY:
                     self._carry_risk(t, p, now)
             if t.pending_unwind:
@@ -677,6 +681,20 @@ class BasisScanner:
             return
         self._schedule_exit(t, now, t.exit_reason)  # the exit must happen: by market
         self._save(t)
+
+    def _mark(self, t: BasisTrade, p: _Pair, now: float) -> None:
+        """Result if both legs were closed by market now: measured on fresh books only, else the last value stays."""
+        s, f = self._leg_book(p, "spot", now), self._leg_book(p, "perp", now)
+        if s is None or f is None or t.spot_qty <= _EPS or t.perp_qty <= _EPS:
+            return
+        sell = walk_book(s.bids, base_amount=t.spot_qty, side=Side.SELL)
+        buy = walk_book(f.asks, base_amount=t.perp_qty, side=Side.BUY)
+        if not sell.vwap or not buy.vwap or sell.exhausted or buy.exhausted:
+            return
+        out_spot, out_perp = t.spot_qty * sell.vwap, t.perp_qty * buy.vwap
+        exit_fees = out_spot * p.taker["spot"] + out_perp * p.taker["perp"]
+        t.open_net_quote = t.cash_quote + out_spot - out_perp - t.fees_quote - exit_fees + t.funding_quote
+        t.open_net_ts = self._clock.wall()
 
     def _carry_risk(self, t: BasisTrade, p: _Pair, now: float) -> None:
         """Liquidation of the short perp: the guard closes the pair before it; a jump through the
@@ -1033,7 +1051,30 @@ class BasisScanner:
 
     # ------------------------------------------------------------------ queries
     def trades(self, limit: int = 200) -> list[dict[str, Any]]:
-        return [t.to_dict() for t in reversed(self._trades[-max(0, int(limit)):])]
+        now = self._clock.wall()
+        out = []
+        for t in reversed(self._trades[-max(0, int(limit)):]):
+            d = t.to_dict()
+            live = t.status in ("open", "closing") and t.open_net_ts is not None
+            d["open_net_age_s"] = max(0.0, now - t.open_net_ts) if live else None
+            if not live:
+                d["open_net_quote"] = None
+            out.append(d)
+        return out
+
+    def balance(self, carry: bool) -> dict[str, Any]:
+        """Plus or minus in one number (funding carry, or the spot/futures signal pairs): finished trades +
+        open positions if closed now."""
+        ts = [t for t in self._trades if (t.trigger == CARRY) == carry]
+        done = [t for t in ts if t.status in ("closed", "one_leg", "no_fill") and t.net_quote is not None]
+        live = [t for t in ts if t.status in ("open", "closing") and t.entry_basis_pct is not None]
+        priced = [t for t in live if t.open_net_quote is not None]
+        closed_q, open_q = sum(t.net_quote for t in done), sum(t.open_net_quote for t in priced)
+        return {"closed_quote": closed_q, "closed_n": len(done), "wins": sum(1 for t in done if t.net_quote > 0),
+                "open_quote": open_q, "open_n": len(live), "open_priced": len(priced),
+                "unknown": sum(1 for t in ts if t.status == "abandoned" or (t.status not in _ACTIVE and t.net_quote is None)),
+                "in_use_quote": sum(t.capital_quote or t.target_qty * (t.entry_spot_vwap or 0.0) for t in live),
+                "total_quote": closed_q + open_q}
 
     def pairs(self) -> list[dict[str, Any]]:
         out = []
@@ -1111,6 +1152,9 @@ class BasisScanner:
         def capital(t: BasisTrade) -> float:  # spot + perp margin; older rows without it: the spot notional
             return t.capital_quote or notional(t)
 
+        cap = sum(capital(t) for t in live)
+        age_h = sum(capital(t) * max(0.0, now - (t.opened_ts or now)) for t in live) / cap / 3600.0 if cap > 0 else 0.0
+
         def apr(rows: list[BasisTrade], value) -> float | None:
             years = sum(capital(t) * max(0.0, ((t.closed_ts or now) - (t.opened_ts or now))) for t in rows) / 31_536_000.0
             return sum(value(t) for t in rows) / years * 100.0 if years > 0 else None
@@ -1133,7 +1177,9 @@ class BasisScanner:
             "maker_fills": self.counters.get("maker_fills", 0), "taker_hedges": self.counters.get("taker_hedges", 0),
             "maker_unfilled": self.counters.get("maker_unfilled", 0),
             "realized_apr_pct": apr(closed, lambda t: t.net_quote or 0.0),
-            "funding_apr_open_pct": apr(live, lambda t: t.funding_quote),
+            # an APR from a few hours of funding misleads: shown from one day of data on
+            "funding_apr_open_pct": apr(live, lambda t: t.funding_quote) if age_h >= 24.0 else None,
+            "open_age_h": age_h,
         }
 
 

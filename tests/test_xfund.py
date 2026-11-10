@@ -414,3 +414,46 @@ def test_the_unwind_of_a_single_leg_uses_the_first_fresh_book():
     q = 500 / 100.01
     assert t["status"] == "one_leg" and not t["unwind_unknown"]
     assert t["net_quote"] == pytest.approx(q * (99.50 - 100.02) - t["fees_quote"])
+
+
+# ---- result of an open pair "if closed now", balance, liquidation distance -----------------------------
+def test_an_open_pair_shows_its_result_if_closed_now_with_the_exit_fees():
+    x = opened()
+    x.run(1.0, perp={"okx": (100.50, 100.52), "mexc": (100.40, 100.42)})  # long +0.5, short costs 0.42 to buy back
+    t = x.trades()[0]
+    q = t["qty"]["long"]
+    expected = q * (100.50 - 100.02) + q * (100.00 - 100.42) - t["fees_quote"] - q * (100.50 + 100.42) * 0.0005
+    assert t["open_net_quote"] == pytest.approx(expected) and t["open_net_age_s"] == pytest.approx(0.0, abs=0.01)
+    b = x.xf.balance()
+    assert b["open_n"] == 1 and b["open_priced"] == 1 and b["open_quote"] == pytest.approx(expected)
+    assert b["closed_quote"] == 0 and b["total_quote"] == pytest.approx(expected)
+    assert b["in_use_quote"] == pytest.approx(t["capital_quote"])
+    x.clock.advance(40.0)  # no new books: the last measured value stays, with its age
+    x.xf.tick()
+    t = x.trades()[0]
+    assert t["open_net_quote"] == pytest.approx(expected) and t["open_net_age_s"] == pytest.approx(40.0, abs=0.5)
+
+
+def test_the_balance_adds_closed_results_and_counts_wins():
+    x = opened()
+    deep = {("okx", "BTC"): 0.003, ("mexc", "BTC"): -0.003}
+    x.poll(deep)
+    x.poll(deep)
+    x.run(0.6)
+    t = x.trades()[0]
+    b = x.xf.balance()
+    assert t["status"] == "closed" and b["closed_n"] == 1 and b["open_n"] == 0
+    assert b["closed_quote"] == pytest.approx(t["net_quote"]) and b["total_quote"] == pytest.approx(t["net_quote"])
+    assert b["wins"] == (1 if t["net_quote"] > 0 else 0)
+
+
+def test_liquidation_distance_is_the_same_measure_for_the_long_and_the_short_leg():
+    x = opened(xfund_leverage=2.0)
+    x.run(1.0)
+    t = x.trades()[0]
+    assert t["liq_buffer_pct"] == pytest.approx(49.5, abs=0.2)  # was 98 % for a long, 49 % for a short
+
+
+def test_funding_apr_is_not_shown_before_a_day_of_data():
+    x = opened()
+    assert x.xf.stats()["funding_apr_open_pct"] is None and x.xf.stats()["open_age_h"] < 1

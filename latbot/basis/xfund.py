@@ -85,6 +85,8 @@ class XFundTrade:
     order: dict[str, Any] = field(default_factory=dict)  # maker mode: {leg, side, px, qty, posted_mono}
     maker_fills: int = 0
     pending_unwind: list[dict[str, Any]] = field(default_factory=list)  # [{leg, qty, since}] waiting for a book
+    open_net_quote: float | None = None  # result if closed now (exit side of fresh books, exit fees included)
+    open_net_ts: float | None = None  # wall time of that measurement
     unwind_unknown: bool = False  # an excess leg was never priced: the result is unknown
     deferred_status: str = ""
     deferred_close: str = ""
@@ -99,6 +101,7 @@ class XFundTrade:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["hedged"] = self.hedged
+        d["open_net_age_s"] = None
         d["due"] = {k: (None if v == float("-inf") else v) for k, v in self.due.items()}
         return d
 
@@ -303,6 +306,7 @@ class FundingArb:
             elif t.due:
                 self._run_due(t, now)
             elif t.status == "open":
+                self._mark(t, now)
                 self._risk(t, now)
                 if t.status == "open" and not t.due and \
                         self._clock.wall() - t.signal_ts >= self._f("xfund_max_hold_h", 336.0) * 3600.0:
@@ -547,7 +551,8 @@ class FundingArb:
             liq = t.liq_price.get(leg)
             if b is None or not b.mid or not liq:
                 continue
-            buf = (b.mid / liq - 1.0) * 100.0 if leg == "long" else (liq / b.mid - 1.0) * 100.0
+            # how far the price can still move against the leg, as a share of the current price
+            buf = (b.mid - liq) / b.mid * 100.0 if leg == "long" else (liq - b.mid) / b.mid * 100.0
             worst = buf if worst is None else min(worst, buf)
             if buf <= 0:  # through the liquidation price: that leg's margin is gone, the other closes
                 lev = max(1.0, self._f("xfund_leverage", 2.0))
@@ -562,6 +567,22 @@ class FundingArb:
             t.liq_buffer_pct = worst if t.liq_buffer_pct is None else min(t.liq_buffer_pct, worst)
             if worst < self._f("xfund_liq_guard_pct", 5.0):
                 self._schedule_exit(t, now, f"liquidation guard: {worst:.1f}% to a leg's liquidation price")
+
+    def _mark(self, t: XFundTrade, now: float) -> None:
+        """Result if both legs were closed by market now: measured on fresh books only, else the last value stays."""
+        pl, ps = self._pair(t, "long"), self._pair(t, "short")
+        bl = self.sc._leg_book(pl, "perp", now) if pl is not None else None
+        bs = self.sc._leg_book(ps, "perp", now) if ps is not None else None
+        if bl is None or bs is None:
+            return
+        sell = walk_book(bl.bids, base_amount=t.qty["long"], side=Side.SELL)
+        buy = walk_book(bs.asks, base_amount=t.qty["short"], side=Side.BUY)
+        if not sell.vwap or not buy.vwap or sell.exhausted or buy.exhausted:
+            return
+        out_long, out_short = t.qty["long"] * sell.vwap, t.qty["short"] * buy.vwap
+        exit_fees = out_long * pl.taker["perp"] + out_short * ps.taker["perp"]
+        t.open_net_quote = t.cash_quote + out_long - out_short - t.fees_quote - exit_fees + t.funding_quote
+        t.open_net_ts = self._clock.wall()
 
     def _settlements(self) -> None:
         """Funding at every settlement of each venue: the short receives rate x notional, the long pays."""
@@ -665,7 +686,28 @@ class FundingArb:
 
     # ------------------------------------------------------------------ queries
     def trades(self, limit: int = 100) -> list[dict[str, Any]]:
-        return [t.to_dict() for t in reversed(self._trades[-max(0, int(limit)):])]
+        now = self._clock.wall()
+        out = []
+        for t in reversed(self._trades[-max(0, int(limit)):]):
+            d = t.to_dict()
+            if t.status in ("open", "closing") and t.open_net_ts is not None:
+                d["open_net_age_s"] = max(0.0, now - t.open_net_ts)
+            else:
+                d["open_net_quote"] = None
+            out.append(d)
+        return out
+
+    def balance(self) -> dict[str, Any]:
+        """Plus or minus of the strategy in one number: finished trades + open pairs if closed now."""
+        done = [t for t in self._trades if t.status in ("closed", "one_leg", "no_fill") and t.net_quote is not None]
+        live = [t for t in self._trades if t.status in ("open", "closing") and t.hedged]
+        priced = [t for t in live if t.open_net_quote is not None]
+        closed_q, open_q = sum(t.net_quote for t in done), sum(t.open_net_quote for t in priced)
+        return {"closed_quote": closed_q, "closed_n": len(done), "wins": sum(1 for t in done if t.net_quote > 0),
+                "open_quote": open_q, "open_n": len(live), "open_priced": len(priced),
+                "unknown": sum(1 for t in self._trades if t.status not in _ACTIVE and t.net_quote is None
+                               and t.status != "abandoned" or t.status == "abandoned"),
+                "in_use_quote": sum(t.capital_quote for t in live), "total_quote": closed_q + open_q}
 
     def stats(self) -> dict[str, Any]:
         ts = self._trades
@@ -673,6 +715,9 @@ class FundingArb:
         closed = [t for t in ts if t.status == "closed" and t.hedged]
         incidents = [t for t in ts if t.status in ("one_leg", "no_fill")]
         now = self._clock.wall()
+
+        cap = sum(t.capital_quote for t in live)
+        age_h = sum(t.capital_quote * max(0.0, now - (t.opened_ts or now)) for t in live) / cap / 3600.0 if cap > 0 else 0.0
 
         def apr(rows: list[XFundTrade], value) -> float | None:
             years = sum(t.capital_quote * max(0.0, (t.closed_ts or now) - (t.opened_ts or now)) for t in rows) / 31_536_000.0
@@ -690,7 +735,9 @@ class FundingArb:
             "unknown": sum(1 for t in ts if t.unwind_unknown and t.status not in _ACTIVE),
             "funding_unknown": sum(1 for t in live + closed if t.funding_unknown),
             "realized_apr_pct": apr(closed, lambda t: t.net_quote or 0.0),
-            "funding_apr_open_pct": apr(live, lambda t: t.funding_quote),
+            # an APR from a few hours of funding misleads: shown from one day of data on
+            "funding_apr_open_pct": apr(live, lambda t: t.funding_quote) if age_h >= 24.0 else None,
+            "open_age_h": age_h,
             "leverage": self._f("xfund_leverage", 2.0),
             "liq_distance_pct": (1.0 / max(1.0, self._f("xfund_leverage", 2.0))
                                  - self._f("carry_maint_margin", 0.005)) * 100.0,

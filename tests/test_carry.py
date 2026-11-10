@@ -505,3 +505,18 @@ def test_a_carry_leg_never_seen_is_an_incident_with_an_unknown_result_not_a_flat
         c.sc.tick()  # nothing arrives any more: the hedge wait, then the unwind wait, run out
     t = c.carry()[0]
     assert t["status"] == "one_leg" and t["unwind_unknown"] and t["net_quote"] is None
+
+
+def test_an_open_carry_shows_its_result_if_closed_now_and_the_balance():
+    c = opened()
+    c.clock.advance(1.0)
+    c.push(spot=(100.49, 100.51), perp=(100.44, 100.46))
+    c.sc.tick()
+    t = c.carry()[0]
+    q = t["spot_qty"]
+    expected = q * (100.49 - 100.01) + q * (100.04 - 100.46) - t["fees_quote"] - q * 100.49 * 0.001 - q * 100.46 * 0.0005
+    assert t["open_net_quote"] == pytest.approx(expected)
+    b = c.sc.balance(carry=True)
+    assert b["open_n"] == 1 and b["open_quote"] == pytest.approx(expected) and b["in_use_quote"] == pytest.approx(t["capital_quote"])
+    assert c.sc.balance(carry=False)["open_n"] == 0
+    assert c.sc.stats()["carry"]["funding_apr_open_pct"] is None  # under a day of data

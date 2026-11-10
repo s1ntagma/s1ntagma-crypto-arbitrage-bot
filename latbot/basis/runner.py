@@ -340,6 +340,15 @@ class BasisRunner:
                 log.exception("basis funding poll failed")
             await asyncio.sleep(max(30.0, float(self._settings.basis_funding_poll_s)))
 
+    def balance(self) -> dict[str, Any]:
+        """One plus / minus number per strategy (finished trades + open positions if closed now) and the total."""
+        parts = {"xfund": self.xfund.balance(), "momentum": self.momentum.balance(),
+                 "carry": self.scanner.balance(carry=True), "signals": self.scanner.balance(carry=False)}
+        parts["signals"]["switched_off"] = not bool(getattr(self._settings, "basis_train_all_signals", False))
+        keys = ("closed_quote", "open_quote", "total_quote", "in_use_quote")
+        parts["total"] = {k: sum(p[k] for name, p in parts.items()) for k in keys}
+        return parts
+
     def snapshot(self, history_limit: int = 300) -> dict[str, Any]:
         pairs = self.scanner.pairs()
         return {
@@ -349,6 +358,7 @@ class BasisRunner:
             "pairs": pairs,
             "stats": self.scanner.stats(),
             "trades": self.scanner.trades(200),
+            "balance": self.balance(),
             "xfund": {"stats": self.xfund.stats(), "candidates": self.xfund.candidates,
                       "trades": self.xfund.trades(100)},
             "momentum": {"stats": self.momentum.stats(), "status": self.momentum.status(),
