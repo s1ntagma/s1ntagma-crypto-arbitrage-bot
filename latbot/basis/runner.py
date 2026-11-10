@@ -42,6 +42,12 @@ VENUES: dict[str, tuple[str, str, float, float, str]] = {
     "kraken": ("kraken", "krakenfutures", 0.004, 0.0005, "USD"),
 }
 
+# venue -> (spot maker, perp maker): the published base tier, used until the venue's own fee is known
+MAKER_FEES: dict[str, tuple[float, float]] = {
+    "binance": (0.001, 0.0002), "okx": (0.0008, 0.0002), "bybit": (0.001, 0.0002), "mexc": (0.0, 0.0001),
+    "gate": (0.002, 0.0002), "bitget": (0.001, 0.0002), "htx": (0.002, 0.0002), "kraken": (0.0025, 0.0002),
+}
+
 LegFactory = Callable[[ExchangeConfig, Any], Any]
 
 
@@ -54,12 +60,13 @@ def leg_configs(venue: str) -> dict[str, ExchangeConfig] | None:
     if spec is None:
         return None
     spot_id, perp_id, spot_fee, perp_fee, _quote = spec
+    spot_maker, perp_maker = MAKER_FEES.get(venue, (spot_fee, perp_fee))
     common = dict(role=ExchangeRole.SIGNAL, stream="book", book_depth=20, poll_tickers=False)
     return {
         "spot": ExchangeConfig(name=leg_name(venue, "spot"), ccxt_id=spot_id, market_type="spot",
-                               taker_fee=spot_fee, maker_fee=spot_fee, label=f"{venue} spot", **common),
+                               taker_fee=spot_fee, maker_fee=spot_maker, label=f"{venue} spot", **common),
         "perp": ExchangeConfig(name=leg_name(venue, "perp"), ccxt_id=perp_id, market_type="swap",
-                               taker_fee=perp_fee, maker_fee=perp_fee, label=f"{venue} perp", **common),
+                               taker_fee=perp_fee, maker_fee=perp_maker, label=f"{venue} perp", **common),
     }
 
 
@@ -189,7 +196,7 @@ class BasisRunner:
                 for leg, adapter, sym in (("spot", spot, ss), ("perp", perp, ps)):
                     try:
                         fees = await adapter.fees(sym)
-                        self.scanner.set_fee(venue, asset, leg, fees.taker)
+                        self.scanner.set_fee(venue, asset, leg, fees.taker, min(fees.maker, fees.taker))
                     except Exception as exc:  # noqa: BLE001
                         log.debug("basis: fees %s %s: %s", adapter.name, sym, exc)
 
@@ -329,7 +336,7 @@ class BasisRunner:
                 "carry_notional_quote", "carry_horizon_h", "carry_min_edge_pct", "carry_exit_rate",
                 "carry_confirm_polls", "carry_max_hold_h", "carry_max_positions", "carry_leverage",
                 "carry_maint_margin", "carry_liq_guard_pct", "carry_history_n", "carry_min_positive_share",
-                "carry_exit_horizon_h", "xfund_enabled", "xfund_notional_quote", "xfund_horizon_h",
+                "carry_exit_horizon_h", "carry_exec", "xfund_exec", "maker_wait_s", "xfund_enabled", "xfund_notional_quote", "xfund_horizon_h",
                 "xfund_min_edge_pct", "xfund_max_positions", "xfund_leverage", "xfund_liq_guard_pct",
                 "xfund_exit_horizon_h", "xfund_max_hold_h", "mom_enabled", "mom_assets", "mom_venues",
                 "mom_notional_quote", "mom_window_s", "mom_entry_pct", "mom_trend_s", "mom_trend_pct",

@@ -326,3 +326,122 @@ async def test_the_runner_loads_the_settled_funding_history_of_every_pair():
     assert await r.poll_history_once() == 1
     p = r.scanner._pairs[("okx", "BTC")]
     assert len(p.funding_history) == 21 and p.funding_interval_h == 4.0
+
+
+# ---- maker execution: one leg rests as a limit order, the other hedges by market ---------------------
+def maker_env(**over):
+    c = Carry(carry_exec="maker", maker_wait_s=60.0, **over)
+    c.sc.set_fee("okx", "BTC", "spot", 0.001, 0.0008)
+    c.sc.set_fee("okx", "BTC", "perp", 0.0005, 0.0002)  # the perp saves more: it is the maker leg
+    return c
+
+
+def approve(c):
+    c.poll({"BTC": 0.0005})
+    c.poll({"BTC": 0.0005})  # the second poll's last push posts the limit order
+
+
+def test_maker_edge_counts_one_maker_and_one_taker_fee_and_the_hedge_legs_spread():
+    c = maker_env()
+    c.poll({"BTC": 0.0005})
+    p = c.sc.pairs()[0]
+    funding = 0.0005 * 100 * 72 / 8
+    fees = 2 * (0.0002 + 0.001) * 100
+    spot_spread = (100.01 / 99.99 - 1) * 100
+    assert p["carry_maker_leg"] == "perp" and p["carry_fees_pct"] == pytest.approx(fees)
+    assert p["carry_edge_pct"] == pytest.approx(funding - fees - spot_spread)
+    taker = Carry()
+    taker.poll({"BTC": 0.0005})
+    assert p["carry_edge_pct"] > taker.sc.pairs()[0]["carry_edge_pct"]
+
+
+def test_a_touch_is_not_a_fill_and_a_trade_through_fills_then_the_other_leg_hedges():
+    c = maker_env()
+    approve(c)
+    [t] = c.carry()
+    assert t["status"] == "pending" and t["orders"]["perp"]["px"] == 100.06 and t["orders"]["perp"]["side"] == -1.0
+    for _ in range(5):
+        c.run(1.0)  # the ask stays at our price: touched, not traded through
+    assert c.carry()[0]["status"] == "pending" and c.carry()[0]["fees_quote"] == 0
+    c.run(1.0, )
+    c.clock.advance(1.0)
+    c.push(perp=(100.07, 100.09))  # the bid went through 100.06: our sell is filled
+    c.sc.tick()
+    t = c.carry()[0]
+    assert t["perp_qty"] == pytest.approx(5.0) and t["entry_perp_vwap"] == 100.06 and t["status"] == "pending"
+    c.clock.advance(0.4)
+    c.push(perp=(100.07, 100.09))
+    c.sc.tick()  # the spot leg hedges by market
+    t = c.carry()[0]
+    assert t["status"] == "open" and t["hedged"] and t["entry_spot_vwap"] == 100.01
+    assert t["fees_quote"] == pytest.approx(5.0 * 100.06 * 0.0002 + 5.0 * 100.01 * 0.001)
+    st = c.sc.stats()["carry"]
+    assert st["exec"] == "maker" and st["maker_fills"] == 1 and st["taker_hedges"] == 1
+
+
+def test_an_unfilled_limit_entry_is_cancelled_without_a_trade_or_a_cost():
+    c = maker_env()
+    approve(c)
+    for _ in range(62):
+        c.run(1.0)
+    assert c.carry() == [] and c.db.list_basis_trades() == []  # counted, never stored
+    st = c.sc.stats()["carry"]
+    assert st["maker_unfilled"] == 1 and st["incidents"] == 0 and st["open"] == 0
+
+
+def maker_opened(**over):
+    c = maker_env(**over)
+    approve(c)
+    c.clock.advance(1.0)
+    c.push(perp=(100.07, 100.09))
+    c.sc.tick()
+    c.clock.advance(0.4)
+    c.push(perp=(100.07, 100.09))
+    c.sc.tick()
+    assert c.carry()[0]["status"] == "open"
+    return c
+
+
+def test_a_funding_exit_rests_the_maker_leg_and_falls_back_to_market_after_the_wait():
+    c = maker_opened()
+    c.poll({"BTC": -0.002})
+    c.poll({"BTC": -0.002})
+    t = c.carry()[0]
+    assert t["status"] == "closing" and t["orders"]["perp"]["side"] == 1.0  # buy the perp back at the bid
+    px = t["orders"]["perp"]["px"]
+    c.clock.advance(1.0)
+    c.push(perp=(px - 0.03, px - 0.01))  # the ask fell through our bid: filled as maker
+    c.sc.tick()
+    c.clock.advance(0.4)
+    c.push(perp=(px - 0.03, px - 0.01))
+    c.sc.tick()
+    t = c.carry()[0]
+    assert t["status"] == "closed" and t["maker_fills"] == 2
+
+    d = maker_opened()
+    d.poll({"BTC": -0.002})
+    d.poll({"BTC": -0.002})
+    for _ in range(62):
+        d.run(1.0)
+    t = d.carry()[0]
+    assert t["status"] == "closed" and t["maker_fills"] == 1  # the exit left by market
+
+
+def test_the_liquidation_guard_leaves_by_market_even_in_maker_mode():
+    c = maker_opened(carry_leverage=5.0, carry_liq_guard_pct=5.0)
+    c.clock.advance(1.0)
+    c.push(spot=(115.99, 116.01), perp=(116.04, 116.06))
+    c.sc.tick()
+    assert c.carry()[0]["orders"] == {}
+    c.run(0.5)
+    t = c.carry()[0]
+    assert t["status"] == "closed" and t["exit_reason"].startswith("liquidation guard")
+
+
+def test_no_maker_saving_means_market_orders():
+    c = Carry(carry_exec="maker")  # maker fees unknown: never assumed lower than taker
+    c.poll({"BTC": 0.0005})
+    c.poll({"BTC": 0.0005})
+    c.run(0.5)
+    t = c.carry()[0]
+    assert t["status"] == "open" and t["maker_fills"] == 0

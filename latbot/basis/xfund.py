@@ -22,6 +22,9 @@ funding rates and the settled funding history per (venue, asset).
   costs more than leaving (2 fees + crossing); or ``xfund_max_hold_h``; or a leg within
   ``xfund_liq_guard_pct`` of its liquidation price (margin = notional / ``xfund_leverage`` per leg).
 * Capital = the margin on both venues; APR on capital.
+* ``xfund_exec = "maker"``: the leg whose venue saves the most with its maker fee rests as a limit order at
+  its own side and fills only when the book trades through its price; the other leg then hedges by market.
+  An entry not filled in ``maker_wait_s`` is cancelled (no trade); an exit then leaves by market.
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ from typing import Any
 
 from ..engine.economics import walk_book
 from ..models import Side
+from .scanner import own_side_price, resting_filled
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +82,8 @@ class XFundTrade:
     phase: str = "entry"
     due: dict[str, float] = field(default_factory=dict)
     done: dict[str, bool] = field(default_factory=dict)
+    order: dict[str, Any] = field(default_factory=dict)  # maker mode: {leg, side, px, qty, posted_mono}
+    maker_fills: int = 0
 
     @property
     def hedged(self) -> bool:
@@ -106,7 +112,8 @@ class FundingArb:
         self._approved: dict[str, tuple[str, str]] = {}  # asset -> (long venue, short venue)
         self._next_ts: dict[tuple[str, str], float] = {}  # (venue, asset) -> next settlement seen
         self.candidates: list[dict[str, Any]] = []
-        self.counters = {"entries": 0, "approved": 0, "revalidation_failed": 0}
+        self.counters = {"entries": 0, "approved": 0, "revalidation_failed": 0, "maker_fills": 0,
+                         "taker_hedges": 0, "maker_unfilled": 0}
         self._load()
 
     # ------------------------------------------------------------------ settings
@@ -145,6 +152,14 @@ class FundingArb:
     def _perps(self, asset: str) -> dict[str, Any]:
         return {v: p for (v, a), p in self.sc._pairs.items() if a == asset and p.quote_ok and p.funding_rate is not None}
 
+    def _maker_leg(self, pl: Any, ps: Any) -> str | None:
+        """Maker mode: the leg (venue) whose maker fee saves the most rests as a limit order; None: taker."""
+        if str(getattr(self._s, "xfund_exec", "taker")) != "maker":
+            return None
+        sl, ss = pl.taker["perp"] - pl.maker_fee("perp"), ps.taker["perp"] - ps.maker_fee("perp")
+        leg, best = ("long", sl) if sl >= ss else ("short", ss)
+        return leg if best > 0 else None
+
     # ------------------------------------------------------------------ edge on the books
     def _exec(self, pl: Any, ps: Any, qty: float, now: float) -> tuple[float, float] | None:
         """(entry spread %, exit spread %) for qty: buy the long venue's asks / sell the short venue's bids,
@@ -178,7 +193,19 @@ class FundingArb:
         fees_pct = 2.0 * (pl.taker["perp"] + ps.taker["perp"]) * 100.0
         ex = self._exec(pl, ps, qty, now)
         cross = None if ex is None else ex[1] - ex[0]
-        return {"rate_long_h": rl, "rate_short_h": rs, "funding_pct": funding_pct, "fees_pct": fees_pct,
+        mleg = self._maker_leg(pl, ps)
+        if mleg is not None:
+            # the maker leg rests at its own side (maker fee, no crossing); the other hedges by market:
+            # taker fee + its spread for the size; the price gap against the pair still counts
+            pm, po = (pl, ps) if mleg == "long" else (ps, pl)
+            fees_pct = 2.0 * (pm.maker_fee("perp") + po.taker["perp"]) * 100.0
+            if ex is not None:
+                bo = self.sc._leg_book(po, "perp", now)
+                bl, bs = self.sc._leg_book(pl, "perp", now), self.sc._leg_book(ps, "perp", now)
+                a = walk_book(bo.asks, base_amount=qty, side=Side.BUY)
+                b = walk_book(bo.bids, base_amount=qty, side=Side.SELL)
+                cross = (a.vwap / b.vwap - 1.0) * 100.0 + max(0.0, (bl.mid / bs.mid - 1.0) * 100.0)
+        return {"maker_leg": mleg,"rate_long_h": rl, "rate_short_h": rs, "funding_pct": funding_pct, "fees_pct": fees_pct,
                 "cross_pct": cross, "qty": qty,
                 "edge_pct": None if cross is None else funding_pct - fees_pct - cross,
                 "edge_est_pct": funding_pct - fees_pct}  # before crossing: ranking only
@@ -242,7 +269,7 @@ class FundingArb:
             exit_cost = (pl.taker["perp"] + ps.taker["perp"]) * 100.0 + (max(0.0, (ex[1] - ex[0]) / 2) if ex else 0.0)
             if hold_cost > exit_cost:
                 self._schedule_exit(t, now, f"funding difference turned: holding would cost {hold_cost:.3f}% "
-                                            f"> leaving {exit_cost:.3f}%")
+                                            f"> leaving {exit_cost:.3f}%", maker=True)
 
     # ------------------------------------------------------------------ simulation (every scanner tick)
     def tick(self, now: float | None = None) -> None:
@@ -255,13 +282,18 @@ class FundingArb:
         for t in list(self._trades):
             if t.status not in _ACTIVE:
                 continue
-            if t.due:
+            if t.order:
+                if t.status == "closing":
+                    self._risk(t, now)  # a leg near liquidation while the exit order rests: out by market
+                if t.order:
+                    self._check_resting(t, now)
+            elif t.due:
                 self._run_due(t, now)
             elif t.status == "open":
                 self._risk(t, now)
                 if t.status == "open" and not t.due and \
                         self._clock.wall() - t.signal_ts >= self._f("xfund_max_hold_h", 336.0) * 3600.0:
-                    self._schedule_exit(t, now, "max hold")
+                    self._schedule_exit(t, now, "max hold", maker=True)
 
     def _try_enter(self, asset: str, lv: str, sv: str, now: float) -> None:
         pl, ps = self.sc._pairs.get((lv, asset)), self.sc._pairs.get((sv, asset))
@@ -281,22 +313,80 @@ class FundingArb:
         t = XFundTrade(id=f"xfund-{asset}-{lv}-{sv}-{int(self._clock.wall() * 1000)}-{next(self._ids)}",
                        asset=asset, long_venue=lv, short_venue=sv, signal_ts=self._clock.wall(),
                        target_qty=e["qty"], edge_pct=e["edge_pct"], rate_long=e["rate_long_h"], rate_short=e["rate_short_h"])
-        t.due = {leg: now + lat for leg in LEGS}
-        t.done = {leg: False for leg in LEGS}
+        if e.get("maker_leg") is None or not self._post(t, e["maker_leg"], t.target_qty, now):
+            t.due = {leg: now + lat for leg in LEGS}
+            t.done = {leg: False for leg in LEGS}
         self._trades.append(t)
         del self._trades[:-_KEEP]
         self.counters["entries"] += 1
-        self._save(t)
+        if not t.order:  # a resting entry order is stored once it fills (unfilled ones leave no row)
+            self._save(t)
         self._save_counters()
 
     def _pair(self, t: XFundTrade, leg: str) -> Any:
         return self.sc._pairs.get((t.venue(leg), t.asset))
 
-    def _book(self, t: XFundTrade, leg: str, side: Side, qty: float, px: float, kind: str) -> None:
+    def _book(self, t: XFundTrade, leg: str, side: Side, qty: float, px: float, kind: str,
+              maker: bool = False) -> None:
         p = self._pair(t, leg)
         notional = qty * px
         t.cash_quote += notional if side == Side.SELL else -notional
-        t.fees_quote += notional * (p.taker["perp"] if p is not None else 0.0005)
+        fee = 0.0005 if p is None else (p.maker_fee("perp") if maker else p.taker["perp"])
+        t.fees_quote += notional * fee
+
+    # ------------------------------------------------------------------ maker execution
+    def _post(self, t: XFundTrade, leg: str, qty: float, now: float) -> bool:
+        """Rest a limit order of ``leg`` at its own side (buy at the best bid, sell at the best ask)."""
+        p = self._pair(t, leg)
+        b = self.sc._leg_book(p, "perp", now) if p is not None else None
+        if b is None or qty <= _EPS:
+            return False
+        buy = (leg == "long") == (t.phase == "entry")
+        t.order = {"leg": leg, "side": 1.0 if buy else -1.0, "px": own_side_price(b, buy), "qty": qty,
+                   "posted_mono": now}
+        return True
+
+    def _check_resting(self, t: XFundTrade, now: float) -> None:
+        """Filled only when the book trades through the order's price; then the other leg hedges by market.
+        Not filled in ``maker_wait_s``: an entry is cancelled (no trade), an exit leaves by market."""
+        o = t.order
+        leg = o["leg"]
+        other = "short" if leg == "long" else "long"
+        p = self._pair(t, leg)
+        b = self.sc._leg_book(p, "perp", now) if p is not None else None
+        if b is not None and resting_filled(b, o["side"] > 0, o["px"]):
+            side = Side.BUY if o["side"] > 0 else Side.SELL
+            self._book(t, leg, side, o["qty"], o["px"], t.phase, maker=True)
+            if t.phase == "entry":
+                t.qty[leg], t.entry_px[leg] = o["qty"], o["px"]
+                need_other = True
+            else:
+                t.qty[leg], t.exit_px[leg] = max(0.0, t.qty[leg] - o["qty"]), o["px"]
+                need_other = t.qty[other] > _EPS
+            t.order = {}
+            t.maker_fills += 1
+            self.counters["maker_fills"] += 1
+            if need_other:
+                self.counters["taker_hedges"] += 1
+                t.due = {other: now + self._f("basis_latency_ms", 300.0) / 1000.0}
+                t.done = {leg: True, other: False}
+            else:
+                t.due, t.done = {}, {}
+                self._finish_exit(t, now)
+            self._save(t)
+            self._save_counters()
+            return
+        wait = self._f("maker_wait_s", 60.0)
+        if now - o["posted_mono"] < wait:
+            return
+        t.order = {}
+        self.counters["maker_unfilled"] += 1
+        self._save_counters()
+        if t.phase == "entry":
+            # no fill, no position, no cost: counted, not kept (retried at the next funding poll)
+            self._trades = [x for x in self._trades if x is not t]
+        else:
+            self._schedule_exit(t, now, t.exit_reason)
 
     def _run_due(self, t: XFundTrade, now: float) -> None:
         for leg in LEGS:
@@ -363,12 +453,20 @@ class FundingArb:
         t.status = "open"
         t.opened_ts = self._clock.wall()
 
-    def _schedule_exit(self, t: XFundTrade, now: float, reason: str) -> None:
+    def _schedule_exit(self, t: XFundTrade, now: float, reason: str, maker: bool = False) -> None:
+        """Both legs out by market; ``maker=True`` (funding exit, max hold) first rests the maker leg."""
         lat = self._f("basis_latency_ms", 300.0) / 1000.0
         t.phase, t.status = "exit", "closing"
         t.exit_attempts += 1
+        t.order = {}
         if not t.exit_reason:
             t.exit_reason = reason
+        pl, ps = self._pair(t, "long"), self._pair(t, "short")
+        mleg = self._maker_leg(pl, ps) if maker and pl is not None and ps is not None else None
+        if mleg is not None and all(t.qty[leg] > _EPS for leg in LEGS) and self._post(t, mleg, t.qty[mleg], now):
+            t.due, t.done = {}, {}
+            self._save(t)
+            return
         t.due = {leg: now + lat for leg in LEGS if t.qty[leg] > _EPS}
         t.done = {leg: leg not in t.due for leg in LEGS}
         self._save(t)
@@ -497,6 +595,7 @@ class FundingArb:
                 continue
             if t.status in ("open", "closing"):
                 t.funding_unknown = True  # funding while the process was down is not counted
+                t.order = {}  # a resting order of the previous run is gone
                 if t.status == "closing":
                     t.due = {leg: float("-inf") for leg in LEGS if t.qty[leg] > _EPS}
                     t.done = {leg: leg not in t.due for leg in LEGS}
@@ -536,6 +635,8 @@ class FundingArb:
             "realized_apr_pct": apr(closed, lambda t: t.net_quote or 0.0),
             "funding_apr_open_pct": apr(live, lambda t: t.funding_quote),
             "leverage": self._f("xfund_leverage", 2.0),
+            "exec": str(getattr(self._s, "xfund_exec", "taker")), "maker_fills": self.counters["maker_fills"],
+            "taker_hedges": self.counters["taker_hedges"], "maker_unfilled": self.counters["maker_unfilled"],
         }
 
 

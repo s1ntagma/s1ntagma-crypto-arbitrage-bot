@@ -267,6 +267,9 @@ class Settings:
     carry_history_n: int = 21  # settled funding rates from the exchange behind the rate estimate (7 days at 8 h)
     carry_min_positive_share: float = 0.8  # entry: at least this share of them positive
     carry_exit_horizon_h: float = 24.0  # exit: only when holding this long at the turned rate costs more than leaving
+    carry_exec: str = "maker"  # maker: one leg rests as a limit order (maker fee), the other hedges; taker: both by market
+    xfund_exec: str = "maker"
+    maker_wait_s: float = 60.0  # a resting entry order not traded through in this time is cancelled (no trade)
     # cross-venue funding arbitrage (virtual): long perp where funding is low, short perp where it is high
     xfund_enabled: bool = True
     xfund_notional_quote: float = 1000.0  # virtual size of each leg (quote currency)

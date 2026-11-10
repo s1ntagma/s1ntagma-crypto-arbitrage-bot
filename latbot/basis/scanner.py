@@ -43,7 +43,9 @@ edge >= ``carry_min_edge_pct``; at most ``carry_max_positions`` open, highest ed
 rate costs more than leaving (2 fees + crossing), or ``carry_max_hold_h``, or the liquidation guard.
 Rate estimate: the lower of the current rate and the mean of the last ``carry_history_n`` settled rates
 (``carry_min_positive_share`` of them positive).  Capital = spot + perp margin at ``carry_leverage``; APR
-is on capital.  The basis exit rules
+is on capital.  ``carry_exec = "maker"``: the leg with the larger maker saving rests as a limit order at its
+own side and counts as filled only when the book trades through its price; the other leg then hedges by
+market.  An entry not filled in ``maker_wait_s`` is cancelled (no trade); an exit then leaves by market.  The basis exit rules
 do not apply.  An open carry position survives a restart (funding while the process was down is not
 counted and the position is flagged ``funding_unknown``).
 """
@@ -129,6 +131,9 @@ class BasisTrade:
     max_perp_mid: float = 0.0
     liq_buffer_pct: float | None = None  # distance of the perp price to the liquidation price, % (lowest seen)
     liquidated: bool = False
+    # maker execution: one resting limit order {leg: {side, px, qty, posted_mono}} (see _check_resting)
+    orders: dict[str, dict[str, float]] = field(default_factory=dict)
+    maker_fills: int = 0
 
     @property
     def hedged(self) -> bool:
@@ -150,6 +155,11 @@ class _Pair:
     note: str = ""
     books: dict[str, OrderBook | None] = field(default_factory=lambda: {"spot": None, "perp": None})
     taker: dict[str, float] = field(default_factory=lambda: {"spot": 0.001, "perp": 0.0005})
+    maker: dict[str, float | None] = field(default_factory=lambda: {"spot": None, "perp": None})  # None: unknown
+
+    def maker_fee(self, leg: str) -> float:
+        m = self.maker.get(leg)
+        return self.taker[leg] if m is None else m  # an unknown maker fee is never assumed lower
     funding_rate: float | None = None
     funding_interval_h: float = 8.0
     funding_next_ts: float | None = None
@@ -177,7 +187,7 @@ class BasisScanner:
         self.counters: dict[str, int] = {
             "signals_fut_upper": 0, "signals_spot_lower": 0, "signals_both": 0, "signals_while_open": 0,
             "entries": 0, "stale_evals": 0, "skew_evals": 0, "evaluations": 0, "carry_entries": 0,
-            "training_entries": 0,
+            "training_entries": 0, "maker_fills": 0, "taker_hedges": 0, "maker_unfilled": 0,
         }
         self._load()
 
@@ -217,9 +227,11 @@ class BasisScanner:
         for r in rows[-_FUNDING_KEEP:]:
             p.funding_samples.append(float(r["rate"]))
 
-    def set_fee(self, venue: str, asset: str, leg: str, taker: float) -> None:
+    def set_fee(self, venue: str, asset: str, leg: str, taker: float, maker: float | None = None) -> None:
         if leg in LEGS and taker is not None and taker >= 0:
             self._pair(venue, asset).taker[leg] = float(taker)
+        if leg in LEGS and maker is not None and maker >= 0:
+            self._pair(venue, asset).maker[leg] = float(maker)
 
     def set_funding(self, venue: str, asset: str, rate: float | None, interval_h: float | None = None,
                     next_ts: float | None = None) -> None:
@@ -401,22 +413,48 @@ class BasisScanner:
         polled = [r for r in p.funding_samples if r is not None]
         return (min(cur, sum(polled) / len(polled)) if polled else cur), "polls"
 
+    def _maker_leg(self, p: _Pair) -> str | None:
+        """The leg posted as a limit order in maker mode: the one whose maker fee saves the most against
+        its taker fee (the other leg hedges by market).  None: taker mode, or nothing to save."""
+        if str(getattr(self._settings, "carry_exec", "taker")) != "maker":
+            return None
+        saving = {leg: p.taker[leg] - p.maker_fee(leg) for leg in LEGS}
+        leg = "perp" if saving["perp"] >= saving["spot"] else "spot"
+        return leg if saving[leg] > 0 else None
+
     def _carry_edge(self, p: _Pair) -> dict[str, Any]:
-        """Carry entry on the current (already checked fresh) books: edge %, qty, entry basis, exit cost %."""
+        """Carry entry on the current (already checked fresh) books: edge %, qty, entry basis, exit cost %.
+        Taker mode: 4 taker fees + crossing both books.  Maker mode: the maker leg rests at its own side
+        (maker fee, no crossing), the other leg hedges by market (taker fee + its spread for the size)."""
         rate, source = self._carry_rate(p)
+        none = {"edge": None, "qty": 0.0, "entry": None, "exit_cost": None, "rate": rate, "maker_leg": None,
+                "fees": None}
         if rate is None:
-            return {"edge": None, "qty": 0.0, "entry": None, "exit_cost": None, "rate": None, "note": source}
+            return {**none, "note": source}
         s, f = p.books["spot"], p.books["perp"]
         qty = self._s("carry_notional_quote", 1000.0) / s.mid if s.mid else 0.0
         entry, exit_ = self._exec_basis(p, qty)
         if entry is None or exit_ is None:
-            return {"edge": None, "qty": qty, "entry": None, "exit_cost": None, "rate": rate,
-                    "note": "book too thin for the size"}
+            return {**none, "qty": qty, "note": "book too thin for the size"}
         periods = self._s("carry_horizon_h", 72.0) / max(p.funding_interval_h, 1e-9)
-        edge = rate * 100.0 * periods - self._fees_pct(p) - (exit_ - entry)
-        # leaving now: two taker fees + crossing from the mid basis to the executable exit basis
-        exit_cost = (p.taker["spot"] + p.taker["perp"]) * 100.0 + max(0.0, exit_ - (f.mid / s.mid - 1.0) * 100.0)
-        return {"edge": edge, "qty": qty, "entry": entry, "exit_cost": exit_cost, "rate": rate, "note": source}
+        funding_pct = rate * 100.0 * periods
+        mleg = self._maker_leg(p)
+        if mleg is None:
+            fees = self._fees_pct(p)
+            cross = exit_ - entry
+            # leaving now: two taker fees + crossing from the mid basis to the executable exit basis
+            exit_cost = (p.taker["spot"] + p.taker["perp"]) * 100.0 + max(0.0, exit_ - (f.mid / s.mid - 1.0) * 100.0)
+        else:
+            other = "spot" if mleg == "perp" else "perp"
+            ob = p.books[other]
+            a = walk_book(ob.asks, base_amount=qty, side=Side.BUY)
+            b = walk_book(ob.bids, base_amount=qty, side=Side.SELL)
+            side_fees = (p.maker_fee(mleg) + p.taker[other]) * 100.0
+            fees = 2.0 * side_fees
+            cross = (a.vwap / b.vwap - 1.0) * 100.0  # the hedge leg crosses half its spread in, half out
+            exit_cost = side_fees + cross / 2.0
+        return {"edge": funding_pct - fees - cross, "qty": qty, "entry": entry, "exit_cost": exit_cost,
+                "rate": rate, "note": source, "maker_leg": mleg, "fees": fees}
 
     def _last_rates(self, p: _Pair) -> list[float | None] | None:
         n = max(1, int(self._s("carry_confirm_polls", 2)))
@@ -436,6 +474,7 @@ class BasisScanner:
         p.carry.update({"carry_edge_pct": edge, "carry_edge_mono": now, "carry_rate_est": e["rate"],
                         "carry_rate_source": e["note"] if edge is not None else "", "carry_exit_cost_pct": e["exit_cost"],
                         "carry_note": "" if edge is not None else e["note"],
+                        "carry_maker_leg": e["maker_leg"], "carry_fees_pct": e["fees"],
                         "funding_interval_source": p.interval_source,
                         "funding_positive_share": (sum(1 for r in hist if r > 0) / len(hist)) if hist else None})
         if not p.carry.get("carry_approved") or edge is None or qty <= 0:
@@ -448,7 +487,7 @@ class BasisScanner:
             p.carry["carry_approved"] = False
             return
         p.carry["carry_approved"] = False
-        self._open(p, CARRY, qty, entry, now)
+        self._open(p, CARRY, qty, entry, now, maker_leg=e["maker_leg"])
         self.counters["carry_entries"] += 1
         self._mark_counters(now)
 
@@ -477,7 +516,7 @@ class BasisScanner:
                 continue
             p.carry["carry_hold_note"] = ""
             self._schedule_exit(t, now, f"funding below {exit_rate:g} on {len(rates)} polls ({rates[-1]:+.6f}), "
-                                        f"holding would cost {hold_cost:.3f}%")
+                                        f"holding would cost {hold_cost:.3f}%", maker=True)
             self._save(t)
         max_age = max(60.0, self._s("basis_funding_poll_s", 300.0))
         candidates = []
@@ -510,21 +549,23 @@ class BasisScanner:
 
     # ------------------------------------------------------------------ simulator
     def _open(self, p: _Pair, trigger: str, qty: float, entry: float | None, now: float,
-              training: bool = False) -> None:
+              training: bool = False, maker_leg: str | None = None) -> None:
         lat = self._s("basis_latency_ms", 300.0) / 1000.0
         t = BasisTrade(id=f"basis-{p.venue}-{p.asset}-{int(self._clock.wall() * 1000)}-{next(self._ids)}",
                        venue=p.venue, asset=p.asset, trigger=trigger, signal_ts=self._clock.wall(), signal_mono=now,
                        target_qty=qty, signal_basis_pct=entry if entry is not None else float("nan"),
                        training=training)
-        t.due = {leg: now + lat for leg in LEGS}
-        t.done = {leg: False for leg in LEGS}
+        if maker_leg is None or not self._post(t, p, maker_leg, t.target_qty, now):
+            t.due = {leg: now + lat for leg in LEGS}
+            t.done = {leg: False for leg in LEGS}
         self._trades.append(t)
         del self._trades[:-_TRADES_KEEP]
         if training:
             self.counters["training_entries"] += 1
         elif trigger != CARRY:  # carry entries are counted by carry_review
             self.counters["entries"] += 1
-        self._save(t)
+        if not t.orders:  # a resting entry order is stored once it fills (unfilled ones leave no row)
+            self._save(t)
 
     def tick(self, now: float | None = None) -> None:
         """Due fills, exits, funding and adverse moves (called by the runner a few times a second)."""
@@ -540,11 +581,73 @@ class BasisScanner:
                 self._adverse(t, p, now)
                 if t.trigger == CARRY:
                     self._carry_risk(t, p, now)
-            if t.due:
+            if t.orders:
+                self._check_resting(t, p, now)
+            elif t.due:
                 self._run_due(t, p, now)
             elif t.status == "open":
                 self._maybe_exit(t, p, now)
         self._flush_counters(now)
+
+    # ------------------------------------------------------------------ maker execution
+    def _post(self, t: BasisTrade, p: _Pair, leg: str, qty: float, now: float) -> bool:
+        """Rest a limit order of ``leg`` at its own side of the book (buy at the best bid, sell at the best
+        ask).  Entry: buy spot / sell perp; exit: the reverse.  False when the leg has no fresh book."""
+        b = self._leg_book(p, leg, now)
+        if b is None or qty <= _EPS:
+            return False
+        buy = (leg == "spot") == (t.phase == "entry")
+        t.orders = {leg: {"side": 1.0 if buy else -1.0, "px": own_side_price(b, buy), "qty": qty, "posted_mono": now}}
+        return True
+
+    def _check_resting(self, t: BasisTrade, p: _Pair, now: float) -> None:
+        """A resting order fills only when the book trades THROUGH its price (queue position is unknown, a
+        touch is never a fill).  Then the other leg hedges by market at once.  Not filled within
+        ``maker_wait_s``: an entry is cancelled (no trade), an exit goes out by market."""
+        (leg, o), = t.orders.items()
+        other = "spot" if leg == "perp" else "perp"
+        b = self._leg_book(p, leg, now)
+        if b is not None and resting_filled(b, o["side"] > 0, o["px"]):
+            side = Side.BUY if o["side"] > 0 else Side.SELL
+            q, px = o["qty"], o["px"]
+            self._book_cash(t, p, leg, side, q, px, t.phase, maker=True)
+            if t.phase == "entry":
+                if leg == "spot":
+                    t.spot_qty, t.entry_spot_vwap = q, px
+                else:
+                    t.perp_qty, t.entry_perp_vwap = q, px
+                need_other = True
+            else:
+                if leg == "spot":
+                    t.spot_qty, t.exit_spot_vwap = max(0.0, t.spot_qty - q), _kind_vwap(t.fills["spot"], "exit")
+                else:
+                    t.perp_qty, t.exit_perp_vwap = max(0.0, t.perp_qty - q), _kind_vwap(t.fills["perp"], "exit")
+                need_other = (t.spot_qty if other == "spot" else t.perp_qty) > _EPS
+            t.orders = {}
+            t.maker_fills += 1
+            self.counters["maker_fills"] += 1
+            if need_other:
+                self.counters["taker_hedges"] += 1
+                t.due = {other: now + self._s("basis_latency_ms", 300.0) / 1000.0}
+                t.done = {leg: True, other: False}
+            else:
+                t.due, t.done = {}, {}
+                self._finish_exit_attempt(t, p, now)
+            self._mark_counters(now)
+            self._save(t)
+            return
+        wait = self._s("maker_wait_s", 60.0)
+        if now - o["posted_mono"] < wait:
+            return
+        t.orders = {}
+        self.counters["maker_unfilled"] += 1
+        self._mark_counters(now)
+        if t.phase == "entry":
+            # no fill, no position, no cost: counted, not kept (retried at the next funding poll)
+            self._trades = [x for x in self._trades if x is not t]
+            return
+        self._schedule_exit(t, now, t.exit_reason)  # the exit must happen: by market
+        self._save(t)
 
     def _carry_risk(self, t: BasisTrade, p: _Pair, now: float) -> None:
         """Liquidation of the short perp: the guard closes the pair before it; a jump through the
@@ -596,12 +699,13 @@ class BasisScanner:
             return 0.0, 0.0
         return w.filled_base, w.vwap
 
-    def _book_cash(self, t: BasisTrade, p: _Pair, leg: str, side: Side, qty: float, px: float, kind: str) -> None:
+    def _book_cash(self, t: BasisTrade, p: _Pair, leg: str, side: Side, qty: float, px: float, kind: str,
+                   maker: bool = False) -> None:
         notional = qty * px
         t.cash_quote += notional if side == Side.SELL else -notional
-        t.fees_quote += notional * p.taker[leg]
+        t.fees_quote += notional * (p.maker_fee(leg) if maker else p.taker[leg])
         t.fills[leg].append({"kind": kind, "side": 1.0 if side == Side.BUY else -1.0, "qty": qty, "px": px,
-                             "ts": self._clock.wall()})
+                             "ts": self._clock.wall(), "maker": maker})
 
     def _run_due(self, t: BasisTrade, p: _Pair, now: float) -> None:
         for leg in LEGS:
@@ -698,7 +802,7 @@ class BasisScanner:
         if t.trigger == CARRY:  # funding exits come from carry_review; only the max hold here (wall clock:
             # the position may have survived a restart, monotonic time did not)
             if self._clock.wall() - t.signal_ts >= self._s("carry_max_hold_h", 336.0) * 3600.0:
-                self._schedule_exit(t, now, "max hold")
+                self._schedule_exit(t, now, "max hold", maker=True)
             return
         held = now - t.signal_mono
         reason = ""
@@ -715,13 +819,21 @@ class BasisScanner:
         if reason:
             self._schedule_exit(t, now, reason)
 
-    def _schedule_exit(self, t: BasisTrade, now: float, reason: str) -> None:
+    def _schedule_exit(self, t: BasisTrade, now: float, reason: str, maker: bool = False) -> None:
+        """Both legs out by market; ``maker=True`` (funding exit, max hold) first rests the maker leg."""
         lat = self._s("basis_latency_ms", 300.0) / 1000.0
         t.phase = "exit"
         t.status = "closing"
         t.exit_attempts += 1
+        t.orders = {}
         if not t.exit_reason:
             t.exit_reason = reason
+        p = self._pairs.get((t.venue, t.asset)) if maker else None
+        mleg = self._maker_leg(p) if p is not None else None
+        if mleg is not None and t.spot_qty > _EPS and t.perp_qty > _EPS and \
+                self._post(t, p, mleg, t.spot_qty if mleg == "spot" else t.perp_qty, now):
+            t.due, t.done = {}, {}
+            return
         t.due = {leg: now + lat for leg in LEGS if (t.spot_qty if leg == "spot" else t.perp_qty) > _EPS}
         t.done = {leg: leg not in t.due for leg in LEGS}
 
@@ -830,6 +942,7 @@ class BasisScanner:
             if t.trigger == CARRY and t.status in ("open", "closing"):
                 # a carry position lives for days: it resumes; funding while the process was down is not known
                 t.funding_unknown = True
+                t.orders = {}  # a resting order of the previous run is gone
                 if t.liq_price is None and t.entry_perp_vwap and t.perp_qty > _EPS:  # a row of an older build
                     lev = max(1.0, self._s("carry_leverage", 2.0))
                     t.capital_quote = t.spot_qty * t.entry_spot_vwap + t.perp_qty * t.entry_perp_vwap / lev
@@ -945,9 +1058,25 @@ class BasisScanner:
             "guard_exits": sum(1 for t in ts if t.exit_reason.startswith("liquidation guard")),
             "min_liq_buffer_pct": min((t.liq_buffer_pct for t in live if t.liq_buffer_pct is not None), default=None),
             "leverage": self._s("carry_leverage", 2.0),
+            "exec": str(getattr(self._settings, "carry_exec", "taker")),
+            "maker_fills": self.counters.get("maker_fills", 0), "taker_hedges": self.counters.get("taker_hedges", 0),
+            "maker_unfilled": self.counters.get("maker_unfilled", 0),
             "realized_apr_pct": apr(closed, lambda t: t.net_quote or 0.0),
             "funding_apr_open_pct": apr(live, lambda t: t.funding_quote),
         }
+
+
+def own_side_price(book: OrderBook, buy: bool) -> float:
+    """Where a passive limit order rests: a buy at the best bid, a sell at the best ask."""
+    return book.bids[0].price if buy else book.asks[0].price
+
+
+def resting_filled(book: OrderBook, buy: bool, px: float) -> bool:
+    """Has the market traded through a resting order at ``px``?  Buy: the best bid fell below it (its level
+    was consumed) or the best ask reached it.  Sell: the mirror.  A touch is not a fill."""
+    if buy:
+        return book.bids[0].price < px or book.asks[0].price <= px
+    return book.asks[0].price > px or book.bids[0].price >= px
 
 
 def _breakdown(rows: list[BasisTrade], key) -> dict[str, dict[str, Any]]:
@@ -978,4 +1107,4 @@ def _kind_vwap(fills: list[dict[str, Any]], kind: str) -> float:
     qty = sum(f["qty"] for f in fills if f.get("kind") == kind)
     return sum(f["qty"] * f["px"] for f in fills if f.get("kind") == kind) / qty if qty > 0 else 0.0
 
-__all__ = ["BasisScanner", "BasisTrade", "CONDITIONS", "MODES"]
+__all__ = ["BasisScanner", "BasisTrade", "CONDITIONS", "MODES", "own_side_price", "resting_filled"]

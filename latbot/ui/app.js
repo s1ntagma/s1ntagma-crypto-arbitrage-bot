@@ -1634,7 +1634,9 @@
         ['Funding APR on capital (open)', cs.funding_apr_open_pct == null ? '—' : num(cs.funding_apr_open_pct).toFixed(1) + '%'],
         ['Closed: fees / net', usd(-(cs.fees_quote || 0)) + ' / ' + usd(cs.net_quote)],
         ['Realized APR on capital (net, closed)', cs.realized_apr_pct == null ? '—' : num(cs.realized_apr_pct).toFixed(1) + '%'],
-        ['Funding unknown (restart gaps)', String(cs.funding_unknown || 0)]
+        ['Funding unknown (restart gaps)', String(cs.funding_unknown || 0)],
+        ['Orders: ' + (cs.exec === 'maker' ? 'limit (maker) + market hedge' : 'market (taker)'),
+          'limit fills ' + (cs.maker_fills || 0) + ' · hedges ' + (cs.taker_hedges || 0) + ' · not filled ' + (cs.maker_unfilled || 0)]
       ]);
       var bb = $('basis-breakdown'); clear(bb);
       var addGroup = function (title, groups, limit) {
@@ -1693,7 +1695,9 @@
         ['Funding APR on capital (open)', xs.funding_apr_open_pct == null ? '—' : num(xs.funding_apr_open_pct).toFixed(1) + '%'],
         ['Closed: fees / net', usd(-(xs.fees_quote || 0)) + ' / ' + usd(xs.net_quote)],
         ['Realized APR on capital (net, closed)', xs.realized_apr_pct == null ? '—' : num(xs.realized_apr_pct).toFixed(1) + '%'],
-        ['Liquidations / entries refused on the latest book', (xs.liquidations || 0) + ' / ' + (xs.revalidation_failed || 0)]
+        ['Liquidations / entries refused on the latest book', (xs.liquidations || 0) + ' / ' + (xs.revalidation_failed || 0)],
+        ['Orders: ' + (xs.exec === 'maker' ? 'limit (maker) + market hedge' : 'market (taker)'),
+          'limit fills ' + (xs.maker_fills || 0) + ' · hedges ' + (xs.taker_hedges || 0) + ' · not filled ' + (xs.maker_unfilled || 0)]
       ]);
       var xc = $('xfund-cands'); clear(xc);
       (xf.candidates || []).forEach(function (c) {
@@ -1736,7 +1740,8 @@
           h('td', { class: 'num ' + (num(p.carry_edge_pct) >= 0 ? 'pos' : 'neg'), title: [p.carry_reject || p.carry_note || (p.carry_confirmed ? 'rate confirmed' : 'rate not confirmed yet'),
               p.carry_rate_est == null ? '' : 'rate used ' + pct4(num(p.carry_rate_est) * 100) + ' (' + p.carry_rate_source + ')',
               p.funding_positive_share == null ? '' : 'positive ' + Math.round(num(p.funding_positive_share) * 100) + '% of settlements',
-              'interval ' + (p.funding_interval_source || 'default'), p.carry_hold_note || ''].filter(Boolean).join(' · '),
+              'interval ' + (p.funding_interval_source || 'default'), p.carry_hold_note || '',
+              p.carry_fees_pct == null ? '' : 'fees ' + num(p.carry_fees_pct).toFixed(3) + '%' + (p.carry_maker_leg ? ' (limit order on ' + p.carry_maker_leg + ')' : ' (market orders)')].filter(Boolean).join(' · '),
             text: p.carry_edge_pct == null ? '—' : pct4(p.carry_edge_pct) + (p.carry_confirmed ? '' : ' ?') }),
           h('td', { class: 'num', text: p.skew_ms == null ? '—' : Math.round(num(p.skew_ms)) + ' ms' }),
           h('td', { text: conds }),

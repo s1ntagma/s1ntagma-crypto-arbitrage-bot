@@ -189,3 +189,59 @@ def test_off_means_no_entries():
     x.poll(RATES)
     x.run(0.6)
     assert x.trades() == [] and x.xf.candidates == []
+
+
+# ---- maker execution ----------------------------------------------------------------------------------
+def maker_x(**over):
+    x = X(xfund_exec="maker", maker_wait_s=60.0, **over)
+    x.sc.set_fee("okx", "BTC", "perp", 0.0005, 0.0002)   # saves 0.03 %
+    x.sc.set_fee("mexc", "BTC", "perp", 0.0005, 0.0004)  # saves 0.01 %: okx (the long leg) is the maker leg
+    return x
+
+
+def test_maker_edge_is_one_maker_and_one_taker_fee_plus_the_hedge_venues_spread():
+    x = maker_x()
+    x.poll(RATES)
+    [c] = x.xf.candidates
+    funding = (0.0006 / 8 + 0.0002 / 8) * 100 * 72
+    fees = 2 * (0.0002 + 0.0005) * 100
+    spread = (100.02 / 100.00 - 1) * 100
+    assert c["maker_leg"] == "long" and c["fees_pct"] == pytest.approx(fees)
+    assert c["edge_pct"] == pytest.approx(funding - fees - spread)
+    t = X()
+    t.poll(RATES)
+    assert c["edge_pct"] > t.xf.candidates[0]["edge_pct"]
+
+
+def test_the_long_leg_rests_and_fills_on_a_trade_through_then_the_short_hedges():
+    x = maker_x()
+    x.poll(RATES)
+    x.poll(RATES)
+    x.run(0.1)
+    [t] = x.trades()
+    assert t["status"] == "pending" and t["order"]["leg"] == "long" and t["order"]["px"] == 100.00
+    for _ in range(5):
+        x.run(1.0)  # the bid stays at our price: a touch, no fill
+    assert x.trades()[0]["status"] == "pending" and x.trades()[0]["fees_quote"] == 0
+    x.run(1.0, perp={"okx": (99.97, 99.99)})  # okx traded down through our bid: bought as maker
+    t = x.trades()[0]
+    assert t["qty"]["long"] > 0 and t["entry_px"]["long"] == 100.00 and t["status"] == "pending"
+    x.run(0.4, perp={"okx": (99.97, 99.99)})  # mexc sells by market
+    t = x.trades()[0]
+    q = t["qty"]["long"]
+    assert t["status"] == "open" and t["hedged"] and t["entry_px"]["short"] == 100.00
+    assert t["fees_quote"] == pytest.approx(q * 100.00 * 0.0002 + q * 100.00 * 0.0005)
+    st = x.xf.stats()
+    assert st["exec"] == "maker" and st["maker_fills"] == 1 and st["taker_hedges"] == 1
+
+
+def test_an_unfilled_limit_entry_is_no_trade():
+    x = maker_x()
+    x.poll(RATES)
+    x.poll(RATES)
+    x.run(0.1)
+    for _ in range(62):
+        x.run(1.0)
+    assert x.trades() == [] and x.db.list_xfund_trades() == []  # counted, never stored
+    st = x.xf.stats()
+    assert st["maker_unfilled"] == 1 and st["incidents"] == 0 and st["open"] == 0
