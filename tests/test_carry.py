@@ -445,3 +445,33 @@ def test_no_maker_saving_means_market_orders():
     c.run(0.5)
     t = c.carry()[0]
     assert t["status"] == "open" and t["maker_fills"] == 0
+
+
+# ---- funding strategies need fresh books, not books received within 500 ms of each other ---------------
+def apart(c, gap=1.2, spot=SPOT, perp=PERP):
+    """Spot book first, the perp book ``gap`` seconds later (a quiet book only updates when it changes)."""
+    c.sc.on_book("okx", "spot", book(c.clock, "okx", "spot", *spot))
+    c.clock.advance(gap)
+    c.sc.on_book("okx", "perp", book(c.clock, "okx", "perp", *perp))
+
+
+def test_books_received_apart_but_fresh_still_price_a_carry_and_block_the_basis_signal():
+    c = Carry()
+    for _ in range(2):
+        c.sc.set_funding("okx", "BTC", 0.0005, 8.0, c.clock.wall() + 3600.0)
+        apart(c)
+        c.sc.carry_review()
+    p = c.sc.pairs()[0]
+    assert p["ok"] is False and p["reason"].startswith("timestamps")  # no basis signal on these books
+    assert p["carry_edge_pct"] is not None and p["carry_confirmed"] and p["carry_approved"]
+    apart(c)  # the approved pair enters on fresh (not synchronous) books
+    assert [t["status"] for t in c.carry()] == ["pending"]
+    assert c.sc.stats()["carry"]["edge_evals"] >= 3
+
+
+def test_a_stale_book_still_gives_no_carry_edge():
+    c = Carry()
+    c.sc.set_funding("okx", "BTC", 0.0005, 8.0, c.clock.wall() + 3600.0)
+    apart(c, gap=2.5)  # the spot book is older than basis_max_age_ms
+    assert c.sc.pairs()[0].get("carry_edge_pct") is None
+    assert c.sc.stats()["carry"]["edge_evals"] == 0

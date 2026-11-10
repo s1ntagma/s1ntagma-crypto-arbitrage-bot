@@ -1619,7 +1619,7 @@
         ['Net P&L', usd(s.net_pnl_quote)], ['of it incidents', usd(s.incident_pnl_quote)],
         ['Max adverse basis move', pct4(s.max_adverse_basis_pct)],
         ['Funding unknown (flagged)', String(s.funding_unknown || 0)],
-        ['Rejected book updates: stale / timestamps apart',
+        ['Basis signal: rejected book updates, stale / timestamps apart',
           (s.stale_share == null ? '—' : (num(s.stale_share) * 100).toFixed(1) + '%') + ' / ' +
           (s.skew_share == null ? '—' : (num(s.skew_share) * 100).toFixed(1) + '%') +
           ' of ' + (s.evaluations || 0).toLocaleString('en-US')]
@@ -1635,6 +1635,7 @@
         ['Closed: fees / net', usd(-(cs.fees_quote || 0)) + ' / ' + usd(cs.net_quote)],
         ['Realized APR on capital (net, closed)', cs.realized_apr_pct == null ? '—' : num(cs.realized_apr_pct).toFixed(1) + '%'],
         ['Funding unknown (restart gaps)', String(cs.funding_unknown || 0)],
+        ['Pairs priced on fresh books (edge computed, total)', (cs.edge_evals || 0).toLocaleString('en-US')],
         ['Orders: ' + (cs.exec === 'maker' ? 'limit (maker) + market hedge' : 'market (taker)'),
           'limit fills ' + (cs.maker_fills || 0) + ' · hedges ' + (cs.taker_hedges || 0) + ' · not filled ' + (cs.maker_unfilled || 0)]
       ]);
@@ -1697,6 +1698,7 @@
         ['Closed: fees / net', usd(-(xs.fees_quote || 0)) + ' / ' + usd(xs.net_quote)],
         ['Realized APR on capital (net, closed)', xs.realized_apr_pct == null ? '—' : num(xs.realized_apr_pct).toFixed(1) + '%'],
         ['Liquidations / entries refused on the latest book', (xs.liquidations || 0) + ' / ' + (xs.revalidation_failed || 0)],
+        ['Pairs priced on fresh books at the last funding poll', (xs.edge_executable || 0) + ' of ' + (xs.edge_pairs || 0)],
         ['Orders: ' + (xs.exec === 'maker' ? 'limit (maker) + market hedge' : 'market (taker)'),
           'limit fills ' + (xs.maker_fills || 0) + ' · hedges ' + (xs.taker_hedges || 0) + ' · not filled ' + (xs.maker_unfilled || 0)]
       ]);

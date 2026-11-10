@@ -322,3 +322,30 @@ def test_leverage_sets_capital_and_liquidation_and_is_clamped():
     assert t["liq_price"]["short"] == pytest.approx(100.00 * (1 + 1 / 5 - 0.005))
     assert t["liq_price"]["long"] == pytest.approx(100.02 * (1 - 1 / 5 + 0.005))
     assert x.xf.stats()["liq_distance_pct"] == pytest.approx(19.5)
+
+
+def test_two_venues_books_received_apart_but_fresh_give_an_executable_edge():
+    x = X()
+    nxt = x.clock.wall() + 3600.0
+    for (v, a), r in RATES.items():
+        x.sc.set_funding(v, a, r, 8.0, nxt)
+    b = book(x.clock, "okx", "perp", *PERP)
+    b.symbol = "BTC/USDT:USDT"
+    x.sc.on_book("okx", "perp", b)
+    x.clock.advance(1.2)
+    b = book(x.clock, "mexc", "perp", *PERP)
+    b.symbol = "BTC/USDT:USDT"
+    x.sc.on_book("mexc", "perp", b)
+    x.xf.review()
+    assert x.xf.candidates[0]["edge_pct"] is not None
+    x.clock.advance(1.0)  # okx is now 2.2 s old: stale, no executable edge
+    x.xf.review()
+    assert x.xf.candidates[0]["edge_pct"] is None
+
+
+def test_training_pairs_are_off_by_default_and_for_the_owner_config():
+    from latbot.config import Settings
+
+    assert Settings().basis_train_all_signals is False
+    assert Settings.from_dict({"config_version": 9, "basis_train_all_signals": True}).basis_train_all_signals is False
+    assert Settings.from_dict({"config_version": 10, "basis_train_all_signals": True}).basis_train_all_signals is True

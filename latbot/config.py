@@ -184,7 +184,7 @@ DEFAULT_EXCHANGES: list[ExchangeConfig] = [
 # Runtime settings (public, user-tunable)
 # --------------------------------------------------------------------------- #
 # Bumped when a saved config.json needs a one-time upgrade (see Settings._migrate).
-CONFIG_VERSION = 9
+CONFIG_VERSION = 10
 BASIS_TOP_VENUES = ("binance", "okx", "bybit", "mexc", "gate", "bitget")
 _OLD_BASIS_VENUES = ["okx", "bybit", "htx", "kraken"]
 
@@ -253,7 +253,9 @@ class Settings:
     basis_max_slippage_pct: float = 0.3  # a simulated market order walks the book at most this far
     basis_funding_poll_s: float = 300.0
     basis_history_s: float = 3600.0
-    basis_train_all_signals: bool = True  # every condition (not only basis_mode) opens a virtual pair to measure it
+    # every condition (not only basis_mode) opens a virtual pair to measure it.  Off since 2026-11-10: measured
+    # on the owner's venues (156 pairs, gross about 0, fees -612): the signal does not pay
+    basis_train_all_signals: bool = False
     # funding carry (virtual, inside the basis scanner): long spot + short perp while funding pays the short
     carry_enabled: bool = True
     carry_notional_quote: float = 1000.0  # virtual size of each leg (quote currency)
@@ -536,6 +538,8 @@ class Settings:
             if float(data.get("min_target_volume_quote", 100_000.0)) == 100_000.0:
                 data["min_target_volume_quote"] = 500_000.0
             data["min_net_pct_show"] = 0.1
+        if version < 10:
+            data["basis_train_all_signals"] = False  # measured and losing: no more virtual pairs from it
         if version < 9:
             # owner: never a meme coin.  The top-100 build excluded only non-coins; memes go out again
             for key in ("watchlist", "basis_assets"):  # the old default lists carried DOGE

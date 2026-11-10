@@ -14,7 +14,7 @@ funding rates and the settled funding history per (venue, asset).
 * Entry: the difference positive on the last ``carry_confirm_polls`` polls and edge >= ``xfund_min_edge_pct``;
   ``xfund_review`` (after every funding poll) approves the best pairs, highest edge first, within
   ``xfund_max_positions``, one per coin; an approved pair enters on its next fresh books (both legs within
-  ``basis_max_age_ms`` and ``basis_max_skew_ms``), revalidated there.  Each leg fills ``basis_latency_ms``
+  ``basis_max_age_ms``), revalidated there.  Each leg fills ``basis_latency_ms``
   later on the book of that moment within ``basis_max_slippage_pct``; a one-leg fill is an incident, the
   unhedged excess is unwound at once.
 * Funding: each leg at each of its venue's settlements: short + rate x qty x price, long - rate x qty x price.
@@ -112,6 +112,7 @@ class FundingArb:
         self._approved: dict[str, tuple[str, str]] = {}  # asset -> (long venue, short venue)
         self._next_ts: dict[tuple[str, str], float] = {}  # (venue, asset) -> next settlement seen
         self.candidates: list[dict[str, Any]] = []
+        self.edge_stats = {"pairs": 0, "executable": 0}  # last review: pairs priced on fresh books
         self.counters = {"entries": 0, "approved": 0, "revalidation_failed": 0, "maker_fills": 0,
                          "taker_hedges": 0, "maker_unfilled": 0}
         self._load()
@@ -167,8 +168,9 @@ class FundingArb:
         bl, bs = self.sc._leg_book(pl, "perp", now), self.sc._leg_book(ps, "perp", now)
         if bl is None or bs is None:
             return None
-        if abs(bl.ts.recv_mono - bs.ts.recv_mono) * 1000.0 > self._f("basis_max_skew_ms", 500.0):
-            return None
+        # both books are fresh (basis_max_age_ms, _leg_book); they need not arrive within basis_max_skew_ms
+        # of each other: a quiet book only updates when it changes, and a position held for days pays the
+        # two spreads, whatever the half second between the updates
         la = walk_book(bl.asks, base_amount=qty, side=Side.BUY)
         sb = walk_book(bs.bids, base_amount=qty, side=Side.SELL)
         lb = walk_book(bl.bids, base_amount=qty, side=Side.SELL)
@@ -236,6 +238,7 @@ class FundingArb:
                           "quotes": f"{ql}/{qs}" if ql != qs else "",  # e.g. USDT/USDC: the pair carries that rate
                           "diff_day_pct": (e["rate_short_h"] - e["rate_long_h"]) * 100.0 * 24.0, **e})
         cands.sort(key=lambda c: c["edge_pct"] if c["edge_pct"] is not None else c["edge_est_pct"], reverse=True)
+        self.edge_stats = {"pairs": len(cands), "executable": sum(1 for c in cands if c["edge_pct"] is not None)}
         self.candidates = cands[:30]
         self._approved = {}
         busy = {t.asset for t in self._trades if t.status in _ACTIVE}
@@ -639,6 +642,7 @@ class FundingArb:
             "leverage": self._f("xfund_leverage", 2.0),
             "liq_distance_pct": (1.0 / max(1.0, self._f("xfund_leverage", 2.0))
                                  - self._f("carry_maint_margin", 0.005)) * 100.0,
+            "edge_pairs": self.edge_stats["pairs"], "edge_executable": self.edge_stats["executable"],
             "exec": str(getattr(self._s, "xfund_exec", "taker")), "maker_fills": self.counters["maker_fills"],
             "taker_hedges": self.counters["taker_hedges"], "maker_unfilled": self.counters["maker_unfilled"],
         }

@@ -11,7 +11,8 @@ Per (venue, asset) the scanner keeps the latest SPOT and PERP order books of the
 
 Data quality (hard rule 1): both books must exist, be sane (not crossed / broken), younger than
 ``basis_max_age_ms`` and received within ``basis_max_skew_ms`` of each other (and, when the venue
-stamps them, their exchange timestamps too); otherwise nothing is computed for that moment.
+stamps them, their exchange timestamps too); otherwise nothing is computed for that moment.  The funding
+carry needs the freshness bound only (see ``_evaluate``): its edge is funding against the two spreads.
 
 Conditions (two independent virtual price conditions, edge-triggered):
 
@@ -189,6 +190,7 @@ class BasisScanner:
             "signals_fut_upper": 0, "signals_spot_lower": 0, "signals_both": 0, "signals_while_open": 0,
             "entries": 0, "stale_evals": 0, "skew_evals": 0, "evaluations": 0, "carry_entries": 0,
             "training_entries": 0, "maker_fills": 0, "taker_hedges": 0, "maker_unfilled": 0,
+            "carry_edge_evals": 0,
         }
         self._load()
 
@@ -355,6 +357,11 @@ class BasisScanner:
             if p.quote_ok and not why.startswith("waiting"):
                 self.counters[key] += 1
             p.status = {"ok": False, "reason": why}
+            if why.startswith("timestamps"):
+                # both books are fresh, only not received within basis_max_skew_ms of each other (a quiet
+                # book updates only when it changes).  That blocks the short-term basis signal, not a
+                # funding position held for days: its entry cost is the two spreads.
+                self._carry_on_fresh(p, now)
             return
         s, f = p.books["spot"], p.books["perp"]
         qty = self._target_qty(p)
@@ -482,6 +489,8 @@ class BasisScanner:
             return
         e = self._carry_edge(p)
         edge, qty, entry = e["edge"], e["qty"], e["entry"]
+        if edge is not None:
+            self.counters["carry_edge_evals"] += 1
         hist = p.funding_history
         p.carry.update({"carry_edge_pct": edge, "carry_edge_mono": now, "carry_rate_est": e["rate"],
                         "carry_rate_source": e["note"] if edge is not None else "", "carry_exit_cost_pct": e["exit_cost"],
@@ -1072,6 +1081,7 @@ class BasisScanner:
             "min_liq_buffer_pct": min((t.liq_buffer_pct for t in live if t.liq_buffer_pct is not None), default=None),
             "leverage": self._s("carry_leverage", 2.0),
             "exec": str(getattr(self._settings, "carry_exec", "taker")),
+            "edge_evals": self.counters.get("carry_edge_evals", 0),
             "maker_fills": self.counters.get("maker_fills", 0), "taker_hedges": self.counters.get("taker_hedges", 0),
             "maker_unfilled": self.counters.get("maker_unfilled", 0),
             "realized_apr_pct": apr(closed, lambda t: t.net_quote or 0.0),
