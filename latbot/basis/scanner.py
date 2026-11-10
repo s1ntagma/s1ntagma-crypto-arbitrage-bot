@@ -152,6 +152,7 @@ class _Pair:
     spot_symbol: str = ""
     perp_symbol: str = ""
     quote_ok: bool = True
+    perp_only: bool = False  # a venue without a spot leg (cross-venue funding / momentum only)
     note: str = ""
     books: dict[str, OrderBook | None] = field(default_factory=lambda: {"spot": None, "perp": None})
     taker: dict[str, float] = field(default_factory=lambda: {"spot": 0.001, "perp": 0.0005})
@@ -211,6 +212,15 @@ class BasisScanner:
         p.note = "" if p.quote_ok else f"quote mismatch: spot {spot_symbol} vs perp {perp_symbol} (no FX basis)"
         if not p.quote_ok:
             log.info("basis %s %s skipped: %s", venue, asset, p.note)
+        self._restore_samples(p)
+        return p.quote_ok
+
+    def register_perp(self, venue: str, asset: str, perp_symbol: str) -> bool:
+        """A perpetual on a venue without a spot leg: no basis, no carry; its book, fee and funding serve
+        the cross-venue funding arbitrage and momentum."""
+        p = self._pair(venue, asset)
+        p.spot_symbol, p.perp_symbol, p.perp_only, p.quote_ok = "", perp_symbol, True, bool(_quote(perp_symbol))
+        p.status = {"ok": False, "reason": "perp only"}
         self._restore_samples(p)
         return p.quote_ok
 
@@ -336,6 +346,8 @@ class BasisScanner:
         return (sum(h[2] for h in pts) / len(pts), sum(h[3] for h in pts) / len(pts))
 
     def _evaluate(self, p: _Pair, now: float) -> None:
+        if p.perp_only:
+            return
         self.counters["evaluations"] += 1
         ok, why = self._fresh(p, now)
         if not ok:
@@ -972,6 +984,7 @@ class BasisScanner:
         for p in sorted(self._pairs.values(), key=lambda x: (x.venue, x.asset)):
             out.append({"venue": p.venue, "asset": p.asset, "spot_symbol": p.spot_symbol,
                         "perp_symbol": p.perp_symbol, "quote_ok": p.quote_ok, "note": p.note,
+                        "perp_only": p.perp_only, "quote": _quote(p.perp_symbol),
                         "taker": dict(p.taker), **p.status, **p.carry,
                         "funding_samples": [r for r in p.funding_samples][-6:]})
         return out
@@ -1103,8 +1116,11 @@ def _quote(symbol: str) -> str:
     return symbol.split("/", 1)[1].split(":", 1)[0].upper()
 
 
+quote_of = _quote
+
+
 def _kind_vwap(fills: list[dict[str, Any]], kind: str) -> float:
     qty = sum(f["qty"] for f in fills if f.get("kind") == kind)
     return sum(f["qty"] * f["px"] for f in fills if f.get("kind") == kind) / qty if qty > 0 else 0.0
 
-__all__ = ["BasisScanner", "BasisTrade", "CONDITIONS", "MODES", "own_side_price", "resting_filled"]
+__all__ = ["BasisScanner", "BasisTrade", "CONDITIONS", "MODES", "own_side_price", "quote_of", "resting_filled"]

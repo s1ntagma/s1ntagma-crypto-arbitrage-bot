@@ -235,6 +235,8 @@ class Settings:
     # the most traded spot + perp venues (TokenInsight Q3 2026: volume and open interest); htx and kraken
     # stay available but are not default (spot taker 0.2 % / 0.4 % eats a carry)
     basis_venues: list[str] = field(default_factory=lambda: list(BASIS_TOP_VENUES))
+    # perpetual-only venues (no spot leg): cross-venue funding only.  Hyperliquid: hourly funding, USDC quote
+    basis_perp_venues: list[str] = field(default_factory=lambda: ["hyperliquid"])
     basis_assets: list[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "BNB"])  # [] = the pool
     basis_top_n: int = 100  # with basis_assets empty: the first N coins of the pool (market-cap order)
     basis_notional_quote: float = 1000.0  # virtual size of each leg (quote currency)
@@ -638,6 +640,7 @@ class Settings:
                          ("ride_trail_pct", 0.01), ("ride_max_hold_s", 5.0), ("ride_stale_s", 2.0)):
             setattr(self, name, max(lo, float(getattr(self, name))))
         self.ws_assets = max(1, min(100, int(self.ws_assets)))
+        self.xfund_leverage = max(1.0, min(5.0, float(self.xfund_leverage)))  # 5x: liquidation ~20 % away
         self.ws_book_resubscribe_s = max(0.0, float(self.ws_book_resubscribe_s))
         self.exchange_budget_quote = _budgets(self.exchange_budget_quote, self.exchanges, strict=False)
         for f in fields(self):  # a hand-edited config.json may hold "false" / "0": never truthy strings

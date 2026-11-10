@@ -1691,6 +1691,7 @@
       kvRows($('xfund-stats'), [
         ['Pairs open / closed / incidents', (xs.open || 0) + ' / ' + (xs.closed || 0) + ' / ' + (xs.incidents || 0)],
         ['Capital (margin on both venues, ' + (xs.leverage || '?') + 'x)', usd(xs.open_capital_quote)],
+        ['Liquidation distance at this leverage', xs.liq_distance_pct == null ? '—' : num(xs.liq_distance_pct).toFixed(1) + '% price move'],
         ['Funding collected: total / open pairs', usd(xs.funding_quote) + ' / ' + usd(xs.funding_open_quote)],
         ['Funding APR on capital (open)', xs.funding_apr_open_pct == null ? '—' : num(xs.funding_apr_open_pct).toFixed(1) + '%'],
         ['Closed: fees / net', usd(-(xs.fees_quote || 0)) + ' / ' + usd(xs.net_quote)],
@@ -1702,7 +1703,7 @@
       var xc = $('xfund-cands'); clear(xc);
       (xf.candidates || []).forEach(function (c) {
         xc.appendChild(h('tr', null,
-          h('td', { text: c.asset }), h('td', { text: c.long }), h('td', { text: c.short }),
+          h('td', { text: c.asset + (c.quotes ? ' (' + c.quotes.replace('/', ' vs ') + ')' : '') }), h('td', { text: c.long }), h('td', { text: c.short }),
           h('td', { class: 'num', text: pct4(c.diff_day_pct) }), h('td', { class: 'num', text: pct4(c.funding_pct) }),
           h('td', { class: 'num', text: pct4(c.fees_pct) }), h('td', { class: 'num', text: c.cross_pct == null ? 'book not fresh' : pct4(c.cross_pct) }),
           h('td', { class: 'num ' + (num(c.edge_pct == null ? c.edge_est_pct : c.edge_pct) >= 0 ? 'pos' : 'neg'),
@@ -1725,6 +1726,7 @@
       kvRows($('basis-settings'), Object.keys(cfg).map(function (k) { return [k.replace('basis_', ''), String(cfg[k])]; }));
       var pb = $('basis-pairs'); clear(pb);
       (d.pairs || []).forEach(function (p) {
+        if (p.perp_only) return;  // a perp-only venue (Hyperliquid) has no spot-futures basis
         var c = p.conditions || {};
         var conds = ['fut_upper', 'spot_lower', 'both'].filter(function (k) { return c[k]; }).join(', ') || '—';
         pb.appendChild(h('tr', null,

@@ -18,7 +18,8 @@ def settings(**over) -> Settings:
                 basis_spot_lower_pct=0.1, basis_ref_window_s=10.0, basis_exit_basis_pct=0.02,
                 basis_min_convergence_pct=0.05, basis_max_hold_s=3600.0, basis_latency_ms=300.0,
                 basis_max_skew_ms=500.0, basis_max_age_ms=2000.0, basis_max_slippage_pct=0.3,
-                basis_train_all_signals=False, carry_exec="taker", xfund_exec="taker")
+                basis_train_all_signals=False, carry_exec="taker", xfund_exec="taker",
+                basis_perp_venues=[])
     base.update(over)
     return Settings(**base)
 
@@ -406,3 +407,27 @@ def test_every_signal_trains_a_virtual_pair_and_the_results_are_split_by_trigger
     by = env.sc.stats()["by_trigger"]["fut_upper"]
     assert by["closed"] == 1 and by["pnl_quote"] == pytest.approx(t["net_quote"])
     assert env.sc.stats()["by_venue_asset"]["okx BTC"]["closed"] == 1
+
+
+async def test_a_perp_only_venue_gets_one_adapter_and_perp_only_pairs():
+    clock = SimClock()
+
+    class Usdc(FakeLeg):
+        def symbol_for(self, asset):
+            return f"{asset}/USDC:USDC"
+
+    made = []
+
+    def factory(cfg, creds):
+        made.append(cfg.name)
+        return (Usdc if cfg.name.startswith("hyperliquid") else FakeLeg)(cfg, None, clock)
+
+    r = BasisRunner(settings(basis_venues=["okx"], basis_perp_venues=["hyperliquid"], basis_assets=["BTC"]), clock,
+                    leg_factory=factory)
+    assert sorted(made) == ["hyperliquid.perp", "okx.perp", "okx.spot"]
+    for v, legs in r.legs.items():
+        await r._start_venue(v, legs, ["BTC"])
+    hl = r.scanner._pairs[("hyperliquid", "BTC")]
+    assert hl.perp_only and hl.perp_symbol == "BTC/USDC:USDC" and hl.taker["perp"] == 0.0004
+    assert await r.poll_funding_once() == 2 and hl.funding_rate == pytest.approx(0.0002)
+    assert "hyperliquid" in r.snapshot()["venues"]

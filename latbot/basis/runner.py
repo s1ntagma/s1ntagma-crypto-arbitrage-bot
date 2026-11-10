@@ -48,6 +48,16 @@ MAKER_FEES: dict[str, tuple[float, float]] = {
     "gate": (0.002, 0.0002), "bitget": (0.001, 0.0002), "htx": (0.002, 0.0002), "kraken": (0.0025, 0.0002),
 }
 
+# perpetual-only venues: venue -> (ccxt id, perp taker, perp maker, quote).  No spot leg: no basis / carry
+PERP_ONLY_VENUES: dict[str, tuple[str, float, float, str]] = {
+    "hyperliquid": ("hyperliquid", 0.00045, 0.00015, "USDC"),
+}
+
+
+def venue_quote(venue: str) -> str:
+    return VENUES[venue][4] if venue in VENUES else PERP_ONLY_VENUES[venue][3]
+
+
 LegFactory = Callable[[ExchangeConfig, Any], Any]
 
 
@@ -56,12 +66,16 @@ def leg_name(venue: str, leg: str) -> str:
 
 
 def leg_configs(venue: str) -> dict[str, ExchangeConfig] | None:
+    common = dict(role=ExchangeRole.SIGNAL, stream="book", book_depth=20, poll_tickers=False)
+    po = PERP_ONLY_VENUES.get(venue)
+    if po is not None:
+        return {"perp": ExchangeConfig(name=leg_name(venue, "perp"), ccxt_id=po[0], market_type="swap",
+                                       taker_fee=po[1], maker_fee=po[2], label=f"{venue} perp", **common)}
     spec = VENUES.get(venue)
     if spec is None:
         return None
     spot_id, perp_id, spot_fee, perp_fee, _quote = spec
     spot_maker, perp_maker = MAKER_FEES.get(venue, (spot_fee, perp_fee))
-    common = dict(role=ExchangeRole.SIGNAL, stream="book", book_depth=20, poll_tickers=False)
     return {
         "spot": ExchangeConfig(name=leg_name(venue, "spot"), ccxt_id=spot_id, market_type="spot",
                                taker_fee=spot_fee, maker_fee=spot_maker, label=f"{venue} spot", **common),
@@ -86,7 +100,9 @@ class BasisRunner:
         self._tasks: list[asyncio.Task] = []
         self._known: set[str] = set()  # assets already offered to the legs
         self._unsub = self.bus.subscribe(events.BOOK, self._on_book)
-        for venue in dict.fromkeys(str(v).strip().lower() for v in settings.basis_venues):
+        perp_only = [str(v).strip().lower() for v in (getattr(settings, "basis_perp_venues", None) or [])]
+        wanted = [str(v).strip().lower() for v in settings.basis_venues if str(v).strip().lower() not in PERP_ONLY_VENUES]
+        for venue in dict.fromkeys([*wanted, *(v for v in perp_only if v in PERP_ONLY_VENUES)]):
             cfgs = leg_configs(venue)
             if cfgs is None:
                 log.warning("basis: unknown venue %s (known: %s)", venue, ", ".join(VENUES))
@@ -98,14 +114,14 @@ class BasisRunner:
                     self._route[cfg.name] = (venue, leg)
                 except Exception as exc:  # noqa: BLE001
                     log.error("basis: %s adapter not created: %s: %s", cfg.name, type(exc).__name__, str(exc)[:160])
-            if len(legs) == 2:
+            if len(legs) == len(cfgs):
                 self.legs[venue] = legs
 
     def _default_factory(self, cfg: ExchangeConfig, creds: Any) -> Any:
         from ..exchanges.ccxt_adapter import CcxtAdapter  # lazy: ccxt.pro import is slow
 
         venue = cfg.name.split(".", 1)[0]
-        quote = VENUES[venue][4]
+        quote = venue_quote(venue)
         # each leg resolves exactly the venue's quote, so both legs share it; the stream budget covers basis_top_n
         top_n = int(getattr(self._settings, "basis_top_n", 100) or 100)
         legs_settings = dataclasses.replace(self._settings, signal_quote_assets=[quote], quote_assets=[quote],
@@ -187,7 +203,17 @@ class BasisRunner:
                 log.exception("basis asset refresh failed")
 
     async def _register(self, venue: str, legs: dict[str, Any], assets: list[str]) -> None:
-        spot, perp = legs["spot"], legs["perp"]
+        spot, perp = legs.get("spot"), legs["perp"]
+        if spot is None:  # a perp-only venue
+            for asset in assets:
+                ps = _symbol(perp, asset)
+                if ps and self.scanner.register_perp(venue, asset, ps):
+                    try:
+                        fees = await perp.fees(ps)
+                        self.scanner.set_fee(venue, asset, "perp", fees.taker, min(fees.maker, fees.taker))
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("basis: fees %s %s: %s", perp.name, ps, exc)
+            return
         for asset in assets:
             ss, ps = _symbol(spot, asset), _symbol(perp, asset)
             if not ss or not ps:
@@ -336,7 +362,7 @@ class BasisRunner:
                 "carry_notional_quote", "carry_horizon_h", "carry_min_edge_pct", "carry_exit_rate",
                 "carry_confirm_polls", "carry_max_hold_h", "carry_max_positions", "carry_leverage",
                 "carry_maint_margin", "carry_liq_guard_pct", "carry_history_n", "carry_min_positive_share",
-                "carry_exit_horizon_h", "carry_exec", "xfund_exec", "maker_wait_s", "xfund_enabled", "xfund_notional_quote", "xfund_horizon_h",
+                "carry_exit_horizon_h", "carry_exec", "xfund_exec", "maker_wait_s", "basis_perp_venues", "xfund_enabled", "xfund_notional_quote", "xfund_horizon_h",
                 "xfund_min_edge_pct", "xfund_max_positions", "xfund_leverage", "xfund_liq_guard_pct",
                 "xfund_exit_horizon_h", "xfund_max_hold_h", "mom_enabled", "mom_assets", "mom_venues",
                 "mom_notional_quote", "mom_window_s", "mom_entry_pct", "mom_trend_s", "mom_trend_pct",
@@ -361,4 +387,4 @@ def _contract_size(adapter: Any, symbol: str) -> float:
     return size if size > 0 else 1.0
 
 
-__all__ = ["BasisRunner", "VENUES", "leg_configs", "leg_name"]
+__all__ = ["BasisRunner", "PERP_ONLY_VENUES", "VENUES", "leg_configs", "leg_name", "venue_quote"]

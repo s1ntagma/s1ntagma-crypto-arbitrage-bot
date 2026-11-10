@@ -35,7 +35,7 @@ from typing import Any
 
 from ..engine.economics import walk_book
 from ..models import Side
-from .scanner import own_side_price, resting_filled
+from .scanner import own_side_price, quote_of, resting_filled
 
 log = logging.getLogger(__name__)
 
@@ -231,7 +231,9 @@ class FundingArb:
             e = self.edge(pl, ps, now)
             if e is None:
                 continue
+            ql, qs = quote_of(pl.perp_symbol), quote_of(ps.perp_symbol)
             cands.append({"asset": asset, "long": lo[0], "short": hi[0], "confirmed": self._diff_confirmed(pl, ps),
+                          "quotes": f"{ql}/{qs}" if ql != qs else "",  # e.g. USDT/USDC: the pair carries that rate
                           "diff_day_pct": (e["rate_short_h"] - e["rate_long_h"]) * 100.0 * 24.0, **e})
         cands.sort(key=lambda c: c["edge_pct"] if c["edge_pct"] is not None else c["edge_est_pct"], reverse=True)
         self.candidates = cands[:30]
@@ -635,6 +637,8 @@ class FundingArb:
             "realized_apr_pct": apr(closed, lambda t: t.net_quote or 0.0),
             "funding_apr_open_pct": apr(live, lambda t: t.funding_quote),
             "leverage": self._f("xfund_leverage", 2.0),
+            "liq_distance_pct": (1.0 / max(1.0, self._f("xfund_leverage", 2.0))
+                                 - self._f("carry_maint_margin", 0.005)) * 100.0,
             "exec": str(getattr(self._s, "xfund_exec", "taker")), "maker_fills": self.counters["maker_fills"],
             "taker_hedges": self.counters["taker_hedges"], "maker_unfilled": self.counters["maker_unfilled"],
         }

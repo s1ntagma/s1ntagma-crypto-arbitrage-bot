@@ -245,3 +245,80 @@ def test_an_unfilled_limit_entry_is_no_trade():
     assert x.trades() == [] and x.db.list_xfund_trades() == []  # counted, never stored
     st = x.xf.stats()
     assert st["maker_unfilled"] == 1 and st["incidents"] == 0 and st["open"] == 0
+
+
+# ---- Hyperliquid: a perp-only venue quoted in USDC, hourly funding; leverage -------------------------
+def hl_env(**over):
+    x = X(venues=("okx",), **over)
+    x.venues.append("hyperliquid")
+    x.sc.register_perp("hyperliquid", "BTC", "BTC/USDC:USDC")
+    x.sc.set_fee("hyperliquid", "BTC", "perp", 0.00045, 0.00015)
+    return x
+
+
+def hl_push(x, hl=PERP, okx=PERP):
+    for leg, ba in (("spot", (99.99, 100.01)), ("perp", okx)):
+        b = book(x.clock, "okx", leg, *ba)
+        b.symbol = "BTC/USDT" if leg == "spot" else "BTC/USDT:USDT"
+        x.sc.on_book("okx", leg, b)
+    b = book(x.clock, "hyperliquid", "perp", *hl)
+    b.symbol = "BTC/USDC:USDC"
+    x.sc.on_book("hyperliquid", "perp", b)
+
+
+def hl_poll(x, okx_rate, hl_rate):
+    nxt = x.clock.wall() + 3600.0
+    x.sc.set_funding("okx", "BTC", okx_rate, 8.0, nxt)
+    x.sc.set_funding("hyperliquid", "BTC", hl_rate, 1.0, nxt)
+    hl_push(x)
+    x.xf.review()
+
+
+def test_a_perp_only_pair_gives_no_basis_signal_and_no_stale_counts():
+    x = hl_env()
+    hl_push(x)
+    p = [p for p in x.sc.pairs() if p["venue"] == "hyperliquid"][0]
+    assert p["perp_only"] and p["quote_ok"] and p.get("basis_pct") is None and p["reason"] == "perp only"
+    before = dict(x.sc.counters)
+    hl_push(x)
+    assert x.sc.counters["stale_evals"] == before["stale_evals"]
+    assert x.sc.counters["evaluations"] == before["evaluations"] + 2  # the okx books only
+
+
+def test_hourly_and_eight_hour_funding_are_compared_per_hour_and_mixed_quotes_are_marked():
+    x = hl_env()
+    hl_poll(x, okx_rate=0.0001, hl_rate=0.0001)  # the same number, but hyperliquid pays it every hour
+    [c] = x.xf.candidates
+    assert c["long"] == "okx" and c["short"] == "hyperliquid" and c["quotes"] == "USDT/USDC"
+    assert c["diff_day_pct"] == pytest.approx((0.0001 / 1 - 0.0001 / 8) * 100 * 24)
+    assert c["fees_pct"] == pytest.approx(2 * (0.0005 + 0.00045) * 100)
+
+
+def test_the_price_gap_against_the_pair_is_a_cost():
+    x = hl_env()
+    hl_poll(x, okx_rate=0.0001, hl_rate=0.0001)
+    flat = x.xf.candidates[0]["edge_pct"]
+    nxt = x.clock.wall() + 3600.0
+    x.sc.set_funding("okx", "BTC", 0.0001, 8.0, nxt)
+    x.sc.set_funding("hyperliquid", "BTC", 0.0001, 1.0, nxt)
+    hl_push(x, hl=(99.90, 99.92))  # the short venue is 0.1 % cheaper than the long one
+    x.xf.review()
+    assert x.xf.candidates[0]["edge_pct"] == pytest.approx(flat - (100.01 / 99.91 - 1) * 100, abs=1e-4)
+
+
+def test_leverage_sets_capital_and_liquidation_and_is_clamped():
+    from latbot.config import Settings
+
+    s = Settings(xfund_leverage=50.0)
+    s.validate()
+    assert s.xfund_leverage == 5.0
+    s = Settings(xfund_leverage=0.2)
+    s.validate()
+    assert s.xfund_leverage == 1.0
+    x = opened(xfund_leverage=5.0)
+    t = x.trades()[0]
+    q = t["qty"]["long"]
+    assert t["capital_quote"] == pytest.approx(q * (100.02 + 100.00) / 5)
+    assert t["liq_price"]["short"] == pytest.approx(100.00 * (1 + 1 / 5 - 0.005))
+    assert t["liq_price"]["long"] == pytest.approx(100.02 * (1 - 1 / 5 + 0.005))
+    assert x.xf.stats()["liq_distance_pct"] == pytest.approx(19.5)
