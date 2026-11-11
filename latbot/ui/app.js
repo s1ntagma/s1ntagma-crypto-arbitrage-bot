@@ -1996,12 +1996,20 @@
       if (!r.ok) { toast('Shadow: ' + r.error, 'err'); return; }
       var d = r.data || {};
       var s = d.summary || {};
+      var arch = d.archive || {}, ao = arch.offered || {}, at = arch.training || {};
+      var note = $('opps-reference-note');
+      if (note) note.classList.toggle('hidden', !!d.enabled);
       var ps = num(s.period_start_ts);
       $('shadow-period').textContent = ps > 0
         ? 'Period: since ' + new Date(ps * 1000).toLocaleString([], { hour12: false }) + ' · ' + (s.all_time_closed || 0) + ' closed all time'
         : 'Period: all time';
       kvRows($('shadow-sum-body'), [
-        ['Status', d.enabled ? 'ON (no orders, virtual)' : 'OFF (shadow_trading=false)'],
+        ['Status', d.enabled ? 'ON (no orders, virtual)' : 'OFF: virtual trading of this strategy is switched off' + (arch.archived_ts ? ' (it lost)' : '')],
+        ['Archive (kept in the database, not counted)', arch.archived_ts
+          ? ao.trades + ' offered trades, result ' + usd(ao.pnl_quote) + ' · ' + at.trades + ' training trades, ' +
+            (at.win_rate == null ? '—' : Math.round(num(at.win_rate) * 100) + '%') + ' in plus, average ' + pct4(at.avg_actual_net_pct) +
+            ' · archived ' + new Date(num(arch.archived_ts) * 1000).toLocaleDateString()
+          : '—'],
         (state.settings && state.settings.shadow_unlimited)
           ? ['Virtual P&L (unlimited stakes)', fmtMoney((s.balance_now || 0) - (s.balance_start || 0), displayQuote(), { sign: true }) +
              (s.readiness && s.readiness.avg_net_pct != null ? ' · avg NET ' + fmtPct(num(s.readiness.avg_net_pct)) : '')]
@@ -3175,6 +3183,10 @@
     $('market-refresh').addEventListener('click', loadMarket);
     $('trades-refresh').addEventListener('click', loadTrades);
     $('stats-refresh').addEventListener('click', loadStats);
+    api('GET', '/api/shadow?limit=1').then(function (r) {  // the Opportunities note: is this strategy still traded virtually?
+      var note = $('opps-reference-note');
+      if (note && r.ok) note.classList.toggle('hidden', !!(r.data || {}).enabled);
+    });
     $('shadow-new-period').addEventListener('click', function () {
       confirmDialog({ title: 'Start a new statistics period?', body: ['Shadow statistics will count virtual trades from now on.', 'Older trades stay in the history and the database.'], okLabel: 'New period', okClass: 'btn-primary' }).then(function (ok) {
         if (!ok) return;

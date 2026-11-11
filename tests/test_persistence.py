@@ -102,3 +102,36 @@ def test_the_default_database_moves_to_the_data_folder_and_a_custom_path_stays(m
     custom = Settings(db_path=str(tmp_path / "mine.sqlite3"))
     app_mod._persistent_store(custom)
     assert custom.db_path == str(tmp_path / "mine.sqlite3")
+
+
+def test_the_latency_strategys_virtual_trades_are_switched_off_for_the_owner_config():
+    from latbot.config import CONFIG_VERSION, Settings
+
+    old = Settings.from_dict({"config_version": 10, "shadow_trading": True, "shadow_train_all_signals": True})
+    assert old.shadow_trading is False and old.shadow_train_all_signals is False
+    kept = Settings.from_dict({"config_version": CONFIG_VERSION, "shadow_trading": True})
+    assert kept.shadow_trading is True  # a later choice of the owner stays
+
+
+async def test_the_old_result_is_archived_once_and_nothing_opens_while_switched_off(tmp_path):
+    env = simple_env()
+    env.adapters["kraken"].taker = 0.004
+    db = Database(str(tmp_path / "latbot.sqlite3"), clock=env.clock)
+    sh = ShadowTrader(env.settings, env.bus, env.clock, db=db, market=env.pipeline.market_view, stats=env.stats)
+    env.pipeline.sweep_listeners.append(sh.tick)
+    await env.warm_up()
+    await env.push("binance", 101.0)  # one training trade of the old period
+    assert sh.training_opened == 1
+    sh.stop()
+    env.settings.shadow_trading = False
+    env.settings.shadow_train_all_signals = False
+    env.clock.advance(10.0)
+    off = ShadowTrader(env.settings, env.bus, env.clock, db=db, market=env.pipeline.market_view, stats=env.stats)
+    a = off.archive()
+    assert a["training"]["trades"] == 1 and a["archived_ts"] and off.period_start_ts == a["archived_ts"]
+    assert off.summary()["training"]["closed"] == 0  # Stats starts from zero
+    assert db.count_shadow(training=True) == 1  # the old trade is still stored
+    await env.push("binance", 102.5)
+    assert off.training_opened == 1 and off.opened == 0  # nothing new while switched off
+    again = ShadowTrader(env.settings, env.bus, env.clock, db=db, market=env.pipeline.market_view, stats=env.stats)
+    assert again.archive()["archived_ts"] == a["archived_ts"]  # once

@@ -1270,8 +1270,9 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
             learning = ml.snapshot() if ml is not None and hasattr(ml, "snapshot") else None
             book = getattr(getattr(ctx, "pipeline", None), "proven", None)
             pairs = book.pairs() if book is not None and hasattr(book, "pairs") else []
+            archive = shadow.archive() if hasattr(shadow, "archive") else {}
             return _json({"enabled": bool(shadow.enabled), "trades": shadow.trades(limit), "summary": shadow.summary(),
-                          "learning": learning, "pairs": pairs})
+                          "learning": learning, "pairs": pairs, "archive": archive})
         except Exception:  # noqa: BLE001
             log.exception("shadow listing failed")
             return _error(500, "shadow listing failed")

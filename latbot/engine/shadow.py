@@ -51,6 +51,8 @@ PERIOD_KEY = "stats_period_start_ts"  # kv: Stats count virtual trades opened fr
 # v2: virtual trades of older builds were measured against the wrong leader (signal venues watched their
 # thin EUR / USDC markets) - Stats, PAIRS and READY start over once more
 PERIOD_RESET_FLAG = "period_reset_main_markets_v2"
+ARCHIVE_KEY = "shadow_archive"  # kv: totals of the period archived when virtual trading was switched off
+ARCHIVE_FLAG = "shadow_archived_v1"
 
 _TRAINED_MAX = 5000  # remembered (pair, leader move) trials: one move is one trial
 _RECORD_LIMIT = 100_000  # offered trades of a period read for Stats / READY / the virtual balance
@@ -148,6 +150,7 @@ class ShadowTrader:
         self._period_start: float | None = self._load_period()
         self._period_pnl = self._load_period_pnl()  # virtual balance = start + this
         self._close_orphans()
+        self._archive_once()
         follow = getattr(self._proven, "follow_period", None)
         if callable(follow):
             follow(self._period_start)  # proven pairs count the same period as Stats
@@ -587,6 +590,42 @@ class ShadowTrader:
                     self._db.save_shadow(r)
                 except Exception:  # noqa: BLE001
                     log.exception("orphan shadow trade %s not closed", r.get("id"))
+
+    def archive(self) -> dict[str, Any]:
+        """Totals of the period that was archived when the virtual trading was switched off (kv)."""
+        kv_get = getattr(self._db, "kv_get", None) if self._db is not None else None
+        try:
+            return dict(kv_get(ARCHIVE_KEY) or {}) if kv_get is not None else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _archive_once(self) -> None:
+        """Virtual trading switched off (the strategy lost): once, the running period's totals are kept
+        under ``shadow_archive`` and a new Stats period starts.  The trades stay in ``shadow_trades``."""
+        kv_get, kv_set = getattr(self._db, "kv_get", None), getattr(self._db, "kv_set", None)
+        if self.enabled or kv_get is None or kv_set is None:
+            return
+        try:
+            if kv_get(ARCHIVE_FLAG):
+                return
+            start = self._period_start
+            offered = self._rows(_RECORD_LIMIT, training=False, since=start)
+            training = self._rows(_RECORD_LIMIT, training=True, since=start)
+            so, st = summarize(offered), summarize_training(training)
+            now = self.new_period()
+            self._period_pnl = 0.0
+            kv_set(ARCHIVE_KEY, {
+                "from_ts": start, "archived_ts": now,
+                "offered": {"trades": len(offered), "closed": so["closed"], "wins": so["wins"],
+                            "pnl_quote": so["pnl_quote"], "avg_actual_net_pct": so["avg_actual_net_pct"]},
+                "training": {"trades": len(training), "closed": st["closed"], "wins": st["wins"],
+                             "win_rate": st["win_rate"], "avg_actual_net_pct": st["avg_actual_net_pct"]},
+            })
+            kv_set(ARCHIVE_FLAG, True)
+            log.info("stats: virtual trading is off - %d offered and %d training trades archived, new period",
+                     len(offered), len(training))
+        except Exception:  # noqa: BLE001
+            log.exception("shadow archive failed")
 
     def _balance_start(self) -> float:
         return float(getattr(self._settings, "shadow_balance_quote", 1000.0) or 0.0)

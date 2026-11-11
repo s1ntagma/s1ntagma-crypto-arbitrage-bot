@@ -184,7 +184,7 @@ DEFAULT_EXCHANGES: list[ExchangeConfig] = [
 # Runtime settings (public, user-tunable)
 # --------------------------------------------------------------------------- #
 # Bumped when a saved config.json needs a one-time upgrade (see Settings._migrate).
-CONFIG_VERSION = 10
+CONFIG_VERSION = 11
 BASIS_TOP_VENUES = ("binance", "okx", "bybit", "mexc", "gate", "bitget")
 _OLD_BASIS_VENUES = ["okx", "bybit", "htx", "kraken"]
 
@@ -542,6 +542,11 @@ class Settings:
             if float(data.get("min_target_volume_quote", 100_000.0)) == 100_000.0:
                 data["min_target_volume_quote"] = 500_000.0
             data["min_net_pct_show"] = 0.1
+        if version < 11:
+            # owner (2026-11-11): the latency strategy is measured and loses on his venues (408 training
+            # trades, 1 % in plus): its virtual trades stop, the scanner stays as a reference
+            data["shadow_trading"] = False
+            data["shadow_train_all_signals"] = False
         if version < 10:
             data["basis_train_all_signals"] = False  # measured and losing: no more virtual pairs from it
         if version < 9:
@@ -775,7 +780,8 @@ def load_settings(path: str | os.PathLike[str] = "config.json") -> Settings:
             return s
         except Exception as exc:  # noqa: BLE001
             log.error("config.json invalid (%s); using defaults", exc)
-    s = Settings(simple_mode=True, basis_enabled=True, **_top100_settings())  # fresh install: the owner's choices
+    s = Settings(simple_mode=True, basis_enabled=True, shadow_trading=False, shadow_train_all_signals=False,
+                 **_top100_settings())  # fresh install: the owner's choices
     _apply_env_overrides(s)
     return s
 
