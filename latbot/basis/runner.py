@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import time
 import logging
 from typing import Any, Callable
 
@@ -60,6 +61,36 @@ def venue_quote(venue: str) -> str:
 
 STRATEGIES = ("xfund", "momentum", "carry", "signals")
 _PAUSED_KEY = "basis_paused"
+_ARCHIVED_FLAG = "basis_signals_archived_v1"
+
+
+def group_history(rows: list[tuple[str, str, float, float | None]]) -> dict[str, Any]:
+    """Finished trades (strategy, coin, closed wall time, result or None = unknown) by local day and by
+    coin.  Days newest first; coins worst result first."""
+    days: dict[str, dict[str, Any]] = {}
+    coins: dict[tuple[str, str], dict[str, Any]] = {}
+    for strategy, coin, ts, net in rows:
+        day = time.strftime("%Y-%m-%d", time.localtime(ts))
+        d = days.setdefault(day, {"day": day, "trades": 0, "wins": 0, "unknown": 0, "total_quote": 0.0})
+        s = d.setdefault(strategy, {"trades": 0, "wins": 0, "net_quote": 0.0})
+        c = coins.setdefault((strategy, coin), {"strategy": strategy, "coin": coin, "trades": 0, "wins": 0,
+                                                "unknown": 0, "net_quote": 0.0})
+        d["trades"] += 1
+        s["trades"] += 1
+        c["trades"] += 1
+        if net is None:
+            d["unknown"] += 1
+            c["unknown"] += 1
+            continue
+        won = 1 if net > 0 else 0
+        d["wins"] += won
+        s["wins"] += won
+        c["wins"] += won
+        d["total_quote"] += net
+        s["net_quote"] += net
+        c["net_quote"] += net
+    return {"by_day": sorted(days.values(), key=lambda d: d["day"], reverse=True),
+            "by_coin": sorted(coins.values(), key=lambda c: c["net_quote"])}
 
 LegFactory = Callable[[ExchangeConfig, Any], Any]
 
@@ -100,6 +131,7 @@ class BasisRunner:
         self._db = db
         self.paused: dict[str, bool] = {k: False for k in STRATEGIES}
         self._load_paused()
+        self._archive_once()
         self._factory = leg_factory or self._default_factory
         self.legs: dict[str, dict[str, Any]] = {}  # venue -> {"spot": adapter, "perp": adapter}
         self._route: dict[str, tuple[str, str]] = {}  # adapter name -> (venue, leg)
@@ -374,8 +406,39 @@ class BasisRunner:
             except Exception:  # noqa: BLE001
                 log.exception("basis: pause state not saved")
 
+    def _archive_once(self) -> None:
+        """Owner (2026-11-11): the switched-off spot/futures signal pairs go to the archive, once."""
+        kv_get = getattr(self._db, "kv_get", None) if self._db is not None else None
+        kv_set = getattr(self._db, "kv_set", None) if self._db is not None else None
+        if kv_get is None or kv_set is None or bool(getattr(self._settings, "basis_train_all_signals", False)):
+            return
+        try:
+            if not kv_get(_ARCHIVED_FLAG):
+                self.scanner.archive_signals()
+                kv_set(_ARCHIVED_FLAG, True)
+        except Exception:  # noqa: BLE001
+            log.exception("basis: archive of the signal pairs failed")
+
+    def open_now(self, strategy: str) -> dict[str, Any]:
+        """Owner's button: lift the pause and open, now, what passes the strategy's own rules."""
+        if strategy == "all":
+            names = [s for s in ("xfund", "momentum", "carry")]
+            return {"results": {s: self.open_now(s) for s in names}}
+        self._set_paused(strategy, False)
+        if strategy == "xfund":
+            res = self.xfund.open_now()
+        elif strategy == "momentum":
+            res = self.momentum.open_now()
+        else:
+            res = self.scanner.open_now(carry=strategy == "carry")
+        log.info("basis: owner pressed open for %s: %s", strategy, res.get("reason"))
+        return {**res, "paused": False}
+
     def close_all(self, strategy: str) -> dict[str, Any]:
         """Close every open (virtual) position of the strategy by market and stop its new entries."""
+        if strategy == "all":
+            res = {s: self.close_all(s) for s in STRATEGIES}
+            return {"closed": sum(r["closed"] for r in res.values()), "paused": True, "results": res}
         self._set_paused(strategy, True)
         reason = "closed by owner"
         if strategy == "xfund":
@@ -391,6 +454,18 @@ class BasisRunner:
         self._set_paused(strategy, False)
         log.info("basis: owner resumed %s", strategy)
         return {"paused": False}
+
+    def history(self) -> dict[str, Any]:
+        """What the bot did: finished trades of the strategies in use by day and by coin + the archive."""
+        done = ("closed", "one_leg", "no_fill")
+        rows: list[tuple[str, str, float, float | None]] = []
+        rows += [("xfund", t.asset, t.closed_ts or t.signal_ts, t.net_quote)
+                 for t in self.xfund._trades if t.status in done]
+        rows += [("momentum", t.asset, t.closed_ts or t.signal_ts, t.net_quote if t.status == "closed" else None)
+                 for t in self.momentum._trades if t.status in ("closed", "no_data", "abandoned")]
+        rows += [("carry", t.asset, t.closed_ts or t.signal_ts, t.net_quote)
+                 for t in self.scanner._trades if t.trigger == "carry" and t.status in done]
+        return {**group_history(rows), "archive": self.scanner.archive()}
 
     def balance(self) -> dict[str, Any]:
         """One plus / minus number per strategy (finished trades + open positions if closed now) and the
@@ -416,6 +491,8 @@ class BasisRunner:
             "trades": self.scanner.trades(200),
             "balance": self.balance(),
             "paused": dict(self.paused),
+            "history_days": self.history(),
+            "auto_paused": [*self.xfund.auto_paused(), *self.scanner.auto_paused()],
             "xfund": {"stats": self.xfund.stats(), "candidates": self.xfund.candidates,
                       "trades": self.xfund.trades(100)},
             "momentum": {"stats": self.momentum.stats(), "status": self.momentum.status(),
@@ -429,7 +506,7 @@ class BasisRunner:
                 "carry_notional_quote", "carry_horizon_h", "carry_min_edge_pct", "carry_exit_rate",
                 "carry_confirm_polls", "carry_max_hold_h", "carry_max_positions", "carry_leverage",
                 "carry_maint_margin", "carry_liq_guard_pct", "carry_history_n", "carry_min_positive_share",
-                "carry_exit_horizon_h", "carry_exec", "xfund_exec", "maker_wait_s", "basis_perp_venues", "xfund_enabled", "xfund_notional_quote", "xfund_horizon_h",
+                "carry_exit_horizon_h", "carry_exec", "xfund_exec", "maker_wait_s", "basis_perp_venues", "auto_pause_losses", "auto_pause_days", "xfund_enabled", "xfund_notional_quote", "xfund_horizon_h",
                 "xfund_min_edge_pct", "xfund_max_positions", "xfund_leverage", "xfund_liq_guard_pct",
                 "xfund_exit_horizon_h", "xfund_max_hold_h", "mom_enabled", "mom_assets", "mom_venues",
                 "mom_notional_quote", "mom_window_s", "mom_entry_pct", "mom_trend_s", "mom_trend_pct",

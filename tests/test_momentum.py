@@ -252,3 +252,16 @@ def test_close_all_closes_the_position_and_the_pause_blocks_new_entries():
     assert t["status"] == "closed" and t["exit_reason"] == "closed by owner" and t["position_quote"] == pytest.approx(1000.0, rel=1e-3)
     m.path(100.8, 102.5, 600)
     assert len(m.trades()) == 1  # paused
+
+
+def test_open_now_enters_only_when_the_moves_meet_the_rule():
+    m = M(mom_cooldown_s=900.0)
+    warm(m)
+    r = m.m.open_now()
+    assert r["opened"] == 0 and "needs" in r["reason"] and m.trades() == []
+    m.m.paused = True
+    m.path(100.0, 100.8, 600)  # the rule is met, but the strategy is paused
+    assert m.trades() == []
+    r = m.m.open_now()
+    assert r["opened"] == 1 and not m.m.paused and m.trades()[0]["side"] == "long"
+    assert m.m.open_now()["opened"] == 0  # one position per coin

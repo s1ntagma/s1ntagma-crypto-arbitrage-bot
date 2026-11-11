@@ -533,3 +533,46 @@ def test_close_all_closes_a_carry_position_and_pauses_new_ones():
     c.poll({"BTC": 0.0005})
     c.run(0.5)
     assert len(c.carry()) == 1
+
+
+def test_open_now_for_carry_approves_by_the_rules_or_says_why():
+    c = Carry()
+    c.sc.paused["carry"] = True
+    c.poll({"BTC": 0.0005})
+    c.poll({"BTC": 0.0005})
+    assert c.carry() == []
+    r = c.sc.open_now(carry=True)
+    assert r["approved"] == 1 and not c.sc.paused["carry"]
+    c.push()  # enters on the next price update
+    assert len(c.carry()) == 1
+    d = Carry()
+    d.poll({"BTC": 0.00001})
+    d.poll({"BTC": 0.00001})
+    r = d.sc.open_now(carry=True)
+    assert r["approved"] == 0 and "needs" in r["reason"] and d.carry() == []
+
+
+def test_the_signal_pairs_go_to_an_archive_and_leave_the_screen_but_not_the_database():
+    from test_basis import Env
+
+    env = Env(basis_mode="any")
+    env.warm()
+    env.push((99.99, 100.01), (100.30, 100.32))
+    env.clock.advance(0.4)
+    env.push((99.99, 100.01), (100.30, 100.32))
+    env.sc.tick()
+    env.clock.advance(1.0)
+    env.push((99.99, 100.01), (99.98, 100.00))
+    env.sc.tick()
+    env.clock.advance(0.4)
+    env.push((99.99, 100.01), (99.98, 100.00))
+    env.sc.tick()
+    [t] = env.sc.trades()
+    assert t["status"] == "closed"
+    a = env.sc.archive_signals()
+    assert a["trades"] == 1 and a["net_quote"] == pytest.approx(t["net_quote"])
+    assert env.sc.trades() == [] and env.sc.stats()["signals_total"] == 0 and env.sc.balance(carry=False)["closed_n"] == 0
+    assert len(env.db.list_basis_trades(10, archived=True)) == 1 and env.db.list_basis_trades(10) == []
+    again = BasisScanner(env.s, env.clock, db=env.db)
+    assert again.trades() == [] and again.archive()["trades"] == 1
+    assert env.sc.archive_signals()["trades"] == 1  # nothing new: totals unchanged

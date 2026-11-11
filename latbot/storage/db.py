@@ -267,7 +267,14 @@ class Database:
         self._conn.execute("PRAGMA foreign_keys=OFF")
         self._conn.executescript(_SCHEMA)
         self._migrate_shadow_training()
+        self._migrate_basis_archived()
         log.info("database ready at %s (journal=%s)", self.path, self.journal_mode)
+
+    def _migrate_basis_archived(self) -> None:
+        """``basis_trades.archived`` (0/1): archived signal pairs stay stored but are not loaded."""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(basis_trades)").fetchall()}
+        if "archived" not in cols:
+            self._conn.execute("ALTER TABLE basis_trades ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
 
     def _migrate_shadow_training(self) -> None:
         """``shadow_trades.training`` (0/1): offered and training trades are queried apart, so thousands
@@ -552,9 +559,11 @@ class Database:
     def save_basis_trade(self, row: dict[str, Any]) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT INTO basis_trades (id, opened_ts, closed_ts, json) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET opened_ts=excluded.opened_ts, closed_ts=excluded.closed_ts, json=excluded.json",
-                (str(row["id"]), row.get("signal_ts"), row.get("closed_ts"), json.dumps(row, ensure_ascii=False, default=str)),
+                "INSERT INTO basis_trades (id, opened_ts, closed_ts, json, archived) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET opened_ts=excluded.opened_ts, closed_ts=excluded.closed_ts, "
+                "json=excluded.json, archived=excluded.archived",
+                (str(row["id"]), row.get("signal_ts"), row.get("closed_ts"),
+                 json.dumps(row, ensure_ascii=False, default=str), 1 if row.get("archived") else 0),
             )
 
     def save_momentum_trade(self, row: dict[str, Any]) -> None:
@@ -593,9 +602,10 @@ class Database:
                 (str(venue), str(asset), float(since_ts))).fetchall()
         return [{"ts": r[0], "rate": r[1], "interval_h": r[2]} for r in rows]
 
-    def list_basis_trades(self, limit: int = 200) -> list[dict[str, Any]]:
-        """Newest first."""
-        return self._json_rows("SELECT json FROM basis_trades ORDER BY opened_ts DESC LIMIT ?", (int(limit),))
+    def list_basis_trades(self, limit: int = 200, archived: bool = False) -> list[dict[str, Any]]:
+        """Newest first; archived pairs only on request."""
+        return self._json_rows("SELECT json FROM basis_trades WHERE archived = ? ORDER BY opened_ts DESC LIMIT ?",
+                               (1 if archived else 0, int(limit)))
 
     def count_shadow(self, *, training: bool | None = None, closed: bool | None = None) -> int:
         where, args = self._shadow_where(training, None, False, closed)

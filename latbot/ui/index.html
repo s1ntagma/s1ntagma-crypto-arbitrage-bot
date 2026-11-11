@@ -331,8 +331,34 @@
       <p id="basis-note" class="muted"></p>
       <h3 class="diag-title keep-case">Balance · is each strategy in plus or minus (virtual money, after fees)</h3>
       <div id="balance-cards" class="balance-cards"></div>
+      <p id="basis-action" class="muted hidden" role="status"></p>
+      <div class="diag-block">
+        <h3 class="diag-title keep-case">History · what the bot did, day by day (finished trades, after fees)</h3>
+        <div class="table-wrap">
+          <table class="table" id="history-days-table">
+            <thead><tr><th>Day</th><th class="num">Funding between exchanges</th><th class="num">Momentum</th><th class="num">Funding carry</th><th class="num">Trades (in plus)</th><th class="num">Result of the day</th></tr></thead>
+            <tbody id="history-days"></tbody>
+          </table>
+        </div>
+        <p id="history-archive" class="muted"></p>
+      </div>
       <div class="diag-grid">
         <div class="diag-block">
+          <h3 class="diag-title keep-case">History · by coin (worst first)</h3>
+          <div class="table-wrap">
+            <table class="table table-compact-wide" id="history-coins-table">
+              <thead><tr><th>Strategy</th><th>Coin</th><th class="num">Trades (in plus)</th><th class="num">Result</th></tr></thead>
+              <tbody id="history-coins"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title keep-case">Coins paused by the bot (they kept losing)</h3>
+          <table class="table table-compact"><tbody id="auto-paused"></tbody></table>
+        </div>
+      </div>
+      <div class="diag-grid">
+        <div class="diag-block" id="signals-stats-block">
           <h3 class="diag-title keep-case">Spot/futures signals · statistics</h3>
           <table class="table table-compact"><tbody id="basis-stats"></tbody></table>
         </div>
@@ -384,7 +410,7 @@
           </table>
         </div>
       </div>
-      <div class="diag-block">
+      <div class="diag-block" id="signals-breakdown-block">
         <h3 class="diag-title">SPOT / FUTURES · results by signal and by venue + coin (every signal is entered virtually)</h3>
         <div class="table-wrap">
           <table class="table" id="basis-breakdown-table">

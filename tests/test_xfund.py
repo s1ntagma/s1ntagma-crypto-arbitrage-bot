@@ -489,3 +489,73 @@ def test_close_all_waits_for_a_fresh_book_instead_of_guessing():
     x.run(1.0, perp={"okx": (100.20, 100.22), "mexc": (100.20, 100.22)})
     t = x.trades()[0]
     assert t["status"] == "closed" and t["exit_px"]["long"] == 100.20 and t["exit_px"]["short"] == 100.22
+
+
+# ---- owner's "Open positions" button, auto-pause of losing coins ---------------------------------------
+def test_open_now_enters_a_passing_pair_at_once_and_lifts_the_pause():
+    x = X()
+    x.xf.paused = True
+    x.poll(RATES)
+    x.poll(RATES)
+    x.run(0.6)
+    assert x.trades() == []
+    r = x.xf.open_now()
+    assert r["opened"] == 1 and not x.xf.paused and x.trades()[0]["status"] == "pending"
+    x.run(0.5)
+    assert x.trades()[0]["status"] == "open"
+
+
+def test_open_now_opens_nothing_against_the_rules_and_says_why():
+    x = X()
+    small = {("okx", "BTC"): 0.0001, ("mexc", "BTC"): 0.00012}
+    x.poll(small)
+    x.poll(small)
+    r = x.xf.open_now()
+    assert r["opened"] == 0 and x.trades() == [] and "needs" in r["reason"] and "BTC" in r["reason"]
+    y = X()
+    y.poll(RATES)  # one poll only
+    r = y.xf.open_now()
+    assert r["opened"] == 0 and "not confirmed" in r["reason"]
+    z = opened(xfund_max_positions=1)
+    r = z.xf.open_now()
+    assert r["opened"] == 0 and "1 of 1" in r["reason"]
+
+
+def lose_once(x):
+    x.poll(RATES)
+    x.poll(RATES)
+    x.run(0.1)
+    x.run(0.5)
+    deep = {("okx", "BTC"): 0.003, ("mexc", "BTC"): -0.003}
+    x.poll(deep)
+    x.poll(deep)
+    x.run(0.6)
+    assert x.trades()[0]["status"] == "closed" and x.trades()[0]["net_quote"] < 0
+
+
+def test_three_losses_in_a_row_pause_the_coin_for_days_and_a_closed_by_owner_does_not_count():
+    x = X(auto_pause_losses=3, auto_pause_days=3.0)
+    for _ in range(3):
+        lose_once(x)
+    x.poll(RATES)
+    x.poll(RATES)
+    x.run(0.6)
+    assert len(x.trades()) == 3  # paused: no fourth entry
+    c = x.xf.candidates[0]
+    assert c["auto_paused_until"] and "3 losses" in x.xf.open_now()["reason"]
+    assert x.xf.auto_paused()[0]["asset"] == "BTC"
+    x.clock.advance(3 * 86400.0 + 60)
+    x.poll(RATES)
+    x.poll(RATES)
+    x.run(0.1)
+    assert len(x.trades()) == 4  # the pause ran out
+
+    y = X(auto_pause_losses=3, auto_pause_days=3.0)
+    for _ in range(3):
+        y.poll(RATES)
+        y.poll(RATES)
+        y.run(0.1)
+        y.run(0.5)
+        y.xf.close_all("closed by owner")
+        y.run(0.5)
+    assert y.xf.auto_paused() == []  # the owner's own closes are not the coin's fault

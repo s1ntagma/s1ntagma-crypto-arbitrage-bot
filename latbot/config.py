@@ -273,6 +273,9 @@ class Settings:
     carry_exit_horizon_h: float = 24.0  # exit: only when holding this long at the turned rate costs more than leaving
     carry_exec: str = "maker"  # maker: one leg rests as a limit order (maker fee), the other hedges; taker: both by market
     xfund_exec: str = "maker"
+    # the bot's own history: a coin whose last N finished funding trades all lost is not opened for some days
+    auto_pause_losses: int = 3  # 0 = off
+    auto_pause_days: float = 3.0
     fill_wait_s: float = 30.0  # a market leg whose book is not fresh fills on the first fresh book within this
     maker_wait_s: float = 60.0  # a resting entry order not traded through in this time is cancelled (no trade)
     # cross-venue funding arbitrage (virtual): long perp where funding is low, short perp where it is high

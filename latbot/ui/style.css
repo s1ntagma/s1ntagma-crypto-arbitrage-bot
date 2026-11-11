@@ -695,5 +695,8 @@ body.in-session { overflow: hidden; }
 .balance-line { display: flex; justify-content: space-between; gap: 10px; font-size: var(--fs-sm); color: var(--muted); padding: 2px 0; }
 .balance-line span:last-child { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .balance-off { font-size: var(--fs-xs); color: var(--muted); margin-top: 6px; }
-.balance-card .btn { width: 100%; margin-top: 12px; }
+.balance-card .btn { width: 100%; margin-top: 8px; }
+.balance-card .btn:first-of-type { margin-top: 12px; }
+#history-coins-table { min-width: 0; }
+#basis-action { border: 1px solid var(--accent-line); border-radius: var(--radius); padding: 10px 14px; margin: 0 0 20px; color: var(--text); white-space: pre-line; }
 .balance-paused { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: var(--fs-xs); border: 1px solid var(--line); color: var(--muted); }

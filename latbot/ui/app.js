@@ -1611,6 +1611,8 @@
       var bal = d.balance || {};
       var cards = $('balance-cards'); clear(cards);
       var money = function (v) { var n = num(v); return (n < -0.004 ? '−$' : n > 0.004 ? '+$' : '$') + Math.abs(n).toFixed(2); };
+      var STRAT = { xfund: 'Funding between exchanges', momentum: 'Momentum BTC / ETH', carry: 'Funding carry', signals: 'Spot/futures signals' };
+      var say = function (text) { var el = $('basis-action'); el.textContent = text; el.classList.remove('hidden'); };
       var card = function (name, b, opts) {
         opts = opts || {};
         var total = num(b.total_quote);
@@ -1624,24 +1626,33 @@
         if (b.unknown) el.appendChild(h('div', { class: 'balance-off', text: b.unknown + ' trade(s) with an unknown result are not counted' }));
         if (opts.note) el.appendChild(h('div', { class: 'balance-off', text: opts.note }));
         if (b.in_total === false) el.appendChild(h('div', { class: 'balance-off', text: 'Not in the total.' }));
-        if (opts.key && !(b.switched_off && !b.open_n)) {
-          if (b.paused && !b.open_n) {
-            el.appendChild(h('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: 'Start again',
+        if (opts.key) {
+          var key = opts.key;
+          if (!b.switched_off) {
+            el.appendChild(h('button', { class: 'btn btn-ghost btn-sm', type: 'button',
+              text: key === 'all' ? 'Open all (by the rules)' : 'Open positions',
+              title: 'Opens now what passes the rules of the strategy (profit after fees). Nothing is opened against the rules.',
               onclick: function () {
-                api('POST', '/api/basis/resume', { strategy: opts.key }).then(function (r) {
-                  if (!r.ok) toast('Start again: ' + r.error, 'err'); else toast(name + ': new trades are allowed again', 'ok');
+                api('POST', '/api/basis/open', { strategy: key }).then(function (r) {
+                  if (!r.ok) { say('Open: ' + r.error); return; }
+                  var d = r.data || {};
+                  var lines = d.results ? Object.keys(d.results).map(function (k) { return STRAT[k] + ': ' + d.results[k].reason; })
+                    : [name + ': ' + d.reason];
+                  say(lines.join('\n'));
                   loadBasis();
                 });
               } }));
-          } else {
-            el.appendChild(h('button', { class: 'btn btn-warn btn-sm', type: 'button', text: 'Close all positions',
+          }
+          if (!(b.switched_off && !b.open_n)) {
+            el.appendChild(h('button', { class: 'btn btn-warn btn-sm', type: 'button',
+              text: key === 'all' ? 'Close all' : 'Close all positions',
               onclick: function () {
-                var msg = 'Close ' + (b.open_n || 0) + ' open position(s) of "' + name + '" now, at the current prices?\n' +
-                  'It will not open new ones until you press "Start again".';
+                var msg = 'Close ' + (key === 'all' ? 'ALL open positions of every strategy' : (b.open_n || 0) + ' open position(s) of "' + name + '"') +
+                  ' now, at the current prices?\nNew positions will not open until you press "Open positions".';
                 if (!window.confirm(msg)) return;
-                api('POST', '/api/basis/close', { strategy: opts.key }).then(function (r) {
-                  if (!r.ok) toast('Close all: ' + r.error, 'err');
-                  else toast(name + ': closing ' + ((r.data || {}).closed || 0) + ' position(s); new trades paused', 'ok');
+                api('POST', '/api/basis/close', { strategy: key }).then(function (r) {
+                  if (!r.ok) { say('Close all: ' + r.error); return; }
+                  say(name + ': closing ' + ((r.data || {}).closed || 0) + ' position(s). New positions are paused until you press "Open positions".');
                   loadBasis();
                 });
               } }));
@@ -1650,12 +1661,45 @@
         cards.appendChild(el);
       };
       if (bal.total) {
-        card('All strategies in use', bal.total, { total: true });
+        bal.total.open_n = (bal.xfund.open_n || 0) + (bal.momentum.open_n || 0) + (bal.carry.open_n || 0);
+        bal.total.open_priced = bal.total.open_n;
+        card('All strategies in use', bal.total, { total: true, key: 'all' });
         card('Funding between exchanges', bal.xfund, { key: 'xfund' });
         card('Momentum BTC / ETH', bal.momentum, { key: 'momentum' });
         card('Funding carry (spot + futures)', bal.carry, { key: 'carry' });
-        card('Spot/futures signals', bal.signals, { key: 'signals', note: bal.signals.switched_off ? 'Switched off: it lost. No new trades.' : '' });
+        var sigEmpty = bal.signals.switched_off && !bal.signals.closed_n && !bal.signals.open_n;
+        if (!sigEmpty) card('Spot/futures signals', bal.signals, { key: 'signals', note: bal.signals.switched_off ? 'Switched off: it lost. No new trades.' : '' });
+        ['signals-stats-block', 'signals-breakdown-block'].forEach(function (id) { $(id).classList.toggle('hidden', sigEmpty); });
       }
+      var fmtDate = function (ts) { return new Date(num(ts) * 1000).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }); };
+      var hist = d.history_days || {};
+      var hd = $('history-days'); clear(hd);
+      var cell = function (x) {
+        if (!x || !x.trades) return h('td', { class: 'num muted', text: '—' });
+        return h('td', { class: 'num ' + (num(x.net_quote) > 0 ? 'pos' : num(x.net_quote) < 0 ? 'neg' : ''), text: money(x.net_quote) + ' (' + x.trades + ')' });
+      };
+      (hist.by_day || []).forEach(function (day) {
+        hd.appendChild(h('tr', null, h('td', { class: 'mono', text: day.day }), cell(day.xfund), cell(day.momentum), cell(day.carry),
+          h('td', { class: 'num', text: day.trades + ' (' + day.wins + ')' + (day.unknown ? ', ' + day.unknown + ' unknown' : '') }),
+          h('td', { class: 'num ' + (num(day.total_quote) > 0 ? 'pos' : num(day.total_quote) < 0 ? 'neg' : ''), text: money(day.total_quote) })));
+      });
+      if (!hd.children.length) hd.appendChild(h('tr', null, h('td', { class: 'muted', colspan: '6', text: 'No finished trades yet.' })));
+      var ar = hist.archive || {};
+      $('history-archive').textContent = ar.trades
+        ? 'Archive (not counted anywhere): spot/futures signals, ' + ar.trades + ' trades, result ' + money(ar.net_quote) +
+          (ar.from_ts ? ', ' + fmtDate(ar.from_ts) + ' – ' + fmtDate(ar.to_ts) : '') + '. Switched off because it lost; kept in the database.'
+        : '';
+      var hc = $('history-coins'); clear(hc);
+      (hist.by_coin || []).slice(0, 30).forEach(function (c) {
+        hc.appendChild(h('tr', null, h('td', { text: STRAT[c.strategy] || c.strategy }), h('td', { text: c.coin }),
+          h('td', { class: 'num', text: c.trades + ' (' + c.wins + ')' + (c.unknown ? ', ' + c.unknown + ' unknown' : '') }),
+          h('td', { class: 'num ' + (num(c.net_quote) > 0 ? 'pos' : num(c.net_quote) < 0 ? 'neg' : ''), text: money(c.net_quote) })));
+      });
+      if (!hc.children.length) hc.appendChild(h('tr', null, h('td', { class: 'muted', colspan: '4', text: 'No finished trades yet.' })));
+      var ap = d.auto_paused || [];
+      kvRows($('auto-paused'), ap.length ? ap.map(function (x) {
+        return [x.asset + ' · ' + x.where + ' (' + (STRAT[x.strategy] || x.strategy) + ')', x.losses + ' losses in a row · until ' + fmtDate(x.until_ts)];
+      }) : [['No coin is paused now. Rule: ' + ((d.settings || {}).auto_pause_days || 3) + ' days off after ' + ((d.settings || {}).auto_pause_losses || 3) + ' losing funding trades in a row (momentum is not paused this way).', '']]);
       var openOr = function (t, cls) {
         var v = t.net_quote != null ? t.net_quote : t.open_net_quote;
         if (v == null) return h('td', { class: 'num', text: t.status === 'open' || t.status === 'closing' ? 'no price yet' : '—' });
@@ -1776,7 +1820,7 @@
           h('td', { class: 'num', text: pct4(c.fees_pct) }), h('td', { class: 'num', text: c.cross_pct == null ? 'book not fresh' : pct4(c.cross_pct) }),
           h('td', { class: 'num ' + (num(c.edge_pct == null ? c.edge_est_pct : c.edge_pct) >= 0 ? 'pos' : 'neg'),
             text: c.edge_pct == null ? '≤ ' + pct4(c.edge_est_pct) : pct4(c.edge_pct) }),
-          h('td', { text: c.confirmed ? 'yes' : 'not yet' })));
+          h('td', { text: c.auto_paused_until ? 'paused by the bot (kept losing)' : c.confirmed ? 'yes' : 'not yet' })));
       });
       var xt = $('xfund-trades'); clear(xt);
       (xf.trades || []).forEach(function (t) {

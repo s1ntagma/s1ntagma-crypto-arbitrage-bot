@@ -1302,6 +1302,20 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
             log.exception("basis close failed")
             return _error(500, "basis close failed")
 
+    @app.post("/api/basis/open")
+    async def api_basis_open(body: dict[str, Any] = Body(...)) -> JSONResponse:
+        """Owner's button: lift the pause and open, now, what passes the strategy's own rules (virtual)."""
+        basis = getattr(ctx, "basis", None)
+        if basis is None or not hasattr(basis, "open_now"):
+            return _error(409, "the basis module is not running")
+        try:
+            return _json({"ok": True, **basis.open_now(str(body.get("strategy") or ""))})
+        except ValueError as exc:
+            return _error(400, str(exc))
+        except Exception:  # noqa: BLE001
+            log.exception("basis open failed")
+            return _error(500, "basis open failed")
+
     @app.post("/api/basis/resume")
     async def api_basis_resume(body: dict[str, Any] = Body(...)) -> JSONResponse:
         basis = getattr(ctx, "basis", None)

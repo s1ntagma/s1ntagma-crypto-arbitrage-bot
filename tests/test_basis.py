@@ -19,7 +19,7 @@ def settings(**over) -> Settings:
                 basis_min_convergence_pct=0.05, basis_max_hold_s=3600.0, basis_latency_ms=300.0,
                 basis_max_skew_ms=500.0, basis_max_age_ms=2000.0, basis_max_slippage_pct=0.3,
                 basis_train_all_signals=False, carry_exec="taker", xfund_exec="taker",
-                basis_perp_venues=[], fill_wait_s=0.0)
+                basis_perp_venues=[], fill_wait_s=0.0, auto_pause_losses=0)
     base.update(over)
     return Settings(**base)
 
@@ -472,3 +472,35 @@ def test_api_closes_and_resumes_a_basis_strategy():
     assert c.post("/api/basis/close", json={"strategy": "xfund"}).json() == {"ok": True, "closed": 2, "paused": True}
     assert c.post("/api/basis/close", json={"strategy": "bad"}).status_code == 400
     assert c.post("/api/basis/resume", json={"strategy": "xfund"}).json() == {"ok": True, "paused": False}
+
+
+async def test_runner_opens_and_closes_all_strategies_and_reports_the_history(tmp_path):
+    clock = SimClock()
+    db = Database(str(tmp_path / "h.sqlite3"), clock=clock)
+    r = BasisRunner(settings(basis_venues=["okx"], basis_assets=["BTC"]), clock, db=db,
+                    leg_factory=lambda cfg, creds: FakeLeg(cfg, None, clock))
+    res = r.close_all("all")
+    assert res["paused"] and all(r.paused[k] for k in ("xfund", "momentum", "carry", "signals"))
+    res = r.open_now("all")
+    assert set(res["results"]) == {"xfund", "momentum", "carry"} and not r.paused["xfund"] and not r.paused["momentum"]
+    assert all("reason" in v for v in res["results"].values())
+    with pytest.raises(ValueError):
+        r.open_now("nothing")
+    h = r.history()
+    assert h["by_day"] == [] and h["by_coin"] == [] and "archive" in h
+    snap = r.snapshot()
+    assert "history_days" in snap and "auto_paused" in snap
+
+
+def test_history_groups_finished_trades_by_day_and_coin():
+    from latbot.basis.runner import group_history
+
+    day = 1_700_000_000.0
+    rows = [("xfund", "BTC", day, 2.0), ("xfund", "BTC", day + 60, -0.5), ("momentum", "ETH", day + 86400, 20.0),
+            ("momentum", "ETH", day + 86400, None)]
+    h = group_history(rows)
+    assert [d["trades"] for d in h["by_day"]] == [2, 2]  # newest day first
+    newest = h["by_day"][0]
+    assert newest["momentum"]["net_quote"] == 20.0 and newest["unknown"] == 1 and newest["total_quote"] == 20.0
+    btc = [c for c in h["by_coin"] if c["coin"] == "BTC"][0]
+    assert btc["strategy"] == "xfund" and btc["trades"] == 2 and btc["wins"] == 1 and btc["net_quote"] == pytest.approx(1.5)

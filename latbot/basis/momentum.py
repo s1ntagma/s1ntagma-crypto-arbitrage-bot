@@ -207,17 +207,48 @@ class Momentum:
                 if now < self._cooldown.get(asset, float("-inf")) or \
                         any(t.asset == asset and t.status in _ACTIVE for t in self._trades):
                     continue
-                mid = sr.points[-1][1]
-                t = MomTrade(id=f"mom-{asset}-{v}-{int(self._clock.wall() * 1000)}-{next(self._ids)}",
-                             asset=asset, venue=v, direction=d, signal_ts=self._clock.wall(),
-                             move_window_pct=w, move_trend_pct=tr,
-                             target_qty=self._f("mom_notional_quote", 1000.0) / mid)
-                t.due_mono = now + self._f("basis_latency_ms", 300.0) / 1000.0
-                self._trades.append(t)
-                del self._trades[:-_KEEP]
-                self._save(t)
-                log.info("momentum %s %s on %s: %+.2f%% / %gs, trend %+.2f%%", "LONG" if d > 0 else "SHORT",
-                         asset, v, w, self._f("mom_window_s", 900.0), tr)
+                self._enter(asset, sr, d, w, tr, now)
+
+    def _enter(self, asset: str, sr: _Series, d: int, w: float, tr: float, now: float) -> None:
+        mid = sr.points[-1][1]
+        t = MomTrade(id=f"mom-{asset}-{sr.venue}-{int(self._clock.wall() * 1000)}-{next(self._ids)}",
+                     asset=asset, venue=sr.venue, direction=d, signal_ts=self._clock.wall(),
+                     move_window_pct=w, move_trend_pct=tr, target_qty=self._f("mom_notional_quote", 1000.0) / mid)
+        t.due_mono = now + self._f("basis_latency_ms", 300.0) / 1000.0
+        self._trades.append(t)
+        del self._trades[:-_KEEP]
+        self._save(t)
+        log.info("momentum %s %s on %s: %+.2f%% / %gs, trend %+.2f%%", "LONG" if d > 0 else "SHORT",
+                 asset, sr.venue, w, self._f("mom_window_s", 900.0), tr)
+
+    def open_now(self) -> dict[str, Any]:
+        """Owner's button: lift the pause and enter a coin whose 15-minute and 1-hour moves meet the entry
+        rule right now (only the "already fired" state and the cooldown are skipped).  Otherwise the
+        current moves are reported; nothing is opened against the rule."""
+        self.paused = False
+        if not self.enabled:
+            return {"opened": 0, "reason": "the strategy is switched off in the settings (mom_enabled)"}
+        now = self._clock.mono()
+        entry, trend = self._f("mom_entry_pct", 0.6), self._f("mom_trend_pct", 0.3)
+        opened, notes = 0, []
+        for asset in self._assets():
+            self._sample(asset, now)
+            if any(t.asset == asset and t.status in _ACTIVE for t in self._trades):
+                notes.append(f"{asset}: a position is already open")
+                continue
+            sr = self._lead(asset, now)
+            if sr is None:
+                notes.append(f"{asset}: still collecting an hour of prices")
+                continue
+            w, tr = sr.move(now, self._f("mom_window_s", 900.0)), sr.move(now, self._f("mom_trend_s", 3600.0))
+            d = next((d for d in (1, -1) if w * d >= entry and tr * d >= trend), 0)
+            if d:
+                self._enter(asset, sr, d, w, tr, now)
+                opened += 1
+                notes.append(f"{asset}: {'long' if d > 0 else 'short'} opened")
+            else:
+                notes.append(f"{asset}: 15 m {w:+.2f}% / 1 h {tr:+.2f}%, needs {entry:g}% and {trend:g}% the same way")
+        return {"opened": opened, "reason": "; ".join(notes) or "no coins configured"}
 
     def _fill(self, t: MomTrade, side: Side, qty: float, now: float) -> tuple[float, float, Any]:
         p = self.sc._pairs.get((t.venue, t.asset))

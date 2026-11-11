@@ -122,6 +122,7 @@ class FundingArb:
         self.candidates: list[dict[str, Any]] = []
         self.edge_stats = {"pairs": 0, "executable": 0}  # last review: pairs priced on fresh books
         self.paused = False  # owner's button: no new entries until resumed
+        self._room, self._busy = 0, set()
         self.counters = {"entries": 0, "approved": 0, "revalidation_failed": 0, "maker_fills": 0,
                          "taker_hedges": 0, "maker_unfilled": 0}
         self._load()
@@ -254,14 +255,87 @@ class FundingArb:
         room = 0 if self.paused else max(0, int(self._f("xfund_max_positions", 5)) - len(busy))
         min_edge = self._f("xfund_min_edge_pct", 0.10)
         for c in cands:
+            c["auto_paused_until"] = self._auto_pause_until(c["asset"], c["long"], c["short"])
+        self._room, self._busy = room, busy
+        for c in cands:
             if room <= 0:
                 break
-            if c["asset"] in busy or not c["confirmed"] or c["edge_est_pct"] < min_edge:
+            if c["asset"] in busy or not c["confirmed"] or c["edge_est_pct"] < min_edge or c["auto_paused_until"]:
                 continue
             self._approved[c["asset"]] = (c["long"], c["short"])
             room -= 1
         self.counters["approved"] += len(self._approved)
         return len(self._approved)
+
+    # ------------------------------------------------------------------ the bot's own history
+    def _losing_streaks(self) -> dict[tuple[str, str, str], tuple[int, float]]:
+        """(coin, long venue, short venue) -> (finished results in a row that lost, time of the last one).
+        A close pressed by the owner is not the coin's fault and is left out."""
+        out: dict[tuple[str, str, str], tuple[int, float]] = {}
+        for t in self._trades:  # oldest first
+            if t.status not in ("closed", "one_leg", "no_fill") or t.exit_reason == "closed by owner":
+                continue
+            key = (t.asset, t.long_venue, t.short_venue)
+            won = t.net_quote is not None and t.net_quote > 0
+            n = 0 if won else out.get(key, (0, 0.0))[0] + 1
+            out[key] = (n, t.closed_ts or 0.0)
+        return out
+
+    def _auto_pause_until(self, asset: str, lv: str, sv: str) -> float | None:
+        need = int(self._f("auto_pause_losses", 3))
+        if need <= 0:
+            return None
+        n, last = self._losing_streaks().get((asset, lv, sv), (0, 0.0))
+        until = last + self._f("auto_pause_days", 3.0) * 86400.0
+        return until if n >= need and self._clock.wall() < until else None
+
+    def auto_paused(self) -> list[dict[str, Any]]:
+        need = int(self._f("auto_pause_losses", 3))
+        out = []
+        for (asset, lv, sv), (n, last) in self._losing_streaks().items():
+            until = last + self._f("auto_pause_days", 3.0) * 86400.0
+            if need > 0 and n >= need and self._clock.wall() < until:
+                out.append({"strategy": "xfund", "asset": asset, "where": f"{lv} / {sv}", "losses": n, "until_ts": until})
+        return out
+
+    def open_now(self) -> dict[str, Any]:
+        """Owner's button: lift the pause and enter, right now, the best pairs that pass the SAME rules as
+        the automatic entries (confirmed funding difference, edge after fees / spreads / gap, position
+        limit, auto-pause).  Nothing is opened against the rules; the reason is reported instead."""
+        self.paused = False
+        now = self._clock.mono()
+        before = sum(1 for t in self._trades if t.status in _ACTIVE)
+        self.review(now)
+        for asset, (lv, sv) in list(self._approved.items()):
+            self._try_enter(asset, lv, sv, now)
+        opened = sum(1 for t in self._trades if t.status in _ACTIVE) - before
+        return {"opened": opened, "waiting": len(self._approved), "reason": self._why_not(opened)}
+
+    def _why_not(self, opened: int) -> str:
+        if not self.enabled:
+            return "the strategy is switched off in the settings (xfund_enabled)"
+        if opened:
+            return f"opened {opened} pair(s)"
+        if self._approved:
+            return (f"{len(self._approved)} pair(s) pass the rules and wait for fresh prices of both exchanges "
+                    f"({', '.join(sorted(self._approved))}); they open by themselves")
+        limit = int(self._f("xfund_max_positions", 5))
+        if len(self._busy) >= limit:
+            return f"{len(self._busy)} of {limit} positions are already open (the limit)"
+        free = [c for c in self.candidates if c["asset"] not in self._busy]
+        if not free:
+            return "no coin has funding on two exchanges yet (wait for the first funding poll)"
+        need = self._f("xfund_min_edge_pct", 0.10)
+        best = free[0]
+        edge = best["edge_pct"] if best["edge_pct"] is not None else best["edge_est_pct"]
+        name = f"{best['asset']} ({best['long']} / {best['short']})"
+        if best["auto_paused_until"]:
+            return f"best pair {name} is paused by the bot after {int(self._f('auto_pause_losses', 3))} losses in a row"
+        if edge < need:
+            return f"best pair {name}: profit after fees {edge:+.3f}% for {self._f('xfund_horizon_h', 72.0):g} h, needs {need:+.2f}%"
+        if not best["confirmed"]:
+            return f"best pair {name}: the funding difference is not confirmed on 2 polls yet"
+        return f"best pair {name} did not pass on the current prices"
 
     def _review_exits(self, now: float) -> None:
         for t in self._trades:

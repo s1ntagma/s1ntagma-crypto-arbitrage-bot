@@ -68,6 +68,7 @@ CONDITIONS = ("fut_upper", "spot_lower", "both")
 MODES = ("fut_upper", "spot_lower", "any", "both")
 _ACTIVE = ("pending", "open", "closing")
 _COUNTERS_KEY = "basis_counters"
+_ARCHIVE_KEY = "basis_archive"
 _COUNTERS_SAVE_S = 5.0
 _SAMPLE_S = 1.0
 _TRADES_KEEP = 2000
@@ -141,6 +142,7 @@ class BasisTrade:
     deferred_close: str = ""
     open_net_quote: float | None = None  # result if closed now (exit side of fresh books, exit fees included)
     open_net_ts: float | None = None
+    archived: bool = False  # owner's archive: kept in the database, not shown or counted
 
     @property
     def hedged(self) -> bool:
@@ -554,6 +556,9 @@ class BasisScanner:
         for p in self._pairs.values():
             rates = self._last_rates(p)
             confirmed = bool(rates) and all(r is not None and r > 0 for r in rates)
+            p.carry["carry_auto_paused_until"] = self._carry_pause_until(p.venue, p.asset)
+            if p.carry["carry_auto_paused_until"]:
+                confirmed = False  # the bot's own history: this coin kept losing here
             hist = p.funding_history
             if len(hist) >= 3 and sum(1 for r in hist if r > 0) / len(hist) < self._s("carry_min_positive_share", 0.8):
                 confirmed = False  # funding of this coin flips too often: a carry would pay as often as it earns
@@ -571,6 +576,110 @@ class BasisScanner:
         for _, p in chosen:
             p.carry["carry_approved"] = True
         return len(chosen)
+
+    # ------------------------------------------------------------------ the bot's own history
+    def _carry_streaks(self) -> dict[tuple[str, str], tuple[int, float]]:
+        out: dict[tuple[str, str], tuple[int, float]] = {}
+        for t in self._trades:  # oldest first
+            if t.trigger != CARRY or t.status not in ("closed", "one_leg", "no_fill") \
+                    or t.exit_reason == "closed by owner":
+                continue
+            won = t.net_quote is not None and t.net_quote > 0
+            n = 0 if won else out.get((t.venue, t.asset), (0, 0.0))[0] + 1
+            out[(t.venue, t.asset)] = (n, t.closed_ts or 0.0)
+        return out
+
+    def _carry_pause_until(self, venue: str, asset: str) -> float | None:
+        need = int(self._s("auto_pause_losses", 3))
+        if need <= 0:
+            return None
+        n, last = self._carry_streaks().get((venue, asset), (0, 0.0))
+        until = last + self._s("auto_pause_days", 3.0) * 86400.0
+        return until if n >= need and self._clock.wall() < until else None
+
+    def auto_paused(self) -> list[dict[str, Any]]:
+        need = int(self._s("auto_pause_losses", 3))
+        out = []
+        for (venue, asset), (n, last) in self._carry_streaks().items():
+            until = last + self._s("auto_pause_days", 3.0) * 86400.0
+            if need > 0 and n >= need and self._clock.wall() < until:
+                out.append({"strategy": "carry", "asset": asset, "where": venue, "losses": n, "until_ts": until})
+        return out
+
+    def open_now(self, carry: bool = True) -> dict[str, Any]:
+        """Owner's button: lift the pause and approve, right now, the best pairs that pass the same rules as
+        the automatic entries; an approved pair enters on its next price update (revalidated there)."""
+        key = "carry" if carry else "signals"
+        self.paused[key] = False
+        if not carry:
+            return {"approved": 0, "reason": "the signal pairs open on their own signals"}
+        if not bool(getattr(self._settings, "carry_enabled", False)):
+            return {"approved": 0, "reason": "the strategy is switched off in the settings (carry_enabled)"}
+        n = self.carry_review()
+        if n:
+            return {"approved": n, "reason": f"{n} pair(s) pass the rules: they open on the next price update"}
+        limit = int(self._s("carry_max_positions", 5))
+        if self._carry_open_n() >= limit:
+            return {"approved": 0, "reason": f"{self._carry_open_n()} of {limit} positions are already open (the limit)"}
+        priced = [p for p in self._pairs.values() if p.carry.get("carry_edge_pct") is not None
+                  and not self._active(p, carry=True)]
+        if not priced:
+            return {"approved": 0, "reason": "no pair has a profit estimate on fresh prices yet"}
+        best = max(priced, key=lambda p: p.carry["carry_edge_pct"])
+        edge, need = best.carry["carry_edge_pct"], self._s("carry_min_edge_pct", 0.10)
+        name = f"{best.asset} on {best.venue}"
+        if best.carry.get("carry_auto_paused_until"):
+            why = f"best pair {name} is paused by the bot after {int(self._s('auto_pause_losses', 3))} losses in a row"
+        elif edge < need:
+            why = f"best pair {name}: profit after fees {edge:+.3f}% for {self._s('carry_horizon_h', 72.0):g} h, needs {need:+.2f}%"
+        else:
+            why = f"best pair {name}: funding is not confirmed positive on 2 polls yet"
+        return {"approved": 0, "reason": why}
+
+    # ------------------------------------------------------------------ owner's archive of the signal pairs
+    def archive(self) -> dict[str, Any]:
+        kv_get = getattr(self._db, "kv_get", None) if self._db is not None else None
+        try:
+            saved = dict(kv_get(_ARCHIVE_KEY) or {}) if kv_get is not None else {}
+        except Exception:  # noqa: BLE001
+            saved = {}
+        return {"trades": 0, "net_quote": 0.0, "unknown": 0, "from_ts": None, "to_ts": None, **saved}
+
+    def archive_signals(self) -> dict[str, Any]:
+        """Finished signal pairs (not carry) leave the screen and every total; they stay in the database
+        (``archived``), their totals and the signal counters are kept under ``basis_archive``."""
+        a = self.archive()
+        gone = [t for t in self._trades if t.trigger != CARRY and t.status not in _ACTIVE]
+        if not gone:
+            return a
+        nets = [t.net_quote for t in gone if t.net_quote is not None]
+        ts = [t.signal_ts for t in gone]
+        a["trades"] += len(gone)
+        a["net_quote"] += sum(nets)
+        a["unknown"] += len(gone) - len(nets)
+        a["from_ts"] = min([*ts, *([a["from_ts"]] if a["from_ts"] else [])])
+        a["to_ts"] = max([*ts, *([a["to_ts"]] if a["to_ts"] else [])])
+        a["archived_ts"] = self._clock.wall()
+        sig = ("signals_fut_upper", "signals_spot_lower", "signals_both", "signals_while_open", "entries",
+               "training_entries", "stale_evals", "skew_evals", "evaluations")
+        old = dict(a.get("counters") or {})
+        a["counters"] = {k: int(old.get(k, 0)) + self.counters[k] for k in sig}
+        for k in sig:
+            self.counters[k] = 0
+        for t in gone:
+            t.archived = True
+            self._save(t)
+        self._trades = [t for t in self._trades if not t.archived]
+        kv_set = getattr(self._db, "kv_set", None) if self._db is not None else None
+        if kv_set is not None:
+            try:
+                kv_set(_ARCHIVE_KEY, a)
+            except Exception:  # noqa: BLE001
+                log.exception("basis archive not saved")
+        self._counters_dirty_mono = self._clock.mono()
+        self._flush_counters(self._clock.mono(), force=True)
+        log.info("basis: %d signal pair(s) archived (result %.2f)", len(gone), sum(nets))
+        return a
 
     def _trigger(self, fired: list[str]) -> str | None:
         mode = self.mode
