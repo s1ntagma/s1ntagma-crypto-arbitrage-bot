@@ -1,0 +1,22 @@
+.env
+*.env
+!.env.example
+config.json
+logs/
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.log
+.venv/
+venv/
+.idea/
+.vscode/
+.deps_ok
+
+# bundled data inside the package (fallback asset pool)
+!latbot/universe/data/
+!latbot/universe/data/*.json

@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>latbot · latency terminal</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#tab-opps">Skip to opportunities</a>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#" aria-label="latbot">
+        <span class="brand-logo" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="15 7 21 7 21 13"/></svg></span>
+        <span class="brand-text"><span class="brand-title">latbot</span><span id="build-stamp" class="build-stamp mono" title="build: hash of the running code"></span></span>
+      </a>
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <button class="tab" role="tab" type="button" data-tab="opps" aria-selected="true" aria-controls="tab-opps"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg><span class="tab-label">opportunities</span> <span class="tab-count" id="opps-count">0</span></button>
+        <button class="tab" role="tab" type="button" data-tab="market" aria-selected="false" aria-controls="tab-market"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg><span class="tab-label">market</span></button>
+        <button class="tab" role="tab" type="button" data-tab="trades" aria-selected="false" aria-controls="tab-trades"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg><span class="tab-label">trades</span> <span class="tab-count" id="trades-count">0</span></button>
+        <button class="tab" role="tab" type="button" data-tab="stats" aria-selected="false" aria-controls="tab-stats"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="tab-label">stats</span></button>
+        <button class="tab" role="tab" type="button" data-tab="diag" aria-selected="false" aria-controls="tab-diag"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span class="tab-label">diagnostics</span></button>
+        <button class="tab" role="tab" type="button" data-tab="basis" aria-selected="false" aria-controls="tab-basis"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8"/><path d="M3 7h6"/><path d="M15 17h6"/></svg><span class="tab-label">basis</span></button>
+      </nav>
+      <div class="topbar-actions">
+        <div id="mode-badge" class="mode-badge paper" title="Execution mode">PAPER</div>
+        <div id="ws-status" class="ws-status" role="status" title="WebSocket connection">
+          <span id="ws-dot" class="dot red" aria-hidden="true"></span>
+          <span id="ws-label">connecting…</span>
+        </div>
+        <button id="close-positions-btn" class="btn btn-warn hidden" type="button">CLOSE POSITIONS</button>
+  <button id="emergency-btn" class="btn btn-danger" type="button"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>EMERGENCY STOP</span></button>
+  <button id="settings-btn" class="btn btn-ghost" type="button" aria-label="Settings" aria-controls="settings-drawer" aria-expanded="false"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>Settings</span></button>
+      </div>
+    </div>
+  </header>
+
+  <div id="emergency-banner" class="banner banner-danger hidden" role="status" aria-live="assertive"></div>
+
+  <div id="strips" class="strips">
+    <section id="dashboard" class="dashboard" aria-label="Dashboard counters"></section>
+    <section id="health-strip" class="health-strip" aria-label="Exchange health"></section>
+  </div>
+
+  <main class="main">
+    <section id="tab-opps" class="tab-panel" role="tabpanel" aria-label="Opportunities">
+      <div class="hero grid-bg">
+        <div class="hero-copy">
+          <span class="badge-live"><span class="dot green" aria-hidden="true"></span><span id="hero-badge">Live monitoring</span></span>
+          <h1 class="hero-title">Catch the <span class="gradient-text">lag</span>, not the noise</h1>
+          <p class="hero-sub">A signal appears only when at least two venues moved and your exchange has not. Every figure is net of fees, spread and slippage, on the size the order book can fill.</p>
+          <p id="opps-reference-note" class="hero-sub hidden"><strong>Reference only.</strong> In virtual trading this strategy lost on your exchanges, so its virtual trades are switched off. The working strategies are on the Basis tab.</p>
+          <div class="hero-cta">
+            <button id="hero-scroll" class="btn btn-primary btn-cta" type="button">All opportunities</button>
+            <button id="hero-diag" class="btn btn-cta" type="button">Why no signals? Open diagnostics</button>
+          </div>
+          <div class="hero-points">
+            <span><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Net of costs</span>
+            <span><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Real order-book depth</span>
+            <span><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Human and bot timing</span>
+          </div>
+        </div>
+      <section id="best-panel" class="best-panel" aria-live="polite">
+        <h2 class="panel-title"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg> <span class="panel-title-text">BEST CURRENT OPPORTUNITY</span></h2>
+        <div id="best-body" class="best-body"></div>
+      </section>
+      </div>
+      <div id="strip-slot"></div>
+
+      <div id="filters" class="filters" aria-label="Filters">
+        <div id="filter-quick" class="filter-quick" role="group" aria-label="Quick filters">
+          <button class="chip active" type="button" data-quick="ALL">All</button>
+          <button class="chip" type="button" data-quick="MANUAL">Manual</button>
+          <button class="chip" type="button" data-quick="AUTO">Auto</button>
+          <button class="chip" type="button" data-quick="THRESHOLD">≥3%</button>
+          <button class="chip" type="button" data-quick="PAPER">Paper</button>
+          <button class="chip" type="button" data-quick="LIVE">Live</button>
+          <button class="chip" type="button" data-quick="EXPIRED">Expired</button>
+        </div>
+        <div class="filter-selects">
+          <label class="field">
+            <span class="field-label">Exchange</span>
+            <select id="f-exchange"><option value="">any</option></select>
+          </label>
+          <label class="field">
+            <span class="field-label">Asset</span>
+            <select id="f-asset"><option value="">any</option></select>
+          </label>
+          <label class="field">
+            <span class="field-label">Min NET %</span>
+            <input id="f-minnet" type="number" step="0.1" inputmode="decimal" placeholder="0.0">
+          </label>
+          <label class="field">
+            <span class="field-label">Min window s</span>
+            <input id="f-minwin" type="number" step="1" min="0" inputmode="numeric" placeholder="0">
+          </label>
+          <label class="field">
+            <span class="field-label">HUMAN</span>
+            <select id="f-human">
+              <option value="">any</option>
+              <option value="green">green</option>
+              <option value="yellow">yellow</option>
+              <option value="red">red</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">BOT</span>
+            <select id="f-bot">
+              <option value="">any</option>
+              <option value="green">green</option>
+              <option value="yellow">yellow</option>
+              <option value="red">red</option>
+            </select>
+          </label>
+          <label class="check filter-check"><input id="f-lowq" type="checkbox"> <span>Show training / low quality</span></label>
+          <button id="filters-reset" class="btn btn-ghost btn-sm" type="button">Reset</button>
+        </div>
+      </div>
+
+      <div id="cards" class="cards" aria-live="polite"></div>
+      <div id="cards-empty" class="empty hidden">
+        <div class="scanner" aria-hidden="true"></div>
+        <p class="empty-title" data-role="empty-title">Watching exchanges · no executable lag right now</p>
+        <p class="empty-sub" data-role="empty-sub">Signals need ≥2 venues to move while a target lags. Every card is a measured lag: no data, no signal — nothing is invented to fill the grid.</p>
+      </div>
+    </section>
+
+    <section id="tab-market" class="tab-panel hidden" role="tabpanel" aria-label="Market context">
+      <div class="panel-head">
+        <h2 class="panel-title">MARKET · context behind every signal</h2>
+        <button id="market-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+      </div>
+      <div id="market-status" class="diag-why" aria-live="polite"></div>
+      <div class="diag-grid">
+        <div class="diag-block">
+          <h3 class="diag-title keep-case">US macro calendar · next releases</h3>
+          <div class="table-wrap"><table class="table table-compact" id="market-macro-table"><tbody id="market-macro"></tbody></table></div>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title keep-case">Regime · BTC / ETH and US markets (delayed)</h3>
+          <div class="table-wrap"><table class="table table-compact" id="market-regime-table"><tbody id="market-regime"></tbody></table></div>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">NEWS · Telegram channels and feeds, classified</h3>
+        <div class="table-wrap">
+          <table class="table" id="market-news-table">
+            <thead><tr><th>Time</th><th>Source</th><th>Headline</th><th>Category</th><th>Assets</th><th>Impact</th><th class="num">Importance</th></tr></thead>
+            <tbody id="market-news"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">DERIVATIVES · funding, open interest, liquidations</h3>
+        <div class="table-wrap">
+          <table class="table" id="market-derivs-table">
+            <thead><tr><th>Asset</th><th class="num">Funding / 8h</th><th class="num">Percentile</th><th class="num">OI change 15m</th><th class="num">Long liq 5m</th><th class="num">Short liq 5m</th><th>Note</th></tr></thead>
+            <tbody id="market-derivs"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-grid">
+        <div class="diag-block">
+          <h3 class="diag-title">POOL · coins the bot scans</h3>
+          <div class="table-wrap"><table class="table table-compact" id="market-pool-table"><tbody id="market-pool"></tbody></table></div>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title">SOURCES · status</h3>
+          <div class="table-wrap"><table class="table table-compact" id="market-sources-table"><tbody id="market-sources"></tbody></table></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-trades" class="tab-panel hidden" role="tabpanel" aria-label="Trades">
+      <div class="panel-head">
+        <h2 class="panel-title">TRADES · expected vs actual</h2>
+        <button id="trades-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="trades-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Mode</th>
+              <th>Asset</th>
+              <th>Side</th>
+              <th class="num">Capital</th>
+              <th class="num">Expected NET</th>
+              <th class="num">Actual NET</th>
+              <th class="num">Expected profit</th>
+              <th class="num">Realized</th>
+              <th class="num">Slippage</th>
+              <th class="num">Exec</th>
+              <th>State</th>
+              <th>Diff reason</th>
+              <th>Journal</th>
+            </tr>
+          </thead>
+          <tbody id="trades-body"></tbody>
+        </table>
+      </div>
+      <div id="trades-empty" class="empty hidden">
+        <div class="scanner" aria-hidden="true"></div>
+        <p class="empty-title">No trades yet.</p>
+        <p class="empty-sub">A trade appears here the moment an opportunity is executed — MANUAL or AUTO — with expected vs actual NET side by side.</p>
+      </div>
+    </section>
+
+    <section id="tab-stats" class="tab-panel hidden" role="tabpanel" aria-label="Statistics">
+      <div class="panel-head">
+        <h2 class="panel-title">STATS</h2>
+        <button id="stats-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+      </div>
+      <div class="diag-grid">
+        <div class="diag-block">
+          <h3 class="diag-title">TRADES (PAPER / LIVE) · expected vs actual</h3>
+          <table class="table table-compact"><tbody id="tsum-body"></tbody></table>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title">SHADOW TRADING · every opportunity, virtual, real book</h3>
+          <div class="period-row">
+            <span id="shadow-period" class="muted">Period: all time</span>
+            <button id="shadow-new-period" class="btn btn-ghost btn-sm" type="button">New period</button>
+          </div>
+          <table class="table table-compact"><tbody id="shadow-sum-body"></tbody></table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">LEARNING · does the quality grade predict the result?</h3>
+        <div class="table-wrap">
+          <table class="table" id="grade-table">
+            <thead><tr><th>Grade</th><th class="num">Closed</th><th class="num">Win rate</th><th class="num">Avg actual NET</th><th class="num">Stopped</th><th class="num">P&amp;L</th><th class="num">P&amp;L at signal leverage (est.)</th></tr></thead>
+            <tbody id="grade-body"></tbody>
+          </table>
+        </div>
+        <p id="learning-note" class="muted"></p>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">STRATEGY · shadow result by target exchange and asset</h3>
+        <div class="table-wrap">
+          <table class="table" id="strategy-table">
+            <thead><tr><th>Group</th><th class="num">Closed</th><th class="num">Win rate</th><th class="num">Avg expected NET</th><th class="num">Avg actual NET</th><th class="num">Target reached</th><th class="num">P&amp;L</th></tr></thead>
+            <tbody id="strategy-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">TRAINING · every priced signal, entered virtually (never offered)</h3>
+        <p id="training-note" class="muted"></p>
+        <div class="table-wrap">
+          <table class="table" id="training-table">
+            <thead><tr><th>Group</th><th class="num">Closed</th><th class="num">Win rate</th><th class="num">Avg lag</th><th class="num">Avg capture</th><th class="num">Model NET</th><th class="num">Real NET</th></tr></thead>
+            <tbody id="training-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">READY FOR REAL MONEY?</h3>
+        <table class="table table-compact"><tbody id="ready-body"></tbody></table>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">PAIRS · proven / training / failing (virtual trades of the current strategy)</h3>
+        <div class="table-wrap">
+          <table class="table" id="pairs-table">
+            <thead><tr><th>Pair</th><th>Status</th><th class="num">Wins</th><th class="num">Worst-case win rate</th><th class="num">Avg NET</th><th>Why</th></tr></thead>
+            <tbody id="pairs-body"></tbody>
+          </table>
+        </div>
+        <p id="pairs-empty" class="muted hidden">No closed virtual trades of the current strategy yet: pairs appear here as the bot trains.</p>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">LATEST SHADOW TRADES</h3>
+        <div class="table-wrap">
+          <table class="table" id="shadow-table">
+            <thead><tr><th>Opened</th><th>Asset @ target</th><th class="num">Entry</th><th class="num">Exit</th><th>Lead</th><th class="num">Expected NET</th><th class="num">Best NET</th><th class="num">Actual NET</th><th class="num">P&amp;L</th><th>Result</th></tr></thead>
+            <tbody id="shadow-body"></tbody>
+          </table>
+        </div>
+        <p id="shadow-empty" class="muted hidden">No shadow trades yet: they start automatically with the first approved opportunity.</p>
+      </div>
+      <h3 class="diag-title">LEARNED · per asset / exchange</h3>
+      <div class="table-wrap">
+        <table class="table" id="stats-table">
+          <thead><tr id="stats-head"></tr></thead>
+          <tbody id="stats-body"></tbody>
+        </table>
+      </div>
+      <div id="stats-empty" class="empty hidden">
+        <div class="scanner" aria-hidden="true"></div>
+        <p class="empty-title">No statistics recorded yet.</p>
+        <p class="empty-sub">Reaction delays, catch-up ratios and success rates are learned per asset and exchange as opportunities expire.</p>
+      </div>
+    </section>
+    <section id="tab-diag" class="tab-panel hidden" role="tabpanel" aria-label="Diagnostics">
+      <div class="panel-head">
+        <h2 class="panel-title">DIAG · why there are no signals</h2>
+        <button id="diag-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+      </div>
+      <div id="diag-why" class="diag-why" aria-live="polite"></div>
+      <div class="diag-grid">
+        <div class="diag-block">
+          <h3 class="diag-title">FUNNEL</h3>
+          <table class="table table-compact" id="diag-funnel-table"><tbody id="diag-funnel"></tbody></table>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title">REJECTED BY REASON</h3>
+          <table class="table table-compact" id="diag-reasons-table"><tbody id="diag-reasons"></tbody></table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">EXCHANGES</h3>
+        <div class="table-wrap">
+          <table class="table" id="diag-exchanges-table">
+            <thead><tr><th>Exchange</th><th>Role</th><th>Connected</th><th class="num">Books</th><th class="num">Tickers</th><th class="num">Trades</th><th class="num">Polled</th><th class="num" title="Broken books (bid at or above ask) dropped: no price from them">Crossed</th><th class="num">24h volumes</th><th class="num">Last data</th><th>Status</th></tr></thead>
+            <tbody id="diag-exchanges"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">THRESHOLDS</h3>
+        <table class="table table-compact" id="diag-thresholds-table"><tbody id="diag-thresholds"></tbody></table>
+      </div>
+      <p id="diag-empty" class="muted hidden">Diagnostics not loaded yet.</p>
+    </section>
+    <section id="tab-basis" class="tab-panel hidden" role="tabpanel" aria-label="Spot-futures basis">
+      <div class="panel-head">
+        <h2 class="panel-title">BASIS · spot vs futures (research, virtual only, no orders)</h2>
+        <button id="basis-refresh" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+      </div>
+      <p id="basis-note" class="muted"></p>
+      <h3 class="diag-title keep-case">Balance · is each strategy in plus or minus (virtual money, after fees)</h3>
+      <div id="balance-cards" class="balance-cards"></div>
+      <p id="basis-action" class="muted hidden" role="status"></p>
+      <div class="diag-block">
+        <h3 class="diag-title keep-case">History · what the bot did, day by day (finished trades, after fees)</h3>
+        <div class="table-wrap">
+          <table class="table" id="history-days-table">
+            <thead><tr><th>Day</th><th class="num">Funding between exchanges</th><th class="num">Momentum</th><th class="num">Funding carry</th><th class="num">Trades (in plus)</th><th class="num">Result of the day</th></tr></thead>
+            <tbody id="history-days"></tbody>
+          </table>
+        </div>
+        <p id="history-archive" class="muted"></p>
+      </div>
+      <div class="diag-grid">
+        <div class="diag-block">
+          <h3 class="diag-title keep-case">History · by coin (worst first)</h3>
+          <div class="table-wrap">
+            <table class="table table-compact-wide" id="history-coins-table">
+              <thead><tr><th>Strategy</th><th>Coin</th><th class="num">Trades (in plus)</th><th class="num">Result</th></tr></thead>
+              <tbody id="history-coins"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title keep-case">Coins paused by the bot (they kept losing)</h3>
+          <table class="table table-compact"><tbody id="auto-paused"></tbody></table>
+        </div>
+      </div>
+      <div class="diag-grid">
+        <div class="diag-block" id="signals-stats-block">
+          <h3 class="diag-title keep-case">Spot/futures signals · statistics</h3>
+          <table class="table table-compact"><tbody id="basis-stats"></tbody></table>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title">FUNDING CARRY · long spot + short perp while funding pays</h3>
+          <table class="table table-compact"><tbody id="carry-stats"></tbody></table>
+        </div>
+      </div>
+      <div class="diag-grid">
+        <div class="diag-block">
+          <h3 class="diag-title">MOMENTUM · BTC / ETH perpetuals, long and short (virtual)</h3>
+          <table class="table table-compact"><tbody id="mom-stats"></tbody></table>
+        </div>
+        <div class="diag-block">
+          <h3 class="diag-title">MOMENTUM · live moves</h3>
+          <table class="table table-compact"><tbody id="mom-status"></tbody></table>
+          <h3 class="diag-title keep-case" style="margin-top:16px">Momentum on the Bybit DEMO account (real orders, demo money)</h3>
+          <table class="table table-compact"><tbody id="mom-demo"></tbody></table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">MOMENTUM · virtual trades</h3>
+        <div class="table-wrap">
+          <table class="table" id="mom-trades-table">
+            <thead><tr><th>Signal</th><th>Coin</th><th>Side</th><th>Venue</th><th>Status</th><th class="num">Move 15 m / 1 h</th><th class="num">Position size</th><th class="num">Entry price</th><th class="num">Exit price</th><th class="num">Fees</th><th class="num">Result</th><th class="num">On Bybit Demo</th><th>Exit reason</th></tr></thead>
+            <tbody id="mom-trades"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-grid">
+        <div class="diag-block">
+          <h3 class="diag-title">CROSS-VENUE FUNDING · long perp where funding is low, short where it is high</h3>
+          <table class="table table-compact"><tbody id="xfund-stats"></tbody></table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">CROSS-VENUE FUNDING · best pairs now (after fees, spreads and the price gap)</h3>
+        <div class="table-wrap">
+          <table class="table" id="xfund-cands-table">
+            <thead><tr><th>Asset</th><th>Long (low funding)</th><th>Short (high funding)</th><th class="num">Difference / day</th><th class="num">Funding 72 h</th><th class="num">Fees 4 legs</th><th class="num">Crossing</th><th class="num">Edge</th><th>Confirmed</th></tr></thead>
+            <tbody id="xfund-cands"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">CROSS-VENUE FUNDING · virtual pairs</h3>
+        <div class="table-wrap">
+          <table class="table" id="xfund-trades-table">
+            <thead><tr><th>Signal</th><th>Asset</th><th>Long / short</th><th>Status</th><th class="num">Edge at entry</th><th class="num">Position size (each side)</th><th class="num">Money in use</th><th class="num">Funding</th><th class="num">Fees</th><th class="num">Result</th><th>Notes</th></tr></thead>
+            <tbody id="xfund-trades"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-block" id="signals-breakdown-block">
+        <h3 class="diag-title">SPOT / FUTURES · results by signal and by venue + coin (every signal is entered virtually)</h3>
+        <div class="table-wrap">
+          <table class="table" id="basis-breakdown-table">
+            <thead><tr><th>Group</th><th class="num">Closed</th><th class="num">Incidents</th><th class="num">Win rate</th><th class="num">Avg NET</th><th class="num">P&amp;L</th></tr></thead>
+            <tbody id="basis-breakdown"></tbody>
+          </table>
+        </div>
+      </div>
+      <details class="basis-settings">
+        <summary>Settings (config.json: basis_*, carry_*)</summary>
+        <table class="table table-compact"><tbody id="basis-settings"></tbody></table>
+      </details>
+      <div class="diag-block">
+        <h3 class="diag-title">PAIRS · live basis on the book sides</h3>
+        <div class="table-wrap">
+          <table class="table" id="basis-pairs-table">
+            <thead><tr><th>Venue</th><th>Asset</th><th class="num">Spot mid</th><th class="num">Perp mid</th><th class="num">Basis</th><th class="num">Entry (exec)</th><th class="num">Exit (exec)</th><th class="num">Fees 4 legs</th><th class="num">Funding / interval</th><th class="num">Potential NET</th><th class="num">Carry edge</th><th class="num">Skew</th><th>Conditions</th><th>Status</th></tr></thead>
+            <tbody id="basis-pairs"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="diag-block">
+        <h3 class="diag-title">VIRTUAL PAIRS AND INCIDENTS</h3>
+        <div class="table-wrap">
+          <table class="table" id="basis-trades-table">
+            <thead><tr><th>Signal</th><th>Pair</th><th>Trigger</th><th>Status</th><th class="num">Position size</th><th class="num">Entry basis</th><th class="num">Exit basis</th><th class="num">Max adverse</th><th class="num">Gross</th><th class="num">Fees</th><th class="num">Funding</th><th class="num">Result</th><th>Notes</th></tr></thead>
+            <tbody id="basis-trades"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="drawer-backdrop" class="backdrop hidden"></div>
+  <aside id="settings-drawer" class="drawer" aria-hidden="true" aria-labelledby="settings-title">
+    <div class="drawer-head">
+      <h2 id="settings-title" class="panel-title">Settings</h2>
+      <button id="settings-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close settings"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
+    </div>
+    <form id="settings-form" class="settings-form" autocomplete="off">
+      <fieldset class="fieldset">
+        <legend>Mode</legend>
+        <div class="radio-row">
+          <label class="radio"><input type="radio" name="mode" value="paper"> <span>PAPER</span></label>
+          <label class="radio"><input type="radio" name="mode" value="live"> <span class="live-text">LIVE</span></label>
+        </div>
+        <p class="hint">LIVE sends real orders with your API keys. PAPER uses the simulator / Bybit demo.</p>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend>Human execution</legend>
+        <label class="field"><span class="field-label">HUMAN_EXECUTION_TIME (s)</span>
+          <input type="number" name="human_execution_time_s" step="0.5" min="0.5" inputmode="decimal"></label>
+        <label class="check"><input type="checkbox" name="alert_human_only"> <span>Telegram only when HUMAN light is not red</span></label>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend>Capital</legend>
+        <label class="field"><span class="field-label">Capital per card (quote)</span>
+          <input type="number" name="capital_quote" step="1" min="1" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">MAX_TRADE_SIZE (quote)</span>
+          <input type="number" name="max_trade_quote" step="1" min="1" inputmode="decimal"></label>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend>AUTO limits</legend>
+        <label class="check"><input type="checkbox" name="autopilot"> <span>Autopilot: AUTO opens and closes trades by itself - only proven pairs (while "Offer only proven pairs" is on), never a pair you took by hand, every limit below applies</span></label>
+        <label class="check"><input type="checkbox" name="live_requires_ready"> <span>LIVE AUTO only when Stats READY says yes; LIVE AUTO trades proven pairs only (in any mode)</span></label>
+        <label class="field"><span class="field-label">Budget per exchange (quote), e.g. Kraken=200, OKX EEA=500, Bybit EU=0 (0 = none there)</span>
+          <input type="text" name="exchange_budget_quote" data-kind="budgets" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span class="field-label">Max per exchange, any venue (quote)</span>
+          <input type="number" name="max_exposure_per_exchange_quote" step="any" min="1" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">MAX_DAILY_LOSS (quote)</span>
+          <input type="number" name="max_daily_loss_quote" step="any" min="1" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">Max simultaneous trades</span>
+          <input type="number" name="max_simultaneous_trades" step="1" min="1" inputmode="numeric"></label>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend>Thresholds</legend>
+        <label class="field"><span class="field-label">Show opportunities from NET %</span>
+          <input type="number" name="min_net_pct_show" step="0.05" min="0" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">TELEGRAM threshold NET %</span>
+          <input type="number" name="telegram_profit_threshold_pct" step="0.1" min="0" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">Min movers (exchanges)</span>
+          <input type="number" name="min_movers" step="1" min="1" inputmode="numeric"></label>
+        <label class="field"><span class="field-label">WebSocket coins per exchange (rest via 2 s REST; restart to apply)</span>
+          <input type="number" name="ws_assets" step="1" min="1" max="50" inputmode="numeric"></label>
+        <label class="check"><input type="checkbox" name="telegram_require_executable"> <span>Telegram requires an executable light</span></label>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend>Simple mode</legend>
+        <label class="check"><input type="checkbox" name="simple_mode"> <span>Simple mode: the most liquid venue moved, your venue has not yet - buy, sell on catch-up or after the hold limit. Quality and news are information only.</span></label>
+        <label class="field"><span class="field-label">Enter only within (s) after the leader moved</span>
+          <input type="number" name="simple_entry_deadline_s" step="any" min="0.5" max="30" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">Hold at most (s), then sell at market</span>
+          <input type="number" name="simple_max_hold_s" step="any" min="1" max="120" inputmode="numeric"></label>
+        <label class="check"><input type="checkbox" name="ride_enabled"> <span>Ride the leader: enter while the leader still climbs, hold while it keeps going, sell when its move is over (replaces the two limits above)</span></label>
+        <label class="field"><span class="field-label">Enter at most (s) after the leader's move began</span>
+          <input type="number" name="ride_entry_max_age_s" step="any" min="5" max="600" inputmode="numeric"></label>
+        <label class="field"><span class="field-label">Leader turned: pull-back from its peak, %</span>
+          <input type="number" name="ride_reversal_pct" step="any" min="0.05" max="5" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">Caught up and the leader stalled for (s)</span>
+          <input type="number" name="ride_stall_s" step="any" min="1" max="120" inputmode="numeric"></label>
+        <label class="field"><span class="field-label">Trailing: arm at NET %, sell on a pull-back of %</span>
+          <span class="field-pair"><input type="number" name="ride_trail_arm_pct" step="any" min="0" max="10" inputmode="decimal">
+          <input type="number" name="ride_trail_pct" step="any" min="0.05" max="5" inputmode="decimal"></span></label>
+        <label class="field"><span class="field-label">Stop: NET on the position, -%</span>
+          <input type="number" name="ride_stop_pct" step="any" min="0.1" max="20" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">Safety: sell at market after (s)</span>
+          <input type="number" name="ride_max_hold_s" step="any" min="10" max="3600" inputmode="numeric"></label>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend>Selectivity &amp; leverage</legend>
+        <label class="field"><span class="field-label">Min quality score (0-100) for display, Telegram, AUTO</span>
+          <input type="number" name="min_quality_score" step="1" min="0" max="100" inputmode="numeric"></label>
+        <label class="field"><span class="field-label">Training: virtual balance (stakes come out of it; New period restarts it)</span>
+          <input type="number" name="shadow_balance_quote" step="any" min="10" inputmode="decimal"></label>
+        <label class="check"><input type="checkbox" name="shadow_unlimited"> <span>Training on unlimited virtual money (each offer at its best size)</span></label>
+        <label class="check"><input type="checkbox" name="shadow_train_all_signals"> <span>Also train on signals the model rejects (virtual only, never offered)</span></label>
+        <label class="check"><input type="checkbox" name="proven_gate_enabled"> <span>Offer only proven pairs (board, Telegram, AUTO); the rest keeps training</span></label>
+        <label class="field"><span class="field-label">Proven: at least N virtual trades on the pair</span>
+          <input type="number" name="proven_min_trades" step="any" min="5" inputmode="numeric"></label>
+        <label class="field"><span class="field-label">Proven: worst-case win rate (0.60 = 60%)</span>
+          <input type="number" name="proven_min_p10" step="any" min="0.3" max="0.99" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">Training: virtual trade from NET %</span>
+          <input type="number" name="shadow_min_net_pct" step="0.05" min="0" inputmode="decimal"></label>
+        <label class="field"><span class="field-label">Max leverage (advice; spot venues stay 1x)</span>
+          <input type="number" name="max_leverage" step="1" min="1" max="20" inputmode="numeric"></label>
+        <label class="check"><input type="checkbox" name="pool_enabled"> <span>Narrow pool: only predictable, liquid coins (restart to apply)</span></label>
+        <label class="check"><input type="checkbox" name="context_enabled"> <span>Market context: macro, news, derivatives (restart to apply)</span></label>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend>Automation</legend>
+        <label class="check"><input type="checkbox" name="auto_confirm"> <span>AUTO_CONFIRM: execute AUTO immediately without the confirmation dialog</span></label>
+      </fieldset>
+      <div class="drawer-actions">
+        <button id="settings-save" class="btn btn-primary" type="submit">Save</button>
+        <button id="settings-reset" class="btn btn-ghost" type="button">Reset</button>
+      </div>
+      <p id="settings-status" class="status-line" role="status"></p>
+    </form>
+  </aside>
+
+  <div id="modal-manual" class="modal session-modal hidden" role="dialog" aria-modal="true" aria-labelledby="manual-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="manual-title" class="panel-title">СДЕЛКА</h2>
+        <span id="manual-others" class="session-others" aria-live="polite"></span>
+        <button id="manual-close" class="btn btn-ghost btn-sm" type="button" aria-label="Свернуть сделку">Свернуть</button>
+      </div>
+      <div id="manual-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="modal-journal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="journal-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="journal-title" class="panel-title">JOURNAL</h2>
+        <button id="journal-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <div id="journal-trade" class="journal-trade muted"></div>
+        <label class="journal-label" for="journal-note">Note</label>
+        <textarea id="journal-note" class="journal-note" rows="4" maxlength="4000" placeholder="Что пошло так / не так, что сделать иначе…"></textarea>
+        <div class="journal-row">
+          <button id="journal-save" class="btn btn-primary btn-sm" type="button">SAVE NOTE</button>
+          <span id="journal-note-status" class="muted"></span>
+        </div>
+        <label class="journal-label" for="journal-file">Screenshot (PNG / JPEG / WEBP, up to 8 MB)</label>
+        <div class="journal-row">
+          <input id="journal-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
+          <button id="journal-upload" class="btn btn-sm" type="button">UPLOAD</button>
+        </div>
+        <div id="journal-analysis-note" class="muted journal-hint"></div>
+        <div id="journal-shots" class="journal-shots"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-auto" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="auto-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="auto-title" class="panel-title">AUTO</h2>
+        <button id="auto-close" class="btn btn-ghost btn-sm" type="button" aria-label="Close"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
+      </div>
+      <div id="auto-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="modal-confirm" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="modal-card modal-sm">
+      <div class="modal-head">
+        <h2 id="confirm-title" class="panel-title">Confirm</h2>
+      </div>
+      <div id="confirm-body" class="modal-body"></div>
+      <div class="modal-actions">
+        <button id="confirm-cancel" class="btn btn-ghost" type="button">Cancel</button>
+        <button id="confirm-ok" class="btn btn-danger" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

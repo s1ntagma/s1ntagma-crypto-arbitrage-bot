@@ -1,0 +1,4 @@
+{"status":"REQUEST_SUCCEEDED","responseTime":87,"message":[],"Results":{
+"series":
+[{"seriesID":"CES0500000003","data":[{"year":"2026","period":"M09","periodName":"September","latest":"true","value":"37.81","footnotes":[{"code":"P","text":"preliminary"}]},{"year":"2026","period":"M08","periodName":"August","value":"37.76","footnotes":[{"code":"P","text":"preliminary"}]},{"year":"2026","period":"M07","periodName":"July","value":"37.64","footnotes":[{}]}]}]
+}}

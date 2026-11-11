@@ -1,0 +1,32 @@
+{"src":"tg:TreeNewsFeed 2026","title":"U.S. CPI: +3.8% YEAR-OVER-YEAR (EST. +3.7%)","exp":{"category":"macro_data","direction":-1,"speed":"seconds"}}
+{"src":"tg:TreeNewsFeed 2026","title":"U.S. CPI: +3.4% YEAR-OVER-YEAR (EST. +3.4%)","exp":{"category":"macro_data","direction":0,"speed":"seconds"}}
+{"src":"tg:FinancialJuice 2026-10-08","title":"❗ US INITIAL JOBLESS CLAIMS ACTUAL 197K (FORECAST 200K, PREVIOUS 197K) $MACRO|FJ","exp":{"category":"macro_data","direction":0,"speed":"seconds"}}
+{"src":"tg:WalterBloomberg 2026-10-08","title":"US JOBLESS CLAIMS -2K TO 197K IN OCT-3 WK; SURVEY 200K","exp":{"category":"macro_data","direction":0,"speed":"seconds"}}
+{"src":"tg:markettwits 2026-10-08","title":"❗️🇺🇸#сша #экономика #отчетность \nСША - Initial Jobless Claims = 197 тыс (ожид 200 тыс / ранее 197 тыс)","exp":{"category":"macro_data","direction":0,"speed":"seconds"}}
+{"src":"tg:TreeNewsFeed 2026-09-24","title":"BITGET CONFIRMS HACK WITH LOSSES APPROX. $350M, CLAIMS USER FUNDS ARE SAFE: BITGET CEO","exp":{"category":"hack","direction":-1,"speed":"seconds"}}
+{"src":"rss:decrypt 2026-10","title":"Uranium Finance Hacker Who Bought Pokémon and Magic Cards Convicted Over $50M Theft","exp":{"category":"regulation","direction":0,"speed":"hours"}}
+{"src":"tg:wublockchainenglish 2026-10-08","title":"CrowdStrike: Hackers Target South Korean Financial Institutions Using LLMs and AI Tools, Leaking Data of 68,000 Individuals","exp":{"category":"hack","direction":0,"speed":"seconds","max_importance":0.5}}
+{"src":"tg:wublockchainenglish 2026-10-08","title":"US spot Bitcoin ETFs see $487M net outflows on Oct 7, led by BlackRock’s IBIT with $208M","exp":{"category":"etf","direction":-1,"speed":"minutes"}}
+{"src":"tg:BWEnews 2026-10-08","title":"UPBIT LISTING: 폰즈(PONS) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)","exp":{"category":"listing","direction":1,"speed":"seconds","assets":["PONS"]}}
+{"src":"tg:kucoin_news 2026-10","title":"KuCoin Futures Will Delist the STGUSDT Perpetual Contract and Related Services","exp":{"category":"delisting","direction":-1,"speed":"minutes"}}
+{"src":"tg:Walter_Bloomberg 2026-10-08","title":"🚨 REPORTS OF ONGOING MISSILE ATTACKS ON SAUDI ARABIA","exp":{"category":"geopolitics","direction":-1,"speed":"seconds"}}
+{"src":"tg:WalterBloomberg 2026-10-08","title":"RUBIO ON WAR IN UKRAINE: SEEMS TO BE AT A STALEMATE","exp":{"category":"geopolitics","direction":0,"speed":"seconds"}}
+{"src":"tg:whale_alert_io 2026-10-08","title":"🚨 🚨 🚨 🚨 🚨 🚨 🚨 2,050 $BTC (170,834,648 USD) transferred from unknown wallet to Coinbase Institutional\nDetails","exp":{"category":"whale_transfer","direction":-1,"speed":"minutes","assets":["BTC"]}}
+{"src":"tg:whale_alert_io 2026-10-08","title":"🚨 🚨 🚨 🚨 975 $BTC (80,759,839 USD) transferred from #Kraken to unknown wallet\nDetails","exp":{"category":"whale_transfer","direction":1,"speed":"minutes","assets":["BTC"]}}
+{"src":"tg:whale_alert_io 2026-10","title":"💵 💵 💵 💵 💵 💵 💵 💵 💵 💵 250,000,000 $USDC (250,092,500 USD) minted at USDC Treasury\nDetails","exp":{"category":"whale_transfer","direction":1,"speed":"minutes","assets":["*"]}}
+{"src":"tg:whale_alert_io 2026-10-08","title":"🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 3,000 $BTC (249,390,131 USD) transferred from unknown wallet to unknown wallet\nDetails","exp":{"category":"whale_transfer","direction":0,"speed":"minutes","assets":["BTC"]}}
+{"src":"rss:fed_press_all 2026","title":"Federal Reserve issues FOMC statement","exp":{"category":"fed_rates","direction":0,"speed":"seconds"}}
+{"src":"tg:FinancialJuice 2026-10-07","title":"Effective Fed Funds Rate 3.88% October 7 vs 3.88% October 6.|FJ","exp":{"category":"fed_rates","direction":0,"speed":"unknown","max_importance":0.3}}
+{"src":"tg:FinancialJuice 2026-10-08","title":"BoE Gov. Bailey: Fully committed to returning inflation to target|FJ","exp":{"category":"fed_rates","direction":0,"speed":"minutes","max_importance":0.5}}
+{"src":"tg:WatcherGuru 2026-10-07","title":"JUST IN: 🇷🇺 Russia's largest bank Sberbank officially approved as crypto custodian to launch Bitcoin, Ethereum and USDT products.\n\n@WatcherGuru","exp":{"category":"regulation","direction":1,"speed":"minutes"}}
+{"src":"tg:the_block_crypto 2026-10","title":"Conduit sues Tether over $2.76 million freeze, says it has ‘no legal entitlement’ to funds","exp":{"category":"regulation","direction":-1,"speed":"minutes"}}
+{"src":"tg:markettwits 2026-10-08","title":"⬇️✴️#BTC < $82 000","exp":{"category":"market_move","direction":0,"speed":"minutes","assets":["BTC"]}}
+{"src":"rss:coindesk 2026-10-08","title":"Bitcoin breaks below $83,000 as oil jumps on Iran strike-plan report","exp":{"category":"market_move","direction":0,"speed":"minutes"}}
+{"src":"tg:unfolded 2026-10-08","title":"Greece plans 10% cryptocurrency capital gains tax — link | AI comment","exp":{"category":"regulation","direction":0,"speed":"minutes"}}
+{"src":"tg:CoinDeskGlobal 2026-10-08","title":"Securitize brings Apple, Nvidia and Tesla to Solana, with NYSE trading in the works","exp":{"category":"partnership","direction":0,"speed":"hours"}}
+{"src":"tg:markettwits 2026-10-08","title":"Оценка игроками вероятности повышения ставки ФРС на заседании 28 октября рухнула - до 19% ранее","exp":{"category":"fed_rates","direction":1,"speed":"minutes","note":"rules expected to FAIL (negated hike) - Claude case"}}
+{"src":"historic: Reuters 2024-01-10 (SEC approves spot bitcoin ETFs)","title":"SEC approves first U.S. spot bitcoin ETFs","exp":{"category":"etf","direction":1,"speed":"seconds","assets":["BTC"]}}
+{"src":"historic: CoinDesk 2022-11-08","title":"Binance to acquire FTX after liquidity crunch","exp":{"category":"exchange","direction":-1,"speed":"minutes","note":"rules may miss: no halt/insolvency word"}}
+{"src":"historic: 2025-02-21","title":"Bybit hacked: $1.5 billion in ETH stolen from cold wallet","exp":{"category":"hack","direction":-1,"speed":"seconds","assets":["ETH"]}}
+{"src":"historic: 2025-10-10","title":"Trump announces 100% tariffs on China starting November 1","exp":{"category":"geopolitics","direction":-1,"speed":"seconds"}}
+{"src":"historic style","title":"FED CUTS RATES BY 25 BPS TO 3.75%-4.00%, AS EXPECTED","exp":{"category":"fed_rates","direction":1,"speed":"seconds","note":"as-expected cut: sign arguably 0 - priced in"}}

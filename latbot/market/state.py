@@ -1,0 +1,333 @@
+"""MarketState - the in-memory view of live market data.
+
+Keeps, per ``(exchange, asset)``:
+  * the latest OrderBook / Ticker,
+  * a bounded deque of recent trades,
+  * a rolling mid-price series ``[(recv_mono, mid), ...]`` (oldest -> newest)
+    trimmed to ``settings.price_history_s`` and throttled to one sample per
+    ``settings.price_sample_min_interval_ms`` per stream,
+  * the 24h quote volume reported by the last ticker,
+and per exchange the latest ExchangeHealth.
+
+Nothing here guesses: a stream without data is simply not fresh.
+"""
+from __future__ import annotations
+
+import logging
+from bisect import bisect_left, bisect_right
+from collections import deque
+from typing import Deque, Iterable, Sequence
+
+from ..clock import Clock
+from ..config import Settings
+from ..links import split_symbol
+from ..models import ExchangeHealth, OrderBook, Ticker, Trade
+
+log = logging.getLogger(__name__)
+
+_TRADES_MAXLEN = 500
+
+Key = tuple[str, str]  # (exchange, asset)
+
+
+def _mono_of(point: tuple[float, float]) -> float:
+    return point[0]
+
+
+class MarketState:
+    """Latest market data + mid-price history per (exchange, asset)."""
+
+    def __init__(self, settings: Settings, clock: Clock) -> None:
+        self._settings = settings
+        self._clock = clock
+        self._books: dict[Key, OrderBook] = {}
+        self._tickers: dict[Key, Ticker] = {}
+        self._trades: dict[Key, Deque[Trade]] = {}
+        self._series: dict[Key, list[tuple[float, float]]] = {}
+        self._last_append_mono: dict[Key, float] = {}  # throttle anchor per stream
+        self._pending_tick: dict[Key, tuple[float, float]] = {}  # held outlier ticker tick per stream
+        self._last_data_mono: dict[Key, float] = {}  # last book OR ticker recv_mono
+        self._stream_mono: dict[Key, float] = {}  # last WebSocket book / ticker recv_mono (not REST polls)
+        self._broken: set[Key] = set()  # book streams whose cache broke (crossed / stale levels): no price until a sane book
+        self._volume24h: dict[Key, float] = {}
+        self._health: dict[str, ExchangeHealth] = {}
+        self._assets: dict[str, set[str]] = {}
+
+    # ------------------------------------------------------------------ #
+    # helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def asset_of(obj: OrderBook | Ticker | Trade) -> str:
+        """Canonical asset key of a market object (``asset`` or base of symbol)."""
+        return obj.asset or split_symbol(obj.symbol)[0]
+
+    def _register(self, exchange: str, asset: str) -> None:
+        self._assets.setdefault(asset, set()).add(exchange)
+
+    def _trim(self, series: list[tuple[float, float]], now_mono: float) -> None:
+        cutoff = now_mono - self._settings.price_history_s
+        idx = bisect_left(series, cutoff, key=_mono_of)
+        if idx > 0:
+            del series[:idx]
+
+    def _append_mid(self, key: Key, mono: float, mid: float) -> None:
+        """Append ``(mono, mid)`` with per-stream throttling.
+
+        Within ``price_sample_min_interval_ms`` of the last accepted sample the
+        newest point is *replaced* (so the latest price is always visible while
+        the sampling cadence is preserved); a lone first point is never
+        replaced so the pre-move price is not lost.  Out-of-order samples are
+        ignored.
+        """
+        if mid <= 0:
+            return
+        series = self._series.setdefault(key, [])
+        interval_s = max(0.0, self._settings.price_sample_min_interval_ms) / 1000.0
+        if series:
+            last_mono = series[-1][0]
+            if mono < last_mono:
+                return
+            anchor = self._last_append_mono.get(key, last_mono)
+            if len(series) >= 2 and (mono - anchor) < interval_s:
+                series[-1] = (mono, mid)
+                self._trim(series, mono)
+                return
+        series.append((mono, mid))
+        self._last_append_mono[key] = mono
+        self._trim(series, mono)
+
+    # ------------------------------------------------------------------ #
+    # ingestion
+    # ------------------------------------------------------------------ #
+    def on_book(self, book: OrderBook) -> None:
+        """Store the latest book and append its mid to the price series."""
+        asset = self.asset_of(book)
+        if not asset:
+            log.debug("book without asset/symbol ignored exchange=%s", book.exchange)
+            return
+        key = (book.exchange, asset)
+        if book.is_broken:
+            # a data error, never a price (hard rule 1): the previous book is not current either - the
+            # stream has no price (is_fresh False, no mid) until a sane book arrives
+            self._books.pop(key, None)
+            self._broken.add(key)
+            self._register(book.exchange, asset)
+            log.debug("broken book exchange=%s asset=%s bid=%s ask=%s %s", book.exchange, asset,
+                      book.best_bid, book.best_ask, book.broken or "crossed")
+            return
+        self._broken.discard(key)
+        self._books[key] = book
+        self._register(book.exchange, asset)
+        mono = book.ts.recv_mono
+        if mono >= self._stream_mono.get(key, float("-inf")):
+            self._stream_mono[key] = mono
+        prev = self._last_data_mono.get(key)
+        if prev is None or mono >= prev:
+            self._last_data_mono[key] = mono
+        mid = book.mid
+        if mid:
+            self._append_mid(key, mono, mid)
+
+    def on_ticker(self, ticker: Ticker, *, append_mid: bool = True, outlier_guard: bool = True,
+                  stream: bool = True) -> None:
+        """Store the ticker, its 24h volume and (``append_mid``) its mid.
+
+        ``outlier_guard=False`` is for REST-polled tickers: one sample per poll
+        round, so a real jump between two polls must land at once (streams get
+        the single-tick guard, see ``_ticker_outlier``).
+
+        ``append_mid=False`` is for polled REST tickers of assets the same
+        exchange already streams over WebSocket: a REST price is 1-2 s old and
+        must never become the newest point of the live series (it would read
+        as a move that is not there); volume, ticker and liveness still count.
+        """
+        asset = self.asset_of(ticker)
+        if not asset:
+            return
+        key = (ticker.exchange, asset)
+        self._tickers[key] = ticker
+        self._register(ticker.exchange, asset)
+        mono = ticker.ts.recv_mono
+        prev = self._last_data_mono.get(key)
+        if prev is None or mono >= prev:
+            self._last_data_mono[key] = mono
+        if stream and mono >= self._stream_mono.get(key, float("-inf")):
+            self._stream_mono[key] = mono
+        mid: float | None = None
+        if ticker.is_crossed:
+            mid = None  # bid >= ask: a data error - liveness and volume count, the price does not
+        elif ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
+            mid = (ticker.bid + ticker.ask) / 2.0
+        elif ticker.last and ticker.last > 0:
+            mid = ticker.last
+        vol: float | None = None
+        if ticker.quote_volume is not None:
+            vol = float(ticker.quote_volume)
+        elif ticker.base_volume is not None and mid:
+            vol = float(ticker.base_volume) * mid
+        if vol is not None and vol >= 0:
+            self._volume24h[key] = vol
+        if mid and append_mid and not (outlier_guard and self._ticker_outlier(key, mono, mid)):
+            self._append_mid(key, mono, mid)
+
+    def _ticker_outlier(self, key: Key, mono: float, mid: float) -> bool:
+        """Single-tick outlier guard for ticker streams (no depth to validate).
+
+        A tick more than ``tick_outlier_pct`` away from the series is held back;
+        it lands (together with the next tick) only when that next tick agrees
+        with it, otherwise it is dropped as a glitch.  Order books skip this:
+        their mid is cross-checked by the economics on real depth.
+        """
+        pct = float(self._settings.tick_outlier_pct)
+        if pct <= 0:
+            return False
+        series = self._series.get(key)
+        if not series:
+            self._pending_tick.pop(key, None)
+            return False
+        last = series[-1][1]
+        if last <= 0 or abs(mid / last - 1.0) * 100.0 <= pct:
+            self._pending_tick.pop(key, None)
+            return False
+        pending = self._pending_tick.pop(key, None)
+        if pending is not None and abs(mid / pending[1] - 1.0) * 100.0 <= pct:
+            self._append_mid(key, pending[0], pending[1])  # confirmed: the move is real
+            return False
+        self._pending_tick[key] = (mono, mid)
+        log.debug("%s %s: ticker tick %.6g is %.2f%% off the series (%.6g); waiting for confirmation",
+                  key[0], key[1], mid, abs(mid / last - 1.0) * 100.0, last)
+        return True
+
+    def on_trade(self, trade: Trade) -> None:
+        asset = self.asset_of(trade)
+        if not asset:
+            return
+        key = (trade.exchange, asset)
+        dq = self._trades.get(key)
+        if dq is None:
+            dq = deque(maxlen=_TRADES_MAXLEN)
+            self._trades[key] = dq
+        dq.append(trade)
+
+    def on_health(self, h: ExchangeHealth) -> None:
+        """Keep the (adapter-owned) health object so ``stale`` is live."""
+        self._health[h.exchange] = h
+
+    # ------------------------------------------------------------------ #
+    # queries
+    # ------------------------------------------------------------------ #
+    def stream_live(self, exchange: str, asset: str, now_mono: float, max_s: float) -> bool:
+        """The venue's WebSocket delivered a book or ticker for ``asset`` within ``max_s``."""
+        last = self._stream_mono.get((exchange, asset))
+        return last is not None and now_mono - last <= max_s
+
+    def last_price_mono(self, exchange: str, asset: str) -> float | None:
+        """recv_mono of the newest point of the price series (None: no price yet)."""
+        series = self._series.get((exchange, asset))
+        return series[-1][0] if series else None
+
+    def book(self, exchange: str, asset: str) -> OrderBook | None:
+        return self._books.get((exchange, asset))
+
+    def forget_book(self, exchange: str, asset: str) -> None:
+        """Drop the stored book of ``(exchange, asset)`` without marking the stream broken: for a
+        crossed REST snapshot - a polled venue has no WS book that could clear the sticky mark."""
+        self._books.pop((exchange, asset), None)
+
+    def books_for(self, asset: str) -> dict[str, OrderBook]:
+        out: dict[str, OrderBook] = {}
+        for ex in self._assets.get(asset, ()):
+            b = self._books.get((ex, asset))
+            if b is not None:
+                out[ex] = b
+        return out
+
+    def ticker(self, exchange: str, asset: str) -> Ticker | None:
+        return self._tickers.get((exchange, asset))
+
+    def symbol(self, exchange: str, asset: str) -> str | None:
+        """Market symbol of ``asset`` on ``exchange`` (book first, then ticker)."""
+        b = self._books.get((exchange, asset))
+        if b is not None:
+            return b.symbol
+        t = self._tickers.get((exchange, asset))
+        return t.symbol if t is not None else None
+
+    def volume24h(self, exchange: str, asset: str) -> float | None:
+        return self._volume24h.get((exchange, asset))
+
+    def volume_coverage(self) -> dict[str, int]:
+        """exchange -> number of assets with a known 24h volume (diagnostics)."""
+        out: dict[str, int] = {}
+        for ex, _asset in self._volume24h:
+            out[ex] = out.get(ex, 0) + 1
+        return out
+
+    def health(self, exchange: str) -> ExchangeHealth | None:
+        return self._health.get(exchange)
+
+    def last_data_mono(self, exchange: str, asset: str) -> float | None:
+        return self._last_data_mono.get((exchange, asset))
+
+    def is_fresh(self, exchange: str, asset: str, now_mono: float, max_age_ms: float) -> bool:
+        """True when the stream has data not older than ``max_age_ms`` and the
+        exchange is not flagged stale / in maintenance."""
+        last = self._last_data_mono.get((exchange, asset))
+        if last is None or (exchange, asset) in self._broken:
+            return False  # a broken book cache has no price, whatever else (tickers) arrived since
+        if (now_mono - last) * 1000.0 > max_age_ms:
+            return False
+        h = self._health.get(exchange)
+        if h is not None and (h.stale or h.maintenance):
+            return False
+        return True
+
+    def mid_series(self, exchange: str, asset: str) -> Sequence[tuple[float, float]]:
+        """Internal series (oldest -> newest).  Callers must not mutate it."""
+        return self._series.get((exchange, asset), ())
+
+    def mid_at(self, exchange: str, asset: str, mono: float) -> float | None:
+        series = self._series.get((exchange, asset))
+        if not series:
+            return None
+        idx = bisect_right(series, mono, key=_mono_of)
+        if idx == 0:
+            return None
+        return series[idx - 1][1]
+
+    def median_mid(self, asset: str, now_mono: float, max_age_ms: float, exchanges: Iterable[str] | None = None) -> float | None:
+        """Median of the latest mids of every FRESH stream of ``asset`` (optionally only
+        ``exchanges``).  None when no stream is fresh - nothing is carried forward."""
+        names = self._assets.get(asset, ()) if exchanges is None else exchanges
+        mids: list[float] = []
+        for ex in names:
+            series = self._series.get((ex, asset))
+            if not series or not self.is_fresh(ex, asset, now_mono, max_age_ms):
+                continue
+            mono, mid = series[-1]
+            if (now_mono - mono) * 1000.0 <= max_age_ms and mid > 0:
+                mids.append(mid)
+        if not mids:
+            return None
+        mids.sort()
+        n = len(mids)
+        return mids[n // 2] if n % 2 else (mids[n // 2 - 1] + mids[n // 2]) / 2.0
+
+    def assets(self) -> set[str]:
+        return set(self._assets)
+
+    def exchanges_for(self, asset: str) -> list[str]:
+        return sorted(self._assets.get(asset, ()))
+
+    def recent_quote_volume(self, exchange: str, asset: str, window_s: float, now_mono: float) -> float:
+        dq = self._trades.get((exchange, asset))
+        if not dq:
+            return 0.0
+        cutoff = now_mono - window_s
+        total = 0.0
+        for t in reversed(dq):
+            if t.ts.recv_mono < cutoff:
+                break
+            if t.ts.recv_mono <= now_mono:
+                total += t.price * t.amount
+        return total

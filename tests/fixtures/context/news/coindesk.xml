@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:wfw="http://wellformedweb.org/CommentAPI/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:sy="http://purl.org/rss/1.0/modules/syndication/" xmlns:slash="http://purl.org/rss/1.0/modules/slash/" xmlns:media="http://search.yahoo.com/mrss/" version="2.0">
+  <channel>
+    <title>CoinDesk: Bitcoin, Ethereum, Crypto News and Price Data</title>
+    <link>https://www.coindesk.com/</link>
+    <atom:link rel="self" type="application/rss+xml" href="https://www.coindesk.com/arc/outboundfeeds/rss"/>
+    <atom:link rel="hub" href="true"/>
+    <description>Leader in cryptocurrency, Bitcoin, Ethereum, XRP, blockchain, DeFi, digital finance and Web 3.0 news with analysis, video and live price updates.</description>
+    <lastBuildDate>Thu, 08 Oct 2026 13:09:49 +0000</lastBuildDate>
+    <language>en-US</language>
+    <copyright>© 2026 CoinDesk, Inc.</copyright>
+    <generator>CoinDesk</generator>
+    <ttl>5</ttl>
+    <sy:updatePeriod>hourly</sy:updatePeriod>
+    <sy:updateFrequency>1</sy:updateFrequency>
+    <image>
+      <url>https://downloads.coindesk.com/arc/failsafe/feeds/coindesk-feed-logo.png</url>
+      <title>CoinDesk: Bitcoin, Ethereum, Crypto News and Price Data</title>
+      <link>https://www.coindesk.com/</link>
+    </image>
+    <item>
+      <title><![CDATA[Securitize brings Apple, Nvidia and Tesla to Solana, with NYSE trading in the works]]></title>
+      <link>https://www.coindesk.com/business/2026/10/08/securitize-brings-apple-nvidia-and-tesla-to-solana-with-nyse-trading-in-the-works</link>
+      <media:content url="https://cdn.sanity.io/images/s3y3vcno/production/0df058fe321b648948d8a5b690588aaafbb157fe-2048x1152.jpg?fm=jpg&amp;w=800&amp;h=450&amp;crop=focalpoint&amp;fit=clip" type="image/*" medium="image"/>
+      <guid isPermaLink="false">f9ecdaa6-45f1-4455-b874-bcb478300ac3</guid>
+      <pubDate>Thu, 08 Oct 2026 13:06:24 +0000</pubDate>
+      <description><![CDATA[Tokenized shares in the mega-caps will first trade on Securitize's Solana-based platform, with further plans to expand them to NYSE and OKXICE digital venues, the firm said.]]></description>
+      <dc:creator>Krisztian Sandor</dc:creator>
+      <content:encoded/>
+      <dc:description/>
+      <category domain="https://www.coindesk.com/business"><![CDATA[Finance]]></category>
+      <category domain="tag"><![CDATA[Tokenization]]></category>
+      <category domain="tag"><![CDATA[Tokenized Equities]]></category>
+      <category domain="https://www.coindesk.com/">News</category>
+    </item>
+    <item>
+      <title><![CDATA[Bitcoin and ether holders urged to enter ‘bunker mode’ against possible AI attacks]]></title>
+      <link>https://www.coindesk.com/tech/2026/10/08/bitcoin-and-ether-holders-urged-to-prepare-bunker-mode-against-possible-ai-attacks</link>
+      <media:content url="https://cdn.sanity.io/images/s3y3vcno/production/422bf0c58d3c5d984b8ee7f8a379b85250db7bc2-6016x4016.jpg?fm=jpg&amp;w=800&amp;h=450&amp;crop=focalpoint&amp;fit=clip" type="image/*" medium="image"/>
+      <guid isPermaLink="false">62ab4914-c7c8-4a13-ad6e-bfd790b4a7b5</guid>
+      <pubDate>Thu, 08 Oct 2026 11:47:16 +0000</pubDate>
+      <description><![CDATA[Ethereum researchers warned AI could break the signatures guarding bitcoin, ether and the tokens built on them "in months, not years" in the worst case, well before quantum computers arrive.]]></description>
+      <dc:creator>Shaurya Malwa</dc:creator>
+      <content:encoded/>
+      <dc:description/>
+      <category domain="https://www.coindesk.com/tech"><![CDATA[Tech]]></category>
+      <category domain="https://www.coindesk.com/">News</category>
+    </item>
+    <item>
+      <title><![CDATA[NUVA brings U.S. residential mortgage credit to offshore investors ]]></title>
+      <link>https://www.coindesk.com/business/2026/10/08/nuva-brings-u-s-residential-mortgage-credit-to-offshore-investors</link>
+      <media:content url="https://cdn.sanity.io/images/s3y3vcno/production/b856b1afb247f8082e69a19b53267a84038a907e-3000x2001.jpg?fm=jpg&amp;w=800&amp;h=450&amp;crop=focalpoint&amp;fit=clip" type="image/*" medium="image"/>
+      <guid isPermaLink="false">37324452-c4ab-4997-93e5-352ff5f6a635</guid>
+      <pubDate>Thu, 08 Oct 2026 11:36:25 +0000</pubDate>
+      <description><![CDATA[The company's HOME token gives eligible investors exposure to a vault of U.S. home equity lines of credit starting from 1 USDC and targets a 7% annual yield.]]></description>
+      <dc:creator>Olivier Acuna</dc:creator>
+      <content:encoded/>
+      <dc:description/>
+      <category domain="https://www.coindesk.com/business"><![CDATA[Finance]]></category>
+      <category domain="tag"><![CDATA[Tokenization]]></category>
+      <category domain="tag"><![CDATA[Real World Assets  ]]></category>
+      <category domain="tag"><![CDATA[DeFi]]></category>
+      <category domain="https://www.coindesk.com/">News</category>
+    </item>
+    <item>
+      <title><![CDATA[Bitcoin mined for pennies in 2010 moves after 16 years, now worth $8.5 million]]></title>
+      <link>https://www.coindesk.com/tech/2026/10/08/bitcoin-mined-for-pennies-in-2010-moves-after-16-years-now-worth-usd8-5-million</link>
+      <media:content url="https://cdn.sanity.io/images/s3y3vcno/production/a0a7940835c9275731c2adf69015343cc4a850ac-1024x683.jpg?fm=jpg&amp;w=800&amp;h=450&amp;crop=focalpoint&amp;fit=clip" type="image/*" medium="image"/>
+      <guid isPermaLink="false">46ca11cb-5296-4505-9a66-8130952f0ab1</guid>
+      <pubDate>Thu, 08 Oct 2026 11:30:19 +0000</pubDate>
+      <description><![CDATA[The 100 BTC came directly from two mining rewards created during Bitcoin’s “Satoshi era” and had not moved for more than 16 years.]]></description>
+      <dc:creator>Shaurya Malwa</dc:creator>
+      <content:encoded/>
+      <dc:description/>
+      <category domain="https://www.coindesk.com/tech"><![CDATA[Tech]]></category>
+      <category domain="tag"><![CDATA[Bitcoin News]]></category>
+      <category domain="https://www.coindesk.com/">News</category>
+    </item>
+    <item>
+      <title><![CDATA[Bitcoin ETF investors head for the exit, and it's the biggest rush in months]]></title>
+      <link>https://www.coindesk.com/daybook-us/2026/10/08/bitcoin-etf-investors-head-for-the-exit-and-it-s-the-biggest-rush-in-months</link>
+      <media:content url="https://cdn.sanity.io/images/s3y3vcno/production/6af94a0747793db9df5d2b93c808c0aa07ab3c78-1600x857.jpg?fm=jpg&amp;w=800&amp;h=450&amp;crop=focalpoint&amp;fit=clip" type="image/*" medium="image"/>
+      <guid isPermaLink="false">3d790965-e740-4419-9361-bd9be91bd050</guid>
+      <pubDate>Thu, 08 Oct 2026 11:15:00 +0000</pubDate>
+      <description><![CDATA[Your day-ahead look for Oct. 8, 2026]]></description>
+      <dc:creator>Omkar Godbole</dc:creator>
+      <content:encoded/>
+      <dc:description/>
+      <category domain="https://www.coindesk.com/daybook-us"><![CDATA[Crypto Daybook Americas]]></category>
+      <category domain="tag"><![CDATA[Crypto Daybook Americas]]></category>
+      <category domain="https://www.coindesk.com/">News</category>
+    </item>
+    
+  </channel>
+</rss>
