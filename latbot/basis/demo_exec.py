@@ -30,6 +30,7 @@ from typing import Any
 
 from ..config import ExchangeConfig, ExchangeCredentials
 from ..exchanges.base import ExchangeError, InsufficientBalance, OrderRejected
+from ..logging_setup import redact
 from ..models import ExchangeRole, Mode, OrderRequest, OrderStatus, OrderType, Side
 
 log = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ def demo_config() -> ExchangeConfig:
 
 class MomentumDemo:
     def __init__(self, momentum: Any, settings: Any, clock: Any, risk: Any, creds: ExchangeCredentials | None,
-                 *, adapter: Any | None = None, bus: Any | None = None) -> None:
+                 *, adapter: Any | None = None, bus: Any | None = None, key_report: str = "") -> None:
         self._mom = momentum
         self._s = settings
         self._clock = clock
@@ -58,7 +59,8 @@ class MomentumDemo:
         self._bus = bus
         self._adapter = adapter
         self._ready = False
-        self._error = ""
+        self._key_report = key_report  # where the key was looked for (names only, never a value)
+        self._error = self._precheck() or "connecting to Bybit Demo…"  # the reason is known before any start
         self._started_ts: float | None = None
         self._reconciled: set[str] = set()
         self._balance: float | None = None
@@ -79,7 +81,7 @@ class MomentumDemo:
         rows = [t for t in self._mom._trades if t.demo]
         closed = [t for t in rows if t.demo.get("state") == "closed" and t.demo.get("net") is not None]
         return {
-            "enabled": self.enabled, "ready": self._ready, "error": self._error,
+            "enabled": self.enabled, "ready": self._ready, "error": self._error, "key_check": self._key_report,
             "key": bool(self._creds is not None and self._creds.present),  # present or not - never the key
             "balance_quote": self._balance, "notional_quote": self._notional(),
             "open": sum(1 for t in rows if t.demo.get("state") in _LIVE_STATES),
@@ -98,14 +100,18 @@ class MomentumDemo:
         s = dataclasses.replace(self._s, quote_assets=["USDT"], signal_quote_assets=["USDT"])
         return CcxtAdapter(demo_config(), self._bus or EventBus(), self._clock, s, self._creds)
 
+    def _precheck(self) -> str:
+        if not self.enabled:
+            return "switched off (mom_demo_enabled)"
+        if self._creds is None or not self._creds.present:
+            return "no Bybit Demo key in .env"
+        return ""
+
     async def start(self) -> None:
         self._started_ts = self._clock.wall()
         self._ready = False
-        if not self.enabled:
-            self._error = "switched off (mom_demo_enabled)"
-            return
-        if self._creds is None or not self._creds.present:
-            self._error = "no Bybit Demo key in .env (BYBIT_API_KEY / BYBIT_API_SECRET)"
+        self._error = self._precheck()
+        if self._error:
             return
         try:
             if self._adapter is None:
@@ -118,7 +124,7 @@ class MomentumDemo:
             self._ready, self._error = True, ""
             log.info("momentum demo: ready on %s (size %.0f per trade)", VENUE, self._notional())
         except Exception as exc:  # noqa: BLE001
-            self._error = f"start failed: {type(exc).__name__}: {str(exc)[:120]}"
+            self._error = redact(f"Bybit Demo refused the start: {type(exc).__name__}: {str(exc)[:200]}")
             log.warning("momentum demo: %s", self._error)
 
     async def stop(self) -> None:

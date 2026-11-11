@@ -61,6 +61,44 @@ class Secrets:
         return self.exchanges.get(exchange, ExchangeCredentials(name=exchange))
 
 
+def _env(name: str) -> str:
+    """An environment value without the spaces and quotes people paste around it."""
+    v = os.getenv(name, "").strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        v = v[1:-1].strip()
+    return v
+
+
+def secrets_report(exchange: str) -> dict[str, Any]:
+    """Where the key of ``exchange`` was looked for and what is missing: variable NAMES and yes / no only,
+    never a value (safe to show in the UI)."""
+    ex = exchange.lower()
+    up = ex.upper()
+    notes: list[str] = []
+    source = ""
+    for i in range(1, MAX_EXCHANGE_SLOTS + 1):
+        if _env(f"EXCHANGE_{i}_NAME").lower() != ex:
+            continue
+        k, sec = bool(_env(f"EXCHANGE_{i}_API_KEY")), bool(_env(f"EXCHANGE_{i}_API_SECRET"))
+        if k and sec:
+            source = source or f"EXCHANGE_{i}_API_KEY / EXCHANGE_{i}_API_SECRET"
+        else:
+            missing = [n for n, ok in ((f"EXCHANGE_{i}_API_KEY", k), (f"EXCHANGE_{i}_API_SECRET", sec)) if not ok]
+            notes.append(f"slot EXCHANGE_{i} ({ex}): " + " and ".join(f"{m} is empty" for m in missing))
+    nk, ns = bool(_env(f"{up}_API_KEY")), bool(_env(f"{up}_API_SECRET"))
+    if not source and nk and ns:
+        source = f"{up}_API_KEY / {up}_API_SECRET"
+    elif nk != ns:
+        notes.append(f"{up}_API_KEY is {'set' if nk else 'empty'}, {up}_API_SECRET is {'set' if ns else 'empty'}")
+    if source:
+        text = f"key read from {source}"
+    else:
+        text = "; ".join(notes) if notes else f"no line for {ex} in .env"
+        text += (f". Write the key after EXCHANGE_1_API_KEY= and the secret after EXCHANGE_1_API_SECRET= "
+                 f"(with EXCHANGE_1_NAME={ex}), or as {up}_API_KEY= / {up}_API_SECRET=, save, restart the bot")
+    return {"present": bool(source), "source": source, "text": text}
+
+
 def load_secrets(env_path: str | os.PathLike[str] | None = ".env") -> Secrets:
     if env_path and Path(env_path).exists():
         load_dotenv(env_path, override=False)
@@ -76,14 +114,16 @@ def load_secrets(env_path: str | os.PathLike[str] | None = ".env") -> Secrets:
     register_secret(s.coingecko_api_key)
     register_secret(s.anthropic_api_key)
     for i in range(1, MAX_EXCHANGE_SLOTS + 1):
-        name = os.getenv(f"EXCHANGE_{i}_NAME", "").strip().lower()
+        name = _env(f"EXCHANGE_{i}_NAME").lower()
         if not name:
             continue
+        if name in s.exchanges and s.exchanges[name].present:
+            continue  # an earlier slot of the same exchange already holds a complete key
         c = ExchangeCredentials(
             name=name,
-            api_key=os.getenv(f"EXCHANGE_{i}_API_KEY", "").strip(),
-            api_secret=os.getenv(f"EXCHANGE_{i}_API_SECRET", "").strip(),
-            passphrase=os.getenv(f"EXCHANGE_{i}_PASSPHRASE", "").strip(),
+            api_key=_env(f"EXCHANGE_{i}_API_KEY"),
+            api_secret=_env(f"EXCHANGE_{i}_API_SECRET"),
+            passphrase=_env(f"EXCHANGE_{i}_PASSPHRASE"),
         )
         register_secret(c.api_key)
         register_secret(c.api_secret)
@@ -91,11 +131,15 @@ def load_secrets(env_path: str | os.PathLike[str] | None = ".env") -> Secrets:
         s.exchanges[name] = c
     # Named fallbacks (BYBIT_API_KEY=...) for convenience.
     for name in ("binance", "bybit", "okx", "kraken", "coinbase", "gate", "bitstamp", "bitvavo", "cryptocom", "revolutx"):
-        key = os.getenv(f"{name.upper()}_API_KEY", "").strip()
-        sec = os.getenv(f"{name.upper()}_API_SECRET", "").strip()
-        if key and sec and name not in s.exchanges:
+        key = _env(f"{name.upper()}_API_KEY")
+        sec = _env(f"{name.upper()}_API_SECRET")
+        slot = s.exchanges.get(name)
+        # the named form fills an exchange whose slot holds no complete key (the template ships an EMPTY
+        # bybit slot: a key written as BYBIT_API_KEY next to it used to be ignored); a complete slot wins
+        if key and sec and not (slot is not None and slot.present):
             c = ExchangeCredentials(
-                name=name, api_key=key, api_secret=sec, passphrase=os.getenv(f"{name.upper()}_PASSPHRASE", "").strip()
+                name=name, api_key=key, api_secret=sec,
+                passphrase=_env(f"{name.upper()}_PASSPHRASE") or (slot.passphrase if slot is not None else ""),
             )
             register_secret(key)
             register_secret(sec)

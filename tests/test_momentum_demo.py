@@ -217,3 +217,17 @@ async def test_the_risk_limits_cap_the_demo_size():
     await signal(m, d)
     await d.step()
     assert fake.sent[0][2] == pytest.approx(0.2, abs=0.01)  # about 20 / 100.6, not 100 / 100.6
+
+
+async def test_the_reason_is_shown_before_anything_has_started():
+    m = M(mom_demo_enabled=True)
+    risk = RiskManager(m.s, m.db, m.clock, None)
+    d = MomentumDemo(m.m, m.s, m.clock, risk, ExchangeCredentials(name="bybit"), adapter=FakeDemo(),
+                     key_report="slot EXCHANGE_1 (bybit): EXCHANGE_1_API_KEY is empty")
+    st = d.status()  # start() has not run yet
+    assert not st["ready"] and "no Bybit Demo key" in st["error"] and "EXCHANGE_1_API_KEY is empty" in st["key_check"]
+    off = MomentumDemo(M(mom_demo_enabled=False).m, M(mom_demo_enabled=False).s, m.clock, risk,
+                       ExchangeCredentials(name="bybit", api_key="k", api_secret=SECRET), adapter=FakeDemo())
+    assert "switched off" in off.status()["error"]
+    ok = MomentumDemo(m.m, m.s, m.clock, risk, ExchangeCredentials(name="bybit", api_key="k", api_secret=SECRET), adapter=FakeDemo())
+    assert "connecting" in ok.status()["error"] and SECRET not in repr(ok.status())

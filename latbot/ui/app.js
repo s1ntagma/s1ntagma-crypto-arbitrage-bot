@@ -1794,6 +1794,7 @@
       kvRows($('mom-demo'), !md ? [['Not available in this build', '']] : [
         ['Status', md.ready ? 'working: orders go to the Bybit demo account' : (md.enabled ? 'NOT working: ' + (md.error || 'starting…') : 'switched off (setting mom_demo_enabled)')],
         ['API key in .env', md.key ? 'found' : 'not found'],
+        ['Key check', md.key_check || '—'],
         ['Demo balance', md.balance_quote == null ? '—' : '$' + num(md.balance_quote).toFixed(2)],
         ['Size per trade (the risk limits can lower it)', '$' + num(md.notional_quote).toFixed(0)],
         ['Trades: open / closed (in plus) / not sent', (md.open || 0) + ' / ' + (md.closed || 0) + ' (' + (md.wins || 0) + ') / ' + (md.skipped || 0)],

@@ -121,7 +121,7 @@ def leg_configs(venue: str) -> dict[str, ExchangeConfig] | None:
 class BasisRunner:
     def __init__(self, settings: Settings, clock: Any, db: Any | None = None, *,
                  leg_factory: LegFactory | None = None, asset_source: Callable[[], list[str]] | None = None,
-                 risk: Any | None = None, demo_creds: Any | None = None) -> None:
+                 risk: Any | None = None, demo_creds: Any | None = None, demo_key_report: str = "") -> None:
         self._settings = settings
         self._risk, self._demo_creds = risk, demo_creds
         self.demo: Any | None = None  # momentum on the Bybit DEMO account (built when a risk manager is given)
@@ -134,7 +134,7 @@ class BasisRunner:
         if risk is not None:
             from .demo_exec import MomentumDemo
 
-            self.demo = MomentumDemo(self.momentum, settings, clock, risk, demo_creds)
+            self.demo = MomentumDemo(self.momentum, settings, clock, risk, demo_creds, key_report=demo_key_report)
         self._db = db
         self.paused: dict[str, bool] = {k: False for k in STRATEGIES}
         self._load_paused()
@@ -190,6 +190,8 @@ class BasisRunner:
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self, wait_s: float = 120.0) -> None:
+        if self.demo is not None:  # at once: its status must not wait for the venues below
+            self._tasks.append(asyncio.create_task(self._demo_loop(), name="basis-momentum-demo"))
         assets = self.assets
         waited = 0.0
         while not assets and self._asset_source is not None and waited < wait_s:
@@ -202,12 +204,10 @@ class BasisRunner:
             log.info("basis: %d assets (%s%s)", len(assets), ", ".join(assets[:10]), ", ..." if len(assets) > 10 else "")
         await asyncio.gather(*(self._start_venue(v, legs, assets) for v, legs in self.legs.items()),
                              return_exceptions=True)
-        self._tasks = [asyncio.create_task(self._tick_loop(), name="basis-tick"),
-                       asyncio.create_task(self._funding_loop(), name="basis-funding"),
-                       asyncio.create_task(self._assets_loop(), name="basis-assets"),
-                       asyncio.create_task(self._history_loop(), name="basis-funding-history")]
-        if self.demo is not None:
-            self._tasks.append(asyncio.create_task(self._demo_loop(), name="basis-momentum-demo"))
+        self._tasks += [asyncio.create_task(self._tick_loop(), name="basis-tick"),
+                        asyncio.create_task(self._funding_loop(), name="basis-funding"),
+                        asyncio.create_task(self._assets_loop(), name="basis-assets"),
+                        asyncio.create_task(self._history_loop(), name="basis-funding-history")]
 
     async def _start_venue(self, venue: str, legs: dict[str, Any], assets: list[str]) -> None:
         self._known.update(assets)
@@ -311,8 +311,12 @@ class BasisRunner:
 
     async def _demo_loop(self) -> None:
         await self.demo.start()
+        last_try = self._clock.mono()
         while True:
             try:
+                if not self.demo._ready and not self.demo._precheck() and self._clock.mono() - last_try >= 60.0:
+                    last_try = self._clock.mono()  # a failed connection (network, exchange) is tried again
+                    await self.demo.start()
                 await self.demo.step()
             except asyncio.CancelledError:
                 raise

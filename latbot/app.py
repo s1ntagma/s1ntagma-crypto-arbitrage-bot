@@ -372,8 +372,10 @@ def build_context(
                     return list(pool.assets())
                 return list(settings.watchlist)
 
+            from .config import secrets_report
+
             basis = BasisRunner(settings, clock, db=db, asset_source=basis_assets, risk=risk,
-                                demo_creds=secrets.creds("bybit"))
+                                demo_creds=secrets.creds("bybit"), demo_key_report=secrets_report("bybit")["text"])
         except Exception:  # noqa: BLE001
             log.exception("basis scanner not created")
 
