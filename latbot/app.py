@@ -372,7 +372,8 @@ def build_context(
                     return list(pool.assets())
                 return list(settings.watchlist)
 
-            basis = BasisRunner(settings, clock, db=db, asset_source=basis_assets)
+            basis = BasisRunner(settings, clock, db=db, asset_source=basis_assets, risk=risk,
+                                demo_creds=secrets.creds("bybit"))
         except Exception:  # noqa: BLE001
             log.exception("basis scanner not created")
 

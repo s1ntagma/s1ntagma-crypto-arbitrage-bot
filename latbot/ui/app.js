@@ -1781,6 +1781,25 @@
           (num(st.cooldown_s) > 0 ? ' · cooldown ' + Math.round(num(st.cooldown_s) / 60) + ' min' : '') +
           ' · venues ready ' + (st.warm_venues || 0) + ' of ' + (st.venues || 0)];
       }));
+      var md = d.momentum_demo;
+      var DEMO_STATE = { entry_due: 'sending', entry_unknown: 'entry sent, waiting for the exchange', open: 'open', exit_due: 'closing',
+        exit_unknown: 'exit sent, waiting for the exchange', closed: 'closed', skipped: 'not sent', rejected: 'rejected by the exchange' };
+      var demoCell = function (x) {
+        if (!x.state) return h('td', { class: 'num muted', text: '—' });
+        var txt = DEMO_STATE[x.state] || x.state;
+        if (x.state === 'closed') txt = x.net == null ? 'closed, result unknown' : usd(x.net);
+        else if (x.state === 'open' && x.entry_px) txt = 'open @ ' + (+num(x.entry_px).toPrecision(8));
+        return h('td', { class: 'num ' + (x.state === 'closed' && x.net != null ? (num(x.net) >= 0 ? 'pos' : 'neg') : ''), text: txt, title: x.note || '' });
+      };
+      kvRows($('mom-demo'), !md ? [['Not available in this build', '']] : [
+        ['Status', md.ready ? 'working: orders go to the Bybit demo account' : (md.enabled ? 'NOT working: ' + (md.error || 'starting…') : 'switched off (setting mom_demo_enabled)')],
+        ['API key in .env', md.key ? 'found' : 'not found'],
+        ['Demo balance', md.balance_quote == null ? '—' : '$' + num(md.balance_quote).toFixed(2)],
+        ['Size per trade (the risk limits can lower it)', '$' + num(md.notional_quote).toFixed(0)],
+        ['Trades: open / closed (in plus) / not sent', (md.open || 0) + ' / ' + (md.closed || 0) + ' (' + (md.wins || 0) + ') / ' + (md.skipped || 0)],
+        ['Result on the demo account (fees ' + usd(-(md.fees_quote || 0)) + ')', usd(md.net_quote)],
+        ['Result unknown', String(md.unknown || 0)]
+      ]);
       var mt = $('mom-trades'); clear(mt);
       (mo.trades || []).forEach(function (t) {
         mt.appendChild(h('tr', null,
@@ -1794,6 +1813,7 @@
           h('td', { class: 'num', text: t.exit_px ? String(+num(t.exit_px).toPrecision(8)) : '—' }),
           h('td', { class: 'num', text: usd(-(t.fees_quote || 0)) }),
           openOr(t),
+          demoCell(t.demo || {}),
           h('td', { class: 'wrap muted', text: (t.exit_reason || '') + (t.resumed ? ' · bot was restarted while open' : '') })));
       });
       var xf = d.xfund || {}, xs = xf.stats || {};

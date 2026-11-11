@@ -120,14 +120,21 @@ def leg_configs(venue: str) -> dict[str, ExchangeConfig] | None:
 
 class BasisRunner:
     def __init__(self, settings: Settings, clock: Any, db: Any | None = None, *,
-                 leg_factory: LegFactory | None = None, asset_source: Callable[[], list[str]] | None = None) -> None:
+                 leg_factory: LegFactory | None = None, asset_source: Callable[[], list[str]] | None = None,
+                 risk: Any | None = None, demo_creds: Any | None = None) -> None:
         self._settings = settings
+        self._risk, self._demo_creds = risk, demo_creds
+        self.demo: Any | None = None  # momentum on the Bybit DEMO account (built when a risk manager is given)
         self._asset_source = asset_source  # the bot's pool (market-cap order) when basis_assets is empty
         self._clock = clock
         self.bus = EventBus()  # private: these books never reach the latency pipeline
         self.scanner = BasisScanner(settings, clock, db=db)
         self.xfund = FundingArb(self.scanner, settings, clock, db=db)  # cross-venue funding on the same data
         self.momentum = Momentum(self.scanner, settings, clock, db=db)  # BTC / ETH momentum on the perp books
+        if risk is not None:
+            from .demo_exec import MomentumDemo
+
+            self.demo = MomentumDemo(self.momentum, settings, clock, risk, demo_creds)
         self._db = db
         self.paused: dict[str, bool] = {k: False for k in STRATEGIES}
         self._load_paused()
@@ -199,6 +206,8 @@ class BasisRunner:
                        asyncio.create_task(self._funding_loop(), name="basis-funding"),
                        asyncio.create_task(self._assets_loop(), name="basis-assets"),
                        asyncio.create_task(self._history_loop(), name="basis-funding-history")]
+        if self.demo is not None:
+            self._tasks.append(asyncio.create_task(self._demo_loop(), name="basis-momentum-demo"))
 
     async def _start_venue(self, venue: str, legs: dict[str, Any], assets: list[str]) -> None:
         self._known.update(assets)
@@ -270,6 +279,8 @@ class BasisRunner:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
         stops = [a.stop() for legs in self.legs.values() for a in legs.values() if hasattr(a, "stop")]
+        if self.demo is not None:
+            stops.append(self.demo.stop())
         await asyncio.gather(*stops, return_exceptions=True)
         self.scanner.flush()
 
@@ -297,6 +308,17 @@ class BasisRunner:
             except Exception:  # noqa: BLE001
                 log.exception("basis tick failed")
             await asyncio.sleep(_TICK_S)
+
+    async def _demo_loop(self) -> None:
+        await self.demo.start()
+        while True:
+            try:
+                await self.demo.step()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("momentum demo step failed")
+            await asyncio.sleep(0.5)
 
     async def poll_funding_once(self) -> int:
         """Funding of every pair: all venues at once, one batch call per venue where it has one."""
@@ -495,6 +517,7 @@ class BasisRunner:
             "auto_paused": [*self.xfund.auto_paused(), *self.scanner.auto_paused()],
             "xfund": {"stats": self.xfund.stats(), "candidates": self.xfund.candidates,
                       "trades": self.xfund.trades(100)},
+            "momentum_demo": self.demo.status() if self.demo is not None else None,
             "momentum": {"stats": self.momentum.stats(), "status": self.momentum.status(),
                          "trades": self.momentum.trades(100)},
             "history": {f"{p['venue']}:{p['asset']}": self.scanner.history(p["venue"], p["asset"], history_limit)
@@ -510,7 +533,8 @@ class BasisRunner:
                 "xfund_min_edge_pct", "xfund_max_positions", "xfund_leverage", "xfund_liq_guard_pct",
                 "xfund_exit_horizon_h", "xfund_max_hold_h", "mom_enabled", "mom_assets", "mom_venues",
                 "mom_notional_quote", "mom_window_s", "mom_entry_pct", "mom_trend_s", "mom_trend_pct",
-                "mom_stop_pct", "mom_trail_pct", "mom_max_hold_s", "mom_cooldown_s")},
+                "mom_stop_pct", "mom_trail_pct", "mom_max_hold_s", "mom_cooldown_s", "mom_demo_enabled",
+                "mom_demo_notional_quote")},
         }
 
 

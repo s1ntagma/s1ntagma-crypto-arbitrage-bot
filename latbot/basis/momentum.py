@@ -26,7 +26,7 @@ from __future__ import annotations
 import itertools
 import logging
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ..models import Side
@@ -68,6 +68,7 @@ class MomTrade:
     open_net_quote: float | None = None  # result if closed now (exit side of the book, exit fee included)
     open_net_ts: float | None = None
     resumed: bool = False  # the bot was restarted while this position was open (it was unwatched meanwhile)
+    demo: dict = field(default_factory=dict)  # the same position on the Bybit DEMO account (demo_exec.py)
     due_mono: float | None = None
     opened_mono: float | None = None
     last_fresh_mono: float | None = None

@@ -962,6 +962,36 @@ class CcxtAdapter(ExchangeAdapter):
                 out[str(asset)] = Balance(asset=str(asset), free=f, total=t)
         return out
 
+    def order_amount(self, symbol: str, amount: float) -> float | None:
+        """``amount`` (base) rounded down to the market's step; ``None`` when it is below the market's
+        minimum order size (the exchange would reject it)."""
+        symbol, _ = self._symbol_arg(symbol)
+        market = (getattr(self.public, "markets", None) or {}).get(symbol) or {}
+        size = _num(market.get("contractSize")) or 1.0
+        contracts = float(amount) / size
+        try:
+            contracts = float(self.public.amount_to_precision(symbol, contracts))
+        except Exception:  # noqa: BLE001 - below the precision of the market
+            return None
+        low = _num(((market.get("limits") or {}).get("amount") or {}).get("min"))
+        if contracts <= 0 or (low is not None and contracts < low):
+            return None
+        return contracts * size if self.cfg.market_type != "swap" else contracts
+
+    async def fetch_position(self, symbol: str) -> float:
+        """Signed size of the open position on ``symbol`` in the order's own unit (+ long, - short, 0 flat).
+        Read-only; a derivatives adapter with keys."""
+        priv = self._require_private()
+        symbol, _ = self._symbol_arg(symbol)
+        rows = await self._private_call(priv.fetch_positions, [symbol]) or []
+        total = 0.0
+        for r in rows:
+            if not isinstance(r, dict) or (r.get("symbol") and r.get("symbol") != symbol):
+                continue
+            qty = _num(r.get("contracts")) or 0.0
+            total += -qty if str(r.get("side") or "").lower() == "short" else qty
+        return total
+
     def contract_size(self, symbol: str) -> float:
         """Base amount of one contract (perp order books count contracts); 1 for spot."""
         symbol, _ = self._symbol_arg(symbol)

@@ -184,7 +184,7 @@ DEFAULT_EXCHANGES: list[ExchangeConfig] = [
 # Runtime settings (public, user-tunable)
 # --------------------------------------------------------------------------- #
 # Bumped when a saved config.json needs a one-time upgrade (see Settings._migrate).
-CONFIG_VERSION = 11
+CONFIG_VERSION = 12
 BASIS_TOP_VENUES = ("binance", "okx", "bybit", "mexc", "gate", "bitget")
 _OLD_BASIS_VENUES = ["okx", "bybit", "htx", "kraken"]
 
@@ -301,6 +301,9 @@ class Settings:
     mom_trail_pct: float = 0.4  # trailing stop from the best price since the entry
     mom_max_hold_s: float = 3600.0
     mom_cooldown_s: float = 900.0  # no new entry on the coin this long after an exit
+    # the same momentum positions with REAL orders on the Bybit DEMO account (demo money; basis/demo_exec.py)
+    mom_demo_enabled: bool = False  # config v12 turns it on for the owner; needs the Bybit Demo key in .env
+    mom_demo_notional_quote: float = 100.0  # size per trade on the demo account (the risk limits cap it)
     mom_stale_s: float = 60.0  # no fresh book this long: venue switch / open position closed as "no data"
     exchanges: list[ExchangeConfig] = field(default_factory=lambda: [ExchangeConfig(**asdict(e)) for e in DEFAULT_EXCHANGES])
     # ---- coverage: WS for the core watchlist, REST ticker polling for breadth --
@@ -542,6 +545,8 @@ class Settings:
             if float(data.get("min_target_volume_quote", 100_000.0)) == 100_000.0:
                 data["min_target_volume_quote"] = 500_000.0
             data["min_net_pct_show"] = 0.1
+        if version < 12:
+            data["mom_demo_enabled"] = True  # owner (2026-11-11): momentum on the Bybit Demo account
         if version < 11:
             # owner (2026-11-11): the latency strategy is measured and loses on his venues (408 training
             # trades, 1 % in plus): its virtual trades stop, the scanner stays as a reference
@@ -781,6 +786,7 @@ def load_settings(path: str | os.PathLike[str] = "config.json") -> Settings:
         except Exception as exc:  # noqa: BLE001
             log.error("config.json invalid (%s); using defaults", exc)
     s = Settings(simple_mode=True, basis_enabled=True, shadow_trading=False, shadow_train_all_signals=False,
+                 mom_demo_enabled=True,
                  **_top100_settings())  # fresh install: the owner's choices
     _apply_env_overrides(s)
     return s
