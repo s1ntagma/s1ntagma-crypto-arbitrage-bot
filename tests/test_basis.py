@@ -431,3 +431,44 @@ async def test_a_perp_only_venue_gets_one_adapter_and_perp_only_pairs():
     assert hl.perp_only and hl.perp_symbol == "BTC/USDC:USDC" and hl.taker["perp"] == 0.0004
     assert await r.poll_funding_once() == 2 and hl.funding_rate == pytest.approx(0.0002)
     assert "hyperliquid" in r.snapshot()["venues"]
+
+
+async def test_runner_close_all_pause_resume_and_the_total_of_active_strategies(tmp_path):
+    clock = SimClock()
+    db = Database(str(tmp_path / "b.sqlite3"), clock=clock)
+    r = BasisRunner(settings(basis_venues=["okx"], basis_assets=["BTC"]), clock, db=db,
+                    leg_factory=lambda cfg, creds: FakeLeg(cfg, None, clock))
+    assert r.close_all("xfund") == {"closed": 0, "paused": True}
+    assert r.paused["xfund"] and r.xfund.paused and not r.paused["momentum"]
+    again = BasisRunner(settings(basis_venues=["okx"], basis_assets=["BTC"]), clock, db=db,
+                        leg_factory=lambda cfg, creds: FakeLeg(cfg, None, clock))
+    assert again.paused["xfund"] and again.xfund.paused  # survives a restart
+    assert again.resume("xfund") == {"paused": False} and not again.xfund.paused
+    with pytest.raises(ValueError):
+        again.close_all("nothing")
+    b = again.balance()
+    assert b["signals"]["switched_off"] and b["signals"]["in_total"] is False and b["xfund"]["in_total"] is True
+    assert "paused" in again.snapshot()
+
+
+def test_api_closes_and_resumes_a_basis_strategy():
+    from fastapi.testclient import TestClient
+
+    from latbot.api.server import create_app
+
+    class Basis:
+        def close_all(self, strategy):
+            if strategy != "xfund":
+                raise ValueError(strategy)
+            return {"closed": 2, "paused": True}
+
+        def resume(self, strategy):
+            return {"paused": False}
+
+    class Ctx:
+        basis = Basis()
+
+    c = TestClient(create_app(Ctx()))  # type: ignore[arg-type]
+    assert c.post("/api/basis/close", json={"strategy": "xfund"}).json() == {"ok": True, "closed": 2, "paused": True}
+    assert c.post("/api/basis/close", json={"strategy": "bad"}).status_code == 400
+    assert c.post("/api/basis/resume", json={"strategy": "xfund"}).json() == {"ok": True, "paused": False}

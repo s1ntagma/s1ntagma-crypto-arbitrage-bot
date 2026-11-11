@@ -457,3 +457,35 @@ def test_liquidation_distance_is_the_same_measure_for_the_long_and_the_short_leg
 def test_funding_apr_is_not_shown_before_a_day_of_data():
     x = opened()
     assert x.xf.stats()["funding_apr_open_pct"] is None and x.xf.stats()["open_age_h"] < 1
+
+
+# ---- owner's button: close every open position of a strategy, pause new entries -----------------------
+def test_close_all_exits_by_market_and_the_pause_blocks_new_entries():
+    x = opened()
+    x.xf.paused = True
+    assert x.xf.close_all("closed by owner") == 1
+    x.run(0.5)
+    t = x.trades()[0]
+    assert t["status"] == "closed" and t["exit_reason"] == "closed by owner"
+    assert x.xf.balance()["closed_n"] == 1 and x.xf.balance()["open_n"] == 0
+    x.poll(RATES)
+    x.poll(RATES)
+    x.run(0.6)
+    assert len(x.trades()) == 1  # paused: nothing reopens
+    x.xf.paused = False
+    x.poll(RATES)
+    x.poll(RATES)
+    x.run(0.1)
+    x.run(0.5)
+    assert len(x.trades()) == 2 and x.trades()[0]["status"] == "open"
+
+
+def test_close_all_waits_for_a_fresh_book_instead_of_guessing():
+    x = opened(fill_wait_s=30.0)
+    x.clock.advance(5.0)  # both books stale
+    x.xf.close_all("closed by owner")
+    x.xf.tick()
+    assert x.trades()[0]["status"] == "closing"
+    x.run(1.0, perp={"okx": (100.20, 100.22), "mexc": (100.20, 100.22)})
+    t = x.trades()[0]
+    assert t["status"] == "closed" and t["exit_px"]["long"] == 100.20 and t["exit_px"]["short"] == 100.22

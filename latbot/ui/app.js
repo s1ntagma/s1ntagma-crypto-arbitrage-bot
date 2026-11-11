@@ -1615,7 +1615,7 @@
         opts = opts || {};
         var total = num(b.total_quote);
         var el = h('div', { class: 'balance-card' + (opts.total ? ' total' : '') },
-          h('div', { class: 'balance-name', text: name }),
+          h('div', { class: 'balance-name' }, h('span', { text: name }), b.paused ? h('span', { class: 'balance-paused', text: 'paused' }) : null),
           h('div', { class: 'balance-value ' + (total > 0 ? 'pos' : total < 0 ? 'neg' : ''), text: money(total) }),
           h('div', { class: 'balance-line' }, h('span', { text: 'Closed' + (b.closed_n != null ? ' (' + b.closed_n + ')' : ''), title: b.closed_n != null ? 'Finished trades: ' + b.closed_n + ', in plus: ' + (b.wins || 0) : 'Finished trades' }), h('span', { text: money(b.closed_quote) })),
           h('div', { class: 'balance-line' }, h('span', { text: 'Open now' + (b.open_n != null ? ' (' + b.open_n + ')' : ''), title: 'Result of the open positions if they were closed right now, exit fees included' }), h('span', { text: money(b.open_quote) })),
@@ -1623,14 +1623,38 @@
         if (b.open_n && b.open_priced < b.open_n) el.appendChild(h('div', { class: 'balance-off', text: (b.open_n - b.open_priced) + ' open position(s) have no fresh price yet: not in the number' }));
         if (b.unknown) el.appendChild(h('div', { class: 'balance-off', text: b.unknown + ' trade(s) with an unknown result are not counted' }));
         if (opts.note) el.appendChild(h('div', { class: 'balance-off', text: opts.note }));
+        if (b.in_total === false) el.appendChild(h('div', { class: 'balance-off', text: 'Not in the total.' }));
+        if (opts.key && !(b.switched_off && !b.open_n)) {
+          if (b.paused && !b.open_n) {
+            el.appendChild(h('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: 'Start again',
+              onclick: function () {
+                api('POST', '/api/basis/resume', { strategy: opts.key }).then(function (r) {
+                  if (!r.ok) toast('Start again: ' + r.error, 'err'); else toast(name + ': new trades are allowed again', 'ok');
+                  loadBasis();
+                });
+              } }));
+          } else {
+            el.appendChild(h('button', { class: 'btn btn-warn btn-sm', type: 'button', text: 'Close all positions',
+              onclick: function () {
+                var msg = 'Close ' + (b.open_n || 0) + ' open position(s) of "' + name + '" now, at the current prices?\n' +
+                  'It will not open new ones until you press "Start again".';
+                if (!window.confirm(msg)) return;
+                api('POST', '/api/basis/close', { strategy: opts.key }).then(function (r) {
+                  if (!r.ok) toast('Close all: ' + r.error, 'err');
+                  else toast(name + ': closing ' + ((r.data || {}).closed || 0) + ' position(s); new trades paused', 'ok');
+                  loadBasis();
+                });
+              } }));
+          }
+        }
         cards.appendChild(el);
       };
       if (bal.total) {
-        card('All strategies together', bal.total, { total: true });
-        card('Funding between exchanges', bal.xfund);
-        card('Momentum BTC / ETH', bal.momentum);
-        card('Funding carry (spot + futures)', bal.carry);
-        card('Spot/futures signals', bal.signals, { note: bal.signals.switched_off ? 'Switched off: it lost. No new trades.' : '' });
+        card('All strategies in use', bal.total, { total: true });
+        card('Funding between exchanges', bal.xfund, { key: 'xfund' });
+        card('Momentum BTC / ETH', bal.momentum, { key: 'momentum' });
+        card('Funding carry (spot + futures)', bal.carry, { key: 'carry' });
+        card('Spot/futures signals', bal.signals, { key: 'signals', note: bal.signals.switched_off ? 'Switched off: it lost. No new trades.' : '' });
       }
       var openOr = function (t, cls) {
         var v = t.net_quote != null ? t.net_quote : t.open_net_quote;
@@ -1691,9 +1715,10 @@
       addGroup('By signal (fut_upper = futures above its norm, spot_lower = spot below, both = at once)', s.by_trigger, 10);
       addGroup('By venue + coin (best first, top 20)', s.by_venue_asset, 20);
       if (!bb.children.length) bb.appendChild(h('tr', null, h('td', { class: 'muted', colspan: '6', text: 'No closed spot / futures pairs yet.' })));
-      var mo = d.momentum || {}, ms = mo.stats || {};
+      var mo = d.momentum || {}, ms = mo.stats || {}, cfg0 = d.settings || {};
       var pctx = function (v, n) { return v == null ? '—' : (num(v) * 100).toFixed(n || 0) + '%'; };
       kvRows($('mom-stats'), [
+        ['Position size per trade', '$' + num(cfg0.mom_notional_quote).toFixed(0) + ' (1x, setting mom_notional_quote)'],
         ['Trades closed / open', (ms.closed || 0) + ' / ' + (ms.open || 0)],
         ['Win rate', pctx(ms.win_rate)],
         ['Avg NET per trade (after fees)', ms.avg_net_pct == null ? '—' : pct4(ms.avg_net_pct)],
@@ -1716,10 +1741,12 @@
       (mo.trades || []).forEach(function (t) {
         mt.appendChild(h('tr', null,
           h('td', { class: 'mono', text: fmtTime(t.signal_ts) }), h('td', { text: t.asset }),
-          h('td', { class: t.side === 'long' ? 'pos' : 'neg', text: t.side }), h('td', { text: t.venue }),
+          h('td', { class: t.side === 'long' ? 'pos' : 'neg', text: t.side,
+            title: t.side === 'long' ? 'long: earns when the price rises' : 'short: earns when the price falls' }), h('td', { text: t.venue }),
           h('td', { text: t.status + (t.partial ? ' (partial)' : '') }),
           h('td', { class: 'num', text: pct4(t.move_window_pct) + ' / ' + pct4(t.move_trend_pct) }),
-          h('td', { class: 'num', text: t.entry_px ? String(+num(t.entry_px).toPrecision(8)) : '—' }),
+          h('td', { class: 'num', text: t.position_quote ? '$' + num(t.position_quote).toFixed(0) : '—' }),
+          h('td', { class: 'num', title: 'Price of the coin at the entry (not the size of the position)', text: t.entry_px ? String(+num(t.entry_px).toPrecision(8)) : '—' }),
           h('td', { class: 'num', text: t.exit_px ? String(+num(t.exit_px).toPrecision(8)) : '—' }),
           h('td', { class: 'num', text: usd(-(t.fees_quote || 0)) }),
           openOr(t),
@@ -1727,6 +1754,7 @@
       });
       var xf = d.xfund || {}, xs = xf.stats || {};
       kvRows($('xfund-stats'), [
+        ['Position size per pair', '$' + num((d.settings || {}).xfund_notional_quote).toFixed(0) + ' on each exchange (setting xfund_notional_quote)'],
         ['Pairs open / closed / incidents', (xs.open || 0) + ' / ' + (xs.closed || 0) + ' / ' + (xs.incidents || 0)],
         ['Money in use (deposit for open positions, ' + (xs.leverage || '?') + 'x leverage)', usd(xs.open_capital_quote)],
         ['Liquidation distance at this leverage', xs.liq_distance_pct == null ? '—' : num(xs.liq_distance_pct).toFixed(1) + '% price move'],
@@ -1758,7 +1786,9 @@
         xt.appendChild(h('tr', null,
           h('td', { class: 'mono', text: fmtTime(t.signal_ts) }), h('td', { text: t.asset }),
           h('td', { text: t.long_venue + ' / ' + t.short_venue }), h('td', { text: t.status + (t.partial ? ' (partial)' : '') }),
-          h('td', { class: 'num', text: pct4(t.edge_pct) }), h('td', { class: 'num', text: usd(t.capital_quote) }),
+          h('td', { class: 'num', text: pct4(t.edge_pct) }),
+          h('td', { class: 'num', text: t.position_quote ? '$' + num(t.position_quote).toFixed(0) : '—' }),
+          h('td', { class: 'num', text: '$' + num(t.capital_quote).toFixed(0) }),
           h('td', { class: 'num', text: usd(t.funding_quote) }), h('td', { class: 'num', text: usd(-(t.fees_quote || 0)) }),
           openOr(t),
           h('td', { class: 'wrap muted', text: notes })));
@@ -1798,6 +1828,7 @@
         tb.appendChild(h('tr', null,
           h('td', { class: 'mono', text: fmtTime(t.signal_ts) }), h('td', { text: t.asset + ' @ ' + t.venue }),
           h('td', { text: t.trigger }), h('td', { text: t.status + (t.partial ? ' (partial)' : '') }),
+          h('td', { class: 'num', text: t.position_quote ? '$' + num(t.position_quote).toFixed(0) : '—' }),
           h('td', { class: 'num', text: pct4(t.entry_basis_pct) }), h('td', { class: 'num', text: pct4(t.exit_basis_pct) }),
           h('td', { class: 'num', text: pct4(t.max_adverse_pct) }), h('td', { class: 'num', text: usd(t.gross_quote) }),
           h('td', { class: 'num', text: usd(-(t.fees_quote || 0)) }), h('td', { class: 'num', text: usd(t.funding_quote) }),

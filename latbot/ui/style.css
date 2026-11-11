@@ -695,3 +695,5 @@ body.in-session { overflow: hidden; }
 .balance-line { display: flex; justify-content: space-between; gap: 10px; font-size: var(--fs-sm); color: var(--muted); padding: 2px 0; }
 .balance-line span:last-child { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .balance-off { font-size: var(--fs-xs); color: var(--muted); margin-top: 6px; }
+.balance-card .btn { width: 100%; margin-top: 12px; }
+.balance-paused { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: var(--fs-xs); border: 1px solid var(--line); color: var(--muted); }

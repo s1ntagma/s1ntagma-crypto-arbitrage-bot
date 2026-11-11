@@ -149,6 +149,7 @@ class BasisTrade:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["hedged"] = self.hedged
+        d["position_quote"] = self.target_qty * (self.entry_spot_vwap or self.entry_perp_vwap or 0.0)
         return d
 
 
@@ -192,6 +193,7 @@ class BasisScanner:
         self._trades: list[BasisTrade] = []
         self._ids = itertools.count(1)
         self._counters_dirty_mono: float | None = None
+        self.paused = {"carry": False, "signals": False}  # owner's button: no new entries until resumed
         self.counters: dict[str, int] = {
             "signals_fut_upper": 0, "signals_spot_lower": 0, "signals_both": 0, "signals_while_open": 0,
             "entries": 0, "stale_evals": 0, "skew_evals": 0, "evaluations": 0, "carry_entries": 0,
@@ -414,6 +416,8 @@ class BasisScanner:
                 return
             # not the configured mode: still entered VIRTUALLY to measure it (owner: every signal in Stats)
             trigger, training = fired[-1], True  # "both" when both fired at once, else the one that did
+        if self.paused["signals"]:
+            return
         if self._active(p, carry=False):
             self.counters["signals_while_open"] += 1
             return
@@ -562,7 +566,7 @@ class BasisScanner:
                 continue
             if edge >= self._s("carry_min_edge_pct", 0.10):
                 candidates.append((edge, p))
-        room = max(0, int(self._s("carry_max_positions", 5)) - self._carry_open_n())
+        room = 0 if self.paused["carry"] else max(0, int(self._s("carry_max_positions", 5)) - self._carry_open_n())
         chosen = sorted(candidates, key=lambda c: c[0], reverse=True)[:room]
         for _, p in chosen:
             p.carry["carry_approved"] = True
@@ -830,6 +834,29 @@ class BasisScanner:
             t.max_perp_mid = t.entry_perp_vwap
         t.status = "open"
         t.opened_ts = self._clock.wall()
+        if self.paused["carry" if t.trigger == CARRY else "signals"]:  # closed by the owner while filling
+            self._schedule_exit(t, now, "closed by owner")
+
+    def close_all(self, carry: bool, reason: str = "closed by owner") -> int:
+        """Owner's button: every open position (funding carry, or the signal pairs) leaves by market now
+        (live books, fees; a stale book is waited for); entries resting as limit orders are cancelled."""
+        now = self._clock.mono()
+        n = 0
+        for p in self._pairs.values():
+            if carry:
+                p.carry["carry_approved"] = False
+        for t in list(self._trades):
+            if (t.trigger == CARRY) != carry:
+                continue
+            if t.status == "pending" and t.orders:
+                self._trades = [x for x in self._trades if x is not t]  # nothing filled: no trade
+            elif t.status == "open" or (t.status == "closing" and t.orders):
+                if t.status == "open":
+                    t.exit_reason = ""
+                self._schedule_exit(t, now, reason)
+                self._save(t)
+                n += 1
+        return n
 
     def _unwind(self, t: BasisTrade, p: _Pair, now: float) -> None:
         if t.spot_qty > _EPS:

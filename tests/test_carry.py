@@ -520,3 +520,16 @@ def test_an_open_carry_shows_its_result_if_closed_now_and_the_balance():
     assert b["open_n"] == 1 and b["open_quote"] == pytest.approx(expected) and b["in_use_quote"] == pytest.approx(t["capital_quote"])
     assert c.sc.balance(carry=False)["open_n"] == 0
     assert c.sc.stats()["carry"]["funding_apr_open_pct"] is None  # under a day of data
+
+
+def test_close_all_closes_a_carry_position_and_pauses_new_ones():
+    c = opened()
+    c.sc.paused["carry"] = True
+    assert c.sc.close_all(carry=True, reason="closed by owner") == 1
+    c.run(0.5)
+    t = c.carry()[0]
+    assert t["status"] == "closed" and t["exit_reason"] == "closed by owner"
+    c.poll({"BTC": 0.0005})
+    c.poll({"BTC": 0.0005})
+    c.run(0.5)
+    assert len(c.carry()) == 1

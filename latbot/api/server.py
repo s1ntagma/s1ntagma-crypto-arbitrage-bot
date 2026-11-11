@@ -1288,6 +1288,33 @@ def create_app(ctx: Any, *, config_path: str | os.PathLike[str] | None = None) -
             log.exception("basis snapshot failed")
             return _error(500, "basis snapshot failed")
 
+    @app.post("/api/basis/close")
+    async def api_basis_close(body: dict[str, Any] = Body(...)) -> JSONResponse:
+        """Owner's button: close every open VIRTUAL position of one basis strategy and pause its entries."""
+        basis = getattr(ctx, "basis", None)
+        if basis is None or not hasattr(basis, "close_all"):
+            return _error(409, "the basis module is not running")
+        try:
+            return _json({"ok": True, **basis.close_all(str(body.get("strategy") or ""))})
+        except ValueError as exc:
+            return _error(400, str(exc))
+        except Exception:  # noqa: BLE001
+            log.exception("basis close failed")
+            return _error(500, "basis close failed")
+
+    @app.post("/api/basis/resume")
+    async def api_basis_resume(body: dict[str, Any] = Body(...)) -> JSONResponse:
+        basis = getattr(ctx, "basis", None)
+        if basis is None or not hasattr(basis, "resume"):
+            return _error(409, "the basis module is not running")
+        try:
+            return _json({"ok": True, **basis.resume(str(body.get("strategy") or ""))})
+        except ValueError as exc:
+            return _error(400, str(exc))
+        except Exception:  # noqa: BLE001
+            log.exception("basis resume failed")
+            return _error(500, "basis resume failed")
+
     @app.post("/api/stats/period")
     async def api_stats_new_period() -> JSONResponse:
         """Stats count virtual trades from now on (history stays in the DB)."""

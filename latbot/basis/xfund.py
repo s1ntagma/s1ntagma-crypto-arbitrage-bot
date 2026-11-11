@@ -101,6 +101,7 @@ class XFundTrade:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["hedged"] = self.hedged
+        d["position_quote"] = self.target_qty * (self.entry_px.get("long") or self.entry_px.get("short") or 0.0)
         d["open_net_age_s"] = None
         d["due"] = {k: (None if v == float("-inf") else v) for k, v in self.due.items()}
         return d
@@ -120,6 +121,7 @@ class FundingArb:
         self._next_ts: dict[tuple[str, str], float] = {}  # (venue, asset) -> next settlement seen
         self.candidates: list[dict[str, Any]] = []
         self.edge_stats = {"pairs": 0, "executable": 0}  # last review: pairs priced on fresh books
+        self.paused = False  # owner's button: no new entries until resumed
         self.counters = {"entries": 0, "approved": 0, "revalidation_failed": 0, "maker_fills": 0,
                          "taker_hedges": 0, "maker_unfilled": 0}
         self._load()
@@ -249,7 +251,7 @@ class FundingArb:
         self.candidates = cands[:30]
         self._approved = {}
         busy = {t.asset for t in self._trades if t.status in _ACTIVE}
-        room = max(0, int(self._f("xfund_max_positions", 5)) - len(busy))
+        room = 0 if self.paused else max(0, int(self._f("xfund_max_positions", 5)) - len(busy))
         min_edge = self._f("xfund_min_edge_pct", 0.10)
         for c in cands:
             if room <= 0:
@@ -503,6 +505,23 @@ class FundingArb:
                        "short": t.entry_px["short"] * (1.0 + 1.0 / lev - mmr)}
         t.status = "open"
         t.opened_ts = self._clock.wall()
+        if self.paused:  # the owner closed everything while this entry was filling
+            self._schedule_exit(t, now, "closed by owner")
+
+    def close_all(self, reason: str = "closed by owner") -> int:
+        """Owner's button: every open pair leaves by market now (on the live books, with fees; a stale book
+        is waited for, never guessed); entries still resting as limit orders are cancelled."""
+        now = self._clock.mono()
+        self._approved = {}
+        n = 0
+        for t in list(self._trades):
+            if t.status == "pending" and t.order:
+                self._trades = [x for x in self._trades if x is not t]  # nothing filled: no trade
+            elif t.status == "open" or (t.status == "closing" and t.order):
+                t.exit_reason = t.exit_reason if t.status == "closing" else ""
+                self._schedule_exit(t, now, reason)
+                n += 1
+        return n
 
     def _schedule_exit(self, t: XFundTrade, now: float, reason: str, maker: bool = False) -> None:
         """Both legs out by market; ``maker=True`` (funding exit, max hold) first rests the maker leg."""

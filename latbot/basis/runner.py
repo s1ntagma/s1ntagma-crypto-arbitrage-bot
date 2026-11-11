@@ -58,6 +58,9 @@ def venue_quote(venue: str) -> str:
     return VENUES[venue][4] if venue in VENUES else PERP_ONLY_VENUES[venue][3]
 
 
+STRATEGIES = ("xfund", "momentum", "carry", "signals")
+_PAUSED_KEY = "basis_paused"
+
 LegFactory = Callable[[ExchangeConfig, Any], Any]
 
 
@@ -94,6 +97,9 @@ class BasisRunner:
         self.scanner = BasisScanner(settings, clock, db=db)
         self.xfund = FundingArb(self.scanner, settings, clock, db=db)  # cross-venue funding on the same data
         self.momentum = Momentum(self.scanner, settings, clock, db=db)  # BTC / ETH momentum on the perp books
+        self._db = db
+        self.paused: dict[str, bool] = {k: False for k in STRATEGIES}
+        self._load_paused()
         self._factory = leg_factory or self._default_factory
         self.legs: dict[str, dict[str, Any]] = {}  # venue -> {"spot": adapter, "perp": adapter}
         self._route: dict[str, tuple[str, str]] = {}  # adapter name -> (venue, leg)
@@ -340,13 +346,63 @@ class BasisRunner:
                 log.exception("basis funding poll failed")
             await asyncio.sleep(max(30.0, float(self._settings.basis_funding_poll_s)))
 
+    # ------------------------------------------------------------------ owner's buttons
+    def _apply_paused(self) -> None:
+        self.xfund.paused = self.paused["xfund"]
+        self.momentum.paused = self.paused["momentum"]
+        self.scanner.paused = {"carry": self.paused["carry"], "signals": self.paused["signals"]}
+
+    def _load_paused(self) -> None:
+        kv_get = getattr(self._db, "kv_get", None) if self._db is not None else None
+        if kv_get is not None:
+            try:
+                saved = dict(kv_get(_PAUSED_KEY) or {})
+                self.paused.update({k: bool(saved.get(k, False)) for k in STRATEGIES})
+            except Exception:  # noqa: BLE001
+                log.exception("basis: pause state not loaded")
+        self._apply_paused()
+
+    def _set_paused(self, strategy: str, value: bool) -> None:
+        if strategy not in STRATEGIES:
+            raise ValueError(f"unknown strategy {strategy!r} (known: {', '.join(STRATEGIES)})")
+        self.paused[strategy] = value
+        self._apply_paused()
+        kv_set = getattr(self._db, "kv_set", None) if self._db is not None else None
+        if kv_set is not None:
+            try:
+                kv_set(_PAUSED_KEY, dict(self.paused))
+            except Exception:  # noqa: BLE001
+                log.exception("basis: pause state not saved")
+
+    def close_all(self, strategy: str) -> dict[str, Any]:
+        """Close every open (virtual) position of the strategy by market and stop its new entries."""
+        self._set_paused(strategy, True)
+        reason = "closed by owner"
+        if strategy == "xfund":
+            n = self.xfund.close_all(reason)
+        elif strategy == "momentum":
+            n = self.momentum.close_all(reason)
+        else:
+            n = self.scanner.close_all(carry=strategy == "carry", reason=reason)
+        log.info("basis: owner closed %d open position(s) of %s; new entries paused", n, strategy)
+        return {"closed": n, "paused": True}
+
+    def resume(self, strategy: str) -> dict[str, Any]:
+        self._set_paused(strategy, False)
+        log.info("basis: owner resumed %s", strategy)
+        return {"paused": False}
+
     def balance(self) -> dict[str, Any]:
-        """One plus / minus number per strategy (finished trades + open positions if closed now) and the total."""
+        """One plus / minus number per strategy (finished trades + open positions if closed now) and the
+        total of the strategies that are in use (a switched-off one stays visible, outside the total)."""
         parts = {"xfund": self.xfund.balance(), "momentum": self.momentum.balance(),
                  "carry": self.scanner.balance(carry=True), "signals": self.scanner.balance(carry=False)}
         parts["signals"]["switched_off"] = not bool(getattr(self._settings, "basis_train_all_signals", False))
+        for name, p in parts.items():
+            p["in_total"] = not p.get("switched_off", False)
+            p["paused"] = self.paused[name]
         keys = ("closed_quote", "open_quote", "total_quote", "in_use_quote")
-        parts["total"] = {k: sum(p[k] for name, p in parts.items()) for k in keys}
+        parts["total"] = {k: sum(p[k] for p in parts.values() if p["in_total"]) for k in keys}
         return parts
 
     def snapshot(self, history_limit: int = 300) -> dict[str, Any]:
@@ -359,6 +415,7 @@ class BasisRunner:
             "stats": self.scanner.stats(),
             "trades": self.scanner.trades(200),
             "balance": self.balance(),
+            "paused": dict(self.paused),
             "xfund": {"stats": self.xfund.stats(), "candidates": self.xfund.candidates,
                       "trades": self.xfund.trades(100)},
             "momentum": {"stats": self.momentum.stats(), "status": self.momentum.status(),

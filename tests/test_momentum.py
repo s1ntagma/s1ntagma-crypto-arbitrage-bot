@@ -239,3 +239,16 @@ def test_a_resumed_position_past_its_max_hold_closes_at_the_first_fresh_price(tm
     m.step(100.7)
     t = m.trades()[0]
     assert t["status"] == "closed" and t["exit_reason"] == "max hold"
+
+
+def test_close_all_closes_the_position_and_the_pause_blocks_new_entries():
+    m = M(mom_cooldown_s=1.0)
+    warm(m)
+    m.path(100.0, 100.8, 600)
+    m.m.paused = True
+    assert m.m.close_all("closed by owner") == 1
+    m.step(100.8)
+    t = m.trades()[0]
+    assert t["status"] == "closed" and t["exit_reason"] == "closed by owner" and t["position_quote"] == pytest.approx(1000.0, rel=1e-3)
+    m.path(100.8, 102.5, 600)
+    assert len(m.trades()) == 1  # paused

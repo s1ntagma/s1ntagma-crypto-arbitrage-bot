@@ -75,6 +75,7 @@ class MomTrade:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["side"] = "long" if self.direction > 0 else "short"
+        d["position_quote"] = (self.entry_qty or self.target_qty) * self.entry_px if self.entry_px else None
         return d
 
 
@@ -106,6 +107,7 @@ class Momentum:
         self._ids = itertools.count(1)
         self._series: dict[tuple[str, str], _Series] = {}  # (asset, venue)
         self._cooldown: dict[str, float] = {}  # asset -> mono time until which no new entry
+        self.paused = False  # owner's button: no new entries until resumed
         self._load()
 
     def _f(self, name: str, default: float) -> float:
@@ -200,7 +202,7 @@ class Momentum:
                 cond = w * d >= entry and tr * d >= trend
                 fired = cond and not sr.armed[d]
                 sr.armed[d] = cond
-                if not fired or sr is not lead:
+                if not fired or sr is not lead or self.paused:
                     continue
                 if now < self._cooldown.get(asset, float("-inf")) or \
                         any(t.asset == asset and t.status in _ACTIVE for t in self._trades):
@@ -240,6 +242,8 @@ class Momentum:
             t.qty, t.entry_qty, t.entry_px, t.best_px = q, q, px, px
             t.partial = q < t.target_qty * (1.0 - 1e-9)
             t.status, t.opened_ts, t.opened_mono, t.last_fresh_mono = "open", self._clock.wall(), now, now
+            if self.paused:  # the owner closed everything while this entry was filling
+                t.status, t.exit_reason = "closing", "closed by owner"
             self._save(t)
             return
         p = self.sc._pairs.get((t.venue, t.asset))
@@ -361,6 +365,16 @@ class Momentum:
                 d["open_net_quote"] = None
             out.append(d)
         return out
+
+    def close_all(self, reason: str = "closed by owner") -> int:
+        """Owner's button: every open position sells by market on its next fresh book."""
+        n = 0
+        for t in self._trades:
+            if t.status == "open":
+                t.status, t.exit_reason = "closing", reason
+                self._save(t)
+                n += 1
+        return n
 
     def balance(self) -> dict[str, Any]:
         """Plus or minus of the strategy in one number: finished trades + open positions if closed now."""
